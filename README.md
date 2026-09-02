@@ -4,13 +4,23 @@ One command from a repo URL to an instrumented, measurable app host.
 
 **Contest playbook — phases, team rules, failure modes: [`RUNBOOK.md`](RUNBOOK.md).**
 
-    ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target]
+## Install
 
-That clones, probes the server, installs `alp` + `pt-query-digest`, and turns on
-LTSV nginx logging + `long_query_time=0`. Then you fill one line (`BENCH_CMD`)
-and you're in the loop.
+    curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
 
-Put it on PATH: `ln -s "$PWD/isukit" ~/bin/isukit` (or just call it by path).
+Clones/updates into `${ISUKIT_HOME:-$HOME/.isukit-src}` and symlinks `isukit`
+onto PATH. Args after the script forward to the freshly installed `isukit`, so
+this is also a genuine one-liner from zero to a probed, instrumented host:
+
+    curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh \
+      | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
+
+    ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port]
+
+That clones, probes the server, installs `alp` + `pt-query-digest`, turns on
+LTSV nginx logging + `long_query_time=0`, and composes `BENCH_CMD` by reading
+the benchmarker binary's own `--help`. Sanity-check that line, then you're in
+the loop.
 
 ## The loop
 
@@ -68,10 +78,10 @@ machine:
 - nginx log path and config files from `nginx -T`, not a guessed path.
 - Go module dir by finding `go.mod` (excluding `bench*` and vendor).
 
-The one thing it can't discover is how to invoke the benchmarker — the flags
-share no common contract across years. So `BENCH_CMD` is a config line you paste
-from that year's README. `isukit init` greps the repo for the likely README
-sections to save you the hunt.
+The benchmarker invocation is the same story: no common flag contract across
+years, so `isukit probe` (via `isukit benchprobe`) finds the benchmarker binary
+under `/home/isucon` on `$BENCH`, reads its own `--help`, and composes
+`BENCH_CMD` from that — see "BENCH_CMD is auto-composed, verify it" below.
 
 **Known limit:** app-unit selection is a scored heuristic (workdir under
 `/home/isucon`, exec path, env file, running user, ...), not a certainty — an
@@ -109,6 +119,14 @@ contests coexist without stepping on each other.
 
 ## Caveats
 
+- **BENCH_CMD is auto-composed, verify it.** `isukit benchprobe` picks the
+  largest ELF binary under `/home/isucon` matching a benchmarker-ish name,
+  reads its `--help`, and builds `sudo -iu <owner> sh -c '...'` from whatever
+  target/nameserver flags it finds — this is the line most likely to need
+  human correction. `.isukit/bench-help.txt` holds the full flag list it was
+  read from. Fix it with `isukit benchcmd '<command>'` (no argument prints the
+  current value); `isukit benchprobe` never overwrites a `BENCH_CMD` you've
+  already set.
 - `logs on` rewrites `/etc/nginx` after backing it up to `/etc/nginx.isukit.bak`;
   `logs off` restores that backup wholesale. If the web server isn't nginx,
   `probe` warns and `logs` does nothing for the web tier.

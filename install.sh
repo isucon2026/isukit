@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# isukit installer.
+#   curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
+# Args after the script (via `bash -s --`) are forwarded to the freshly
+# installed isukit, so this also works as a one-shot:
+#   curl -fsSL .../install.sh | bash -s -- go <repo-url> ubuntu@1.2.3.4 -i ~/.ssh/key.pem
+set -euo pipefail
+
+REPO_URL="https://github.com/mako-for-it/isukit"
+SRC="${ISUKIT_HOME:-$HOME/.isukit-src}"
+
+say()  { printf '\033[36m:: %s\033[0m\n' "$*" >&2; }
+warn() { printf '\033[33m~~ %s\033[0m\n' "$*" >&2; }
+die()  { printf '\033[31m!! %s\033[0m\n' "$*" >&2; exit 1; }
+
+command -v git >/dev/null 2>&1 || die "git is required"
+
+if [ -d "$SRC/.git" ]; then
+  say "updating $SRC"
+  git -C "$SRC" pull --ff-only
+else
+  say "cloning $REPO_URL to $SRC"
+  git clone "$REPO_URL" "$SRC"
+fi
+
+pick_bin_dir() {
+  if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+    if [ -w "$HOME/.local/bin" ]; then printf '%s\n' "$HOME/.local/bin"; return; fi
+  fi
+  if [ -w /usr/local/bin ] 2>/dev/null; then printf '%s\n' /usr/local/bin; return; fi
+  if [ -t 0 ] && command -v sudo >/dev/null 2>&1; then printf '%s\n' /usr/local/bin__sudo; return; fi
+  mkdir -p "$HOME/.local/bin"
+  printf '%s\n' "$HOME/.local/bin"
+}
+
+BIN_DIR=$(pick_bin_dir)
+NEED_SUDO=0
+if [ "$BIN_DIR" = "/usr/local/bin__sudo" ]; then
+  BIN_DIR=/usr/local/bin
+  NEED_SUDO=1
+fi
+
+LINK="$BIN_DIR/isukit"
+if [ "$NEED_SUDO" = 1 ]; then
+  sudo ln -sf "$SRC/isukit" "$LINK"
+else
+  mkdir -p "$BIN_DIR"
+  ln -sf "$SRC/isukit" "$LINK"
+fi
+say "linked $LINK -> $SRC/isukit"
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) warn "$BIN_DIR is not on PATH — add:"; printf '    export PATH="%s:$PATH"\n' "$BIN_DIR" >&2 ;;
+esac
+
+VERSION=$(grep -m1 '^KIT_VERSION=' "$SRC/isukit" | cut -d= -f2)
+say "installed: $LINK (KIT_VERSION=$VERSION)"
+
+if [ "$#" -gt 0 ]; then
+  exec "$LINK" "$@"
+fi

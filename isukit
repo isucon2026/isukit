@@ -52,8 +52,9 @@ cmd_init() {
 # isukit config — edit APP/BENCH after 'isukit host', BENCH_CMD after 'isukit probe'
 APP=local          # ssh target of the app server (the one you tune), or 'local'
 BENCH=local        # ssh target of the bench server (the one that scores you)
-# Run verbatim on \$BENCH. Fill this from the repo README — the flag names differ
-# every single year (-target / -target-url / -target-host / -target-addr / ...).
+# Run verbatim on \$BENCH. Auto-composed by 'isukit probe' (see 'isukit benchprobe')
+# from the benchmarker binary's own --help output — verify it, the flag names
+# differ every year. Set/override by hand with: isukit benchcmd '<command>'
 BENCH_CMD=''
 SSH_OPTS=''        # extra ssh/scp flags, e.g. '-F ./ssh_config' or '-i ~/key.pem -p 2222'
 EXTRA_UNITS=''     # space-separated extra units 'restart'/'finalize' also restart
@@ -233,8 +234,8 @@ cmd_probe() {
   fi
   [ "${WEB_SERVER:-}" != "nginx" ] && warn "web server is '${WEB_SERVER:-none}', not nginx — 'isukit logs' handles nginx only; profile at the app layer instead"
   [ "${MYSQL_OK:-0}" != "1" ] && warn "cannot reach mysql as root over socket — slow-log automation is off"
-  grep -q "^BENCH_CMD=''" "$CONF" && warn "BENCH_CMD is empty — set it in $CONF from the repo README (flags differ every year)"
   say "manifest written to $STATE/manifest"
+  cmd_benchprobe
 }
 
 cmd_unit() {
@@ -247,6 +248,145 @@ cmd_unit() {
   fi
   say "APP_UNIT_OVERRIDE = $name — re-probing"
   cmd_probe
+}
+
+# ---------------------------------------------------------------- benchprobe
+# The other thing that varies every year: how to invoke the benchmarker.
+# Same discipline as PROBE_SCRIPT — read it off the binary's own --help,
+# never a per-year lookup table.
+BENCH_PROBE_SCRIPT='
+set -u
+S() { printf "%s=%s\n" "$1" "$(printf "%q" "$2")"; }
+
+CANDS=""
+for f in $(find /home/isucon -maxdepth 4 -type f -perm -u+x 2>/dev/null); do
+  case "$f" in
+    */src/*) continue ;;
+    */vendor/*) continue ;;
+    *.go) continue ;;
+  esac
+  b=$(basename "$f")
+  hit=0
+  case "$b" in
+    bench) hit=1 ;;
+    bench_*) hit=1 ;;
+    benchmarker) hit=1 ;;
+    *bench*_linux_*) hit=1 ;;
+  esac
+  [ "$hit" = 1 ] && CANDS="$CANDS $f"
+done
+CANDS="${CANDS# }"
+S BENCH_CANDIDATES "$CANDS"
+
+BEST=""; BESTSIZE=-1
+for f in $CANDS; do
+  if file "$f" 2>/dev/null | grep -q ELF; then
+    sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    [ "$sz" -gt "$BESTSIZE" ] && BEST="$f" && BESTSIZE="$sz"
+  fi
+done
+if [ -z "$BEST" ]; then
+  for f in $CANDS; do
+    sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    [ "$sz" -gt "$BESTSIZE" ] && BEST="$f" && BESTSIZE="$sz"
+  done
+fi
+S BENCH_BIN "$BEST"
+if [ -n "$BEST" ]; then
+  S BENCH_DIR   "$(dirname "$BEST")"
+  S BENCH_OWNER "$(stat -c %U "$BEST" 2>/dev/null || echo isucon)"
+fi
+
+HELP=""
+if [ -n "$BEST" ]; then
+  HELP="$("$BEST" --help 2>&1 | head -200)"
+  [ -n "$HELP" ] || HELP="$("$BEST" -h 2>&1 | head -200)"
+  [ -n "$HELP" ] || HELP="$("$BEST" help 2>&1 | head -200)"
+fi
+HELPFILE="/tmp/isukit-bench-help.$$"
+printf "%s\n" "$HELP" > "$HELPFILE"
+S BENCH_HELP_FILE "$HELPFILE"
+
+has_tok() {
+  printf "%s\n" "$HELP" | grep -Eq "(^|[^A-Za-z0-9-])$1([^A-Za-z0-9-]|\$)"
+}
+
+TFLAG=""
+for f in -target-addr -target-url --target-url -target-host --target -target --addr -addr; do
+  if [ -z "$TFLAG" ] && has_tok "$f"; then TFLAG="$f"; fi
+done
+S BENCH_TARGET_FLAG "$TFLAG"
+
+NS=0; NSFLAG=""
+if has_tok --nameserver; then NS=1; NSFLAG="--nameserver"; fi
+if [ "$NS" = 0 ] && has_tok -nameserver; then NS=1; NSFLAG="-nameserver"; fi
+S BENCH_HAS_NAMESERVER "$NS"
+S BENCH_NAMESERVER_FLAG "$NSFLAG"
+
+SSL=0
+has_tok --enable-ssl && SSL=1
+has_tok -tls && SSL=1
+S BENCH_HAS_SSL_FLAG "$SSL"
+
+SUB=""
+if printf "%s\n" "$HELP" | grep -Eq "^(COMMANDS:|Available Commands:)"; then
+  has_tok run && SUB="run"
+fi
+S BENCH_SUBCMD "$SUB"
+'
+
+cmd_benchprobe() {
+  load
+  say "probing benchmarker on $BENCH"
+  printf '%s\n' "$BENCH_PROBE_SCRIPT" | rsh_stdin "$BENCH" > "$STATE/bench-manifest.tmp" || die "benchprobe failed"
+  mv "$STATE/bench-manifest.tmp" "$STATE/bench-manifest"
+  cat "$STATE/bench-manifest"
+  echo
+  . "$STATE/bench-manifest"
+
+  if [ -z "${BENCH_BIN:-}" ]; then
+    warn "no benchmarker binary found under /home/isucon on $BENCH — normal if it lives elsewhere or off-host; set BENCH_CMD by hand"
+    return 0
+  fi
+
+  if [ -n "${BENCH_HELP_FILE:-}" ]; then
+    rpull "$BENCH" "$BENCH_HELP_FILE" "$STATE/bench-help.txt" 2>/dev/null || warn "could not pull help text ($BENCH_HELP_FILE)"
+  fi
+
+  local binbase cmdline
+  binbase=$(basename "$BENCH_BIN")
+  cmdline="cd ${BENCH_DIR:-.} && ./$binbase"
+  [ -n "${BENCH_SUBCMD:-}" ] && cmdline="$cmdline $BENCH_SUBCMD"
+  case "${BENCH_TARGET_FLAG:-}" in
+    *-addr) cmdline="$cmdline $BENCH_TARGET_FLAG 127.0.0.1:443" ;;
+    *) ;;
+  esac
+  [ "${BENCH_HAS_NAMESERVER:-0}" = "1" ] && cmdline="$cmdline ${BENCH_NAMESERVER_FLAG:---nameserver} 127.0.0.1"
+
+  local composed="sudo -iu ${BENCH_OWNER:-isucon} sh -c '$cmdline'"
+  say "composed BENCH_CMD (auto, from the binary's own --help):"
+  printf '    %s\n' "$composed"
+  warn "unverified — see $STATE/bench-help.txt for the full flag list if this needs correcting"
+
+  if grep -q "^BENCH_CMD=''" "$CONF" 2>/dev/null; then
+    cmd_benchcmd "$composed"
+  else
+    warn "BENCH_CMD already set in $CONF — leaving it, the line above is FYI only"
+  fi
+}
+
+cmd_benchcmd() {
+  need_state
+  local line="${1:-}"
+  if [ -z "$line" ]; then
+    ( . "$CONF" 2>/dev/null; printf '%s\n' "${BENCH_CMD:-}" )
+    return 0
+  fi
+  local q r
+  q=$(printf '%s' "$line" | sed "s/'/'\\\\''/g")
+  r=$(printf '%s' "$q" | sed 's/[\&|]/\\&/g')
+  sed -i.bak "s|^BENCH_CMD=.*|BENCH_CMD='$r'|" "$CONF"; rm -f "$CONF.bak"
+  say "BENCH_CMD = $line"
 }
 
 # ---------------------------------------------------------------- tools
@@ -483,12 +623,76 @@ cmd_finalize() {
 }
 
 # ---------------------------------------------------------------- one-shot
+go_ssh_host_block() { # go_ssh_host_block <alias> <user@host|host> <keyfile> <port>
+  local alias="$1" target="$2" key="$3" port="$4" user="" host="$target"
+  if [ "${target#*@}" != "$target" ]; then
+    user="${target%%@*}"
+    host="${target#*@}"
+  fi
+  printf 'Host %s\n' "$alias"
+  printf '  HostName %s\n' "$host"
+  [ -n "$user" ] && printf '  User %s\n' "$user"
+  [ -n "$key" ]  && printf '  IdentityFile %s\n' "$key"
+  [ -n "$port" ] && printf '  Port %s\n' "$port"
+  printf '  StrictHostKeyChecking accept-new\n'
+}
+
+abspath() { # abspath <path> -- resolve to an absolute path without requiring it to exist
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    "~"*) printf '%s\n' "$HOME${1#\~}" ;;
+    *) printf '%s/%s\n' "$(cd "$(dirname "$1")" 2>/dev/null && pwd || pwd)" "$(basename "$1")" ;;
+  esac
+}
+
 cmd_go() {
-  local url="${1:-}" apph="${2:-}" benchh="${3:-}"
-  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit go <repo-url> <app-ssh-target> [bench-ssh-target]"
+  local url="${1:-}" apph="${2:-}"
+  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port] [--ssh-opts 'raw']"
+  shift 2 || true
+
+  local benchh="" keyfile="" port="" raw_opts=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -i)
+        [ "$#" -ge 2 ] || die "-i needs a keyfile argument"
+        keyfile="$2"; shift 2 ;;
+      -p)
+        [ "$#" -ge 2 ] || die "-p needs a port argument"
+        port="$2"; shift 2 ;;
+      --ssh-opts)
+        [ "$#" -ge 2 ] || die "--ssh-opts needs an argument"
+        raw_opts="$2"; shift 2 ;;
+      -*)
+        die "unknown flag to 'isukit go': $1" ;;
+      *)
+        [ -z "$benchh" ] || die "unexpected extra argument: $1"
+        benchh="$1"; shift ;;
+    esac
+  done
+
   cmd_init "$url"
   cmd_host app "$apph"
   cmd_host bench "${benchh:-$apph}"
+
+  if [ -n "$keyfile" ] || [ -n "$port" ]; then
+    local abskey=""
+    [ -n "$keyfile" ] && abskey=$(abspath "$keyfile")
+    {
+      go_ssh_host_block isukit-app "$apph" "$abskey" "$port"
+      printf '\n'
+      go_ssh_host_block isukit-bench "${benchh:-$apph}" "$abskey" "$port"
+    } > "$STATE/ssh_config"
+    chmod 600 "$STATE/ssh_config" 2>/dev/null || true
+    local ssh_opts_line="-F $STATE/ssh_config"
+    [ -n "$raw_opts" ] && ssh_opts_line="$ssh_opts_line $raw_opts"
+    cmd_host app "isukit-app" "$ssh_opts_line"
+    cmd_host bench "isukit-bench" "$ssh_opts_line"
+    say "ssh config written to $STATE/ssh_config (aliases isukit-app / isukit-bench)"
+  elif [ -n "$raw_opts" ]; then
+    cmd_host app "$apph" "$raw_opts"
+    cmd_host bench "${benchh:-$apph}" "$raw_opts"
+  fi
+
   cmd_probe
   cmd_setup
   cmd_logs on
@@ -499,7 +703,12 @@ usage() { cat >&2 <<'EOF'
 isukit — repo-agnostic ISUCON bootstrap + measurement loop
 
   ONE COMMAND
-    isukit go <repo-url> <app-host> [bench-host]   clone, probe, install tools, enable logs
+    isukit go <repo-url> <app-host> [bench-host] [-i keyfile] [-p port] [--ssh-opts 'raw']
+                                         clone, probe, install tools, enable logs
+                                         -i/-p write .isukit/ssh_config (aliases
+                                         isukit-app/isukit-bench) and set SSH_OPTS
+                                         to '-F .isukit/ssh_config' for you — solves
+                                         the ssh -p / scp -P mismatch below
 
   SETUP
     isukit init <repo-url> [dir]        clone + create .isukit/
@@ -508,7 +717,11 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          '-F ./ssh_config' or '-i ~/key.pem -p 2222'
                                          note: scp needs -P for port, not -p — if you
                                          hand-edit SSH_OPTS for a custom port, check both
-    isukit probe                        interrogate the server, write .isukit/manifest
+    isukit probe                        interrogate the server, write .isukit/manifest,
+                                         then auto-probe + compose BENCH_CMD (see below)
+    isukit benchprobe                   (re-)probe the benchmarker binary on $BENCH and
+                                         compose BENCH_CMD from its own --help output
+    isukit benchcmd ['<command>']       set BENCH_CMD by hand; no arg prints current value
     isukit unit <systemd-unit-name>     override the auto-detected app unit, re-probe
     isukit setup                        install alp + pt-query-digest on the app host
 
@@ -544,6 +757,8 @@ main() {
     init)     cmd_init "$@" ;;
     host)     cmd_host "$@" ;;
     probe)    cmd_probe ;;
+    benchprobe) cmd_benchprobe ;;
+    benchcmd) cmd_benchcmd "$@" ;;
     unit)     cmd_unit "$@" ;;
     setup)    cmd_setup ;;
     logs)     cmd_logs "$@" ;;
