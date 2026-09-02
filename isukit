@@ -80,14 +80,44 @@ rpull() { # rpull <host> <remote-path> <local-path>
 }
 
 # ---------------------------------------------------------------- init
+norm_git_url() { # norm_git_url <url> -- drop trailing slash/.git so equivalent URLs compare equal
+  local u="$1"
+  u="${u%/}"
+  u="${u%.git}"
+  printf '%s' "$u"
+}
+
 cmd_init() {
   local url="${1:-}"; [ -n "$url" ] || die "usage: isukit init <repo-url> [dir]"
   local dir="${2:-$(basename "$url" .git)}"
-  [ -d "$dir" ] || git clone "$url" "$dir"
+  if [ -d "$dir" ]; then
+    # re-run safety: reuse a matching clone, refuse to touch anything else.
+    if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+      local origin
+      origin=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+      if [ -z "$origin" ]; then
+        die "'$dir' exists and is a git repo but has no 'origin' remote (looks like a partial/failed clone) — inspect or move it aside by hand, then retry"
+      elif [ "$(norm_git_url "$origin")" = "$(norm_git_url "$url")" ]; then
+        say "reusing existing repo at '$dir' (origin already matches $url)"
+        git -C "$dir" fetch --quiet 2>/dev/null || warn "fetch failed (offline?) — continuing with the existing local state"
+      else
+        die "'$dir' already exists as a git repo with a different origin ('$origin', requested '$url') — pick a different directory or resolve it by hand"
+      fi
+    else
+      die "'$dir' already exists and is not a git repo — pick a different directory or resolve it by hand"
+    fi
+  else
+    git clone "$url" "$dir"
+  fi
   cd "$dir"
   mkdir -p "$STATE"
   git rev-parse --verify work >/dev/null 2>&1 || git switch -c work >/dev/null 2>&1 || true
-  [ -f "$CONF" ] || cat > "$CONF" <<EOF
+  if [ -f "$CONF" ]; then
+    local kept
+    kept=$( . "$CONF" 2>/dev/null; printf 'APP=%s BENCH=%s BENCH_CMD=%s' "${APP:-local}" "${BENCH:-local}" "${BENCH_CMD:+<already set, kept>}" )
+    say "existing $CONF kept as-is ($kept)"
+  else
+    cat > "$CONF" <<EOF
 # isukit config — edit APP/BENCH after 'isukit host', BENCH_CMD after 'isukit probe'
 APP=local          # ssh target of the app server (the one you tune), or 'local'
 BENCH=local        # ssh target of the bench server (the one that scores you)
@@ -98,6 +128,7 @@ BENCH_CMD=''
 SSH_OPTS=''        # extra ssh/scp flags, e.g. '-F ./ssh_config' or '-i ~/key.pem -p 2222'
 EXTRA_UNITS=''     # space-separated extra units 'restart'/'finalize' also restart
 EOF
+  fi
   cat > "$STATE/.gitignore" <<'EOF'
 *
 EOF
