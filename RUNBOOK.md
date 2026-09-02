@@ -9,7 +9,7 @@
 
 ## 0. 三行で
 
-1. `isukit` は「計測できる状態のサーバー」を用意して、**スコアと git sha を毎回記録する**ための1枚のbashスクリプト。
+1. `isukit` は「計測できる状態のサーバー」を用意して、**スコアと git sha を毎回記録する**ための1枚のbashスクリプト。インストールは `curl | bash` の1行（§1）。
 2. サーバーは**自分のAWSアカウントでEC2を立てる**。本番も練習も同じ形。
 3. 3人で触るなら**最初の5分で自分たちのリポジトリを作る**（§3）。ここを飛ばすと並行作業できない。
 
@@ -19,10 +19,22 @@
 
 **bash 1枚**。依存なし。配布元は https://github.com/mako-for-it/isukit （public）。
 
+インストールは1行。
+
 ```
-git clone https://github.com/mako-for-it/isukit.git ~/isukit
-export PATH="$HOME/isukit:$PATH"      # または ln -s ~/isukit/isukit /usr/local/bin/isukit
+curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
 ```
+
+`~/.isukit-src` に clone して、`isukit` を PATH の通る場所に置く。2回目以降は更新になる。PATH が通っていなければ、追加すべき `export` 行をそのまま出力するのでそれを貼る。
+
+**インストールと立ち上げを丸ごと1行**にもできる（`--` の後ろはそのまま `isukit` に渡る）。
+
+```
+curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh \
+  | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/<key>.pem
+```
+
+これで clone → サーバー調査 → `alp`/`pt-query-digest` 導入 → 計測ログ有効化 → **ベンチマーカーの発見と `BENCH_CMD` の自動生成**まで終わる。手で入れる値は3つだけ：**リポジトリURL、サーバーのIP、鍵のパス**。それ以外は全部サーバーに聞いて決まる。
 
 やることは4つだけ。
 
@@ -35,7 +47,7 @@ export PATH="$HOME/isukit:$PATH"      # または ln -s ~/isukit/isukit /usr/loc
 
 **なぜリポジトリを読まずにサーバーに聞くのか**：ISUCONのリポジトリ構成は年ごとに何も安定していない。Goのディレクトリ名（`webapp/go` か `webapp/golang`）、ビルド方法（Make → Taskfile → 無し）、docker composeの有無、unit名、envファイルの場所と変数名、ベンチのフラグ名 — 全部違う。systemdに問い合わせるのが全年代で唯一通用する手。
 
-**唯一自動で分からないのが `BENCH_CMD`**。ベンチマーカーのターゲット指定フラグは毎年違う（`-target` / `-target-url` / `-target-host` / `-target-addr` / `--target`）。ここは手で埋める。
+**`BENCH_CMD` は自動生成される。ただし唯一「人間が直す可能性が高い」行**でもある。ベンチマーカーのターゲット指定フラグは毎年違う（`-target` / `-target-url` / `-target-host` / `-target-addr` / `--target`）ので、isukit は**ベンチマーカーのバイナリ自身の `--help` を読んで**使えるフラグを判定し、コマンド行を組み立てて表示する。違っていたら `isukit benchcmd '<正しい行>'` で上書きする（エディタ不要）。使えるフラグの全一覧は `.isukit/bench-help.txt` に落ちている。
 
 コンテストごとの状態は clone した各リポジトリの中の `.isukit/` に入るので、複数のコンテストを並行して持てる。
 
@@ -118,16 +130,12 @@ aws ec2 describe-instances --filters Name=tag:purpose,Values=isucon-practice \
 
 #### isukit に渡す `<app-host>`
 
-`<app-host>` は **ssh の宛先文字列そのもの**。`ubuntu@<Public IP>` を渡し、鍵は `SSH_OPTS` に書く：
+`<app-host>` は **ssh の宛先文字列そのもの**。`ubuntu@<Public IP>` を渡し、鍵は `-i` で渡す：
 
 ```
-isukit host app  ubuntu@43.207.152.140
-isukit host bench ubuntu@43.207.152.140      # 練習で1台に寄せる場合は app と同じでよい
-$EDITOR .isukit/config
-#   SSH_OPTS='-i ~/.ssh/isukit-sandbox.pem'
+isukit host app   ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem
+isukit host bench ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem   # 練習で1台に寄せる場合は app と同じでよい
 ```
-
-`~/.ssh/config` に書いてしまうなら `Host isu13` の別名を作って `isukit host app isu13` でもよい。どちらでも `isukit` は気にしない。
 
 #### 台数
 
@@ -360,6 +368,8 @@ isukit finalize          # logs off → 再起動 → unitの復帰確認 → �
 | MySQLの自動化が動かない | ソケット経由のパスワード無し `sudo mysql` が必要。無ければ `probe` が `MYSQL_OK=0` と報告する |
 | 鍵やポートが特殊 | `.isukit/config` の `SSH_OPTS` が全 `ssh`/`scp` に渡る。**`ssh` は `-p <port>`、`scp` は `-P <port>`** で違う点に注意 |
 | インフラを変えた | `isukit probe` を打ち直す。manifestは他の全コマンドが読んでいる |
+| `BENCH_CMD` が自動生成されたが動かない | `.isukit/bench-help.txt` に本物のフラグ一覧がある。直したら `isukit benchcmd '<行>'`。`isukit bench` は失敗しても生ログを `.isukit/bench-*.log` に残す |
+| ベンチマーカーが見つからない | ベンチが別ホストにある構成では正常。`isukit host bench <target>` を設定して `isukit benchprobe` を打ち直す |
 
 ---
 
@@ -386,9 +396,12 @@ isukit finalize          # logs off → 再起動 → unitの復帰確認 → �
 ## 9. コマンド早見表
 
 ```
+isukit go <repo-url> <host> -i <鍵>   # 丸ごと1コマンド：clone→probe→setup→logs→benchprobe
 isukit init <repo-url> [dir]   # clone（既存ディレクトリはそのまま採用）＋ work ブランチ
 isukit host app|bench <target> # ssh先を .isukit/config に設定（'local' も可）
 isukit probe                   # サーバーを調査して .isukit/manifest を書く。インフラ変更後は毎回
+isukit benchprobe              # ベンチマーカーを発見して BENCH_CMD を自動生成（probe が自動で呼ぶ）
+isukit benchcmd '<行>'         # BENCH_CMD を手で上書き／引数なしで現在値を表示
 isukit unit <unit名>           # probe のunit選択を手で上書き
 isukit logs on|off             # nginx LTSV ＋ MySQLスローログ
 isukit bench "メモ"            # スコア＋git sha を .isukit/scores.tsv に記録
@@ -404,8 +417,10 @@ isukit finalize                # 終盤の締め処理一式
 **ファイル**（全部 git-ignore 済み、各リポジトリの `.isukit/` の中）
 
 ```
-.isukit/config        APP, BENCH, BENCH_CMD, SSH_OPTS, EXTRA_UNITS   ← 手で編集する
-.isukit/manifest      probe の結果。他の全コマンドが読む
-.isukit/scores.tsv    日時 / sha / スコア / メモ / 生ログのパス
-.isukit/bench-*.log   実行ごとのベンチ出力そのまま
+.isukit/config         APP, BENCH, BENCH_CMD, SSH_OPTS, EXTRA_UNITS   ← go/benchprobe が書き、benchcmd で直す
+.isukit/manifest       probe の結果。他の全コマンドが読む
+.isukit/scores.tsv     日時 / sha / スコア / メモ / 生ログのパス
+.isukit/bench-*.log    実行ごとのベンチ出力そのまま
+.isukit/bench-help.txt ベンチマーカーの --help 全文
+.isukit/ssh_config     `go -i` が書く ssh 設定
 ```
