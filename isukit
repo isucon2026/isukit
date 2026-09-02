@@ -23,6 +23,16 @@ say()  { printf '\033[36m:: %s\033[0m\n' "$*" >&2; }
 warn() { printf '\033[33m~~ %s\033[0m\n' "$*" >&2; }
 
 is_blank() { [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; } # empty or whitespace-only
+normalize_ws_arg() { # normalize_ws_arg <token> -- Unicode whitespace-lookalikes -> ASCII space; ZWSP/BOM dropped
+  printf '%s' "$1" | LC_ALL=C sed \
+    -e $'s/\xc2\xa0/ /g' \
+    -e $'s/\xe3\x80\x80/ /g' \
+    -e $'s/\xe2\x80\x87/ /g' \
+    -e $'s/\xe2\x80\xaf/ /g' \
+    -e $'s/\xe2\x80\x89/ /g' \
+    -e $'s/\xe2\x80\x8b//g' \
+    -e $'s/\xef\xbb\xbf//g'
+}
 expand_tilde() { # expand_tilde <token> -- "~" or "~/..." -> $HOME/...; anything else unchanged
   case "$1" in
     "~")   printf '%s\n' "$HOME" ;;
@@ -42,13 +52,13 @@ check_keyfile() { # check_keyfile <resolved-path> -- call directly (not via $())
       || warn "$f is mode $mode (group/other-readable) and chmod 600 failed — ssh may refuse it"
   fi
 }
-looks_like_keyfile() { # looks_like_keyfile <path> -- existing file named like a key, or PEM-shaped content
+looks_like_keyfile() { # looks_like_keyfile <path> -- existing, readable, and named/shaped like a key
   local p="$1"
-  [ -f "$p" ] || return 1
+  [ -f "$p" ] && [ -r "$p" ] || return 1
   case "$p" in
     *.pem|*.key|*id_rsa) return 0 ;;
   esac
-  [ -r "$p" ] && head -c 11 "$p" 2>/dev/null | grep -q '^-----BEGIN'
+  head -c 11 "$p" 2>/dev/null | grep -q '^-----BEGIN'
 }
 
 need_state() { [ -f "$CONF" ] || die "no $CONF here. cd into the problem repo, or run: isukit init <repo-url>"; }
@@ -883,6 +893,18 @@ EOF
 exit 1; }
 
 main() {
+  local __a __norm __t __changed=0
+  local -a __new=()
+  set -f
+  for __a in "$@"; do
+    __norm=$(normalize_ws_arg "$__a")
+    [ "$__norm" = "$__a" ] || __changed=1
+    for __t in $__norm; do __new+=("$__t"); done
+  done
+  set +f
+  [ "$__changed" = "1" ] && warn "cleaned invisible whitespace (non-breaking / full-width / zero-width space, or a BOM) out of the arguments — your paste was mangled"
+  if [ "${#__new[@]}" -gt 0 ]; then set -- "${__new[@]}"; else set --; fi
+
   local c="${1:-}"; shift || true
   case "$c" in
     go)       cmd_go "$@" ;;
