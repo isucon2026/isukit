@@ -22,6 +22,35 @@ die()  { printf '\033[31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 say()  { printf '\033[36m:: %s\033[0m\n' "$*" >&2; }
 warn() { printf '\033[33m~~ %s\033[0m\n' "$*" >&2; }
 
+is_blank() { [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; } # empty or whitespace-only
+expand_tilde() { # expand_tilde <token> -- "~" or "~/..." -> $HOME/...; anything else unchanged
+  case "$1" in
+    "~")   printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s\n' "$HOME/${1#\~/}" ;;
+    *)     printf '%s\n' "$1" ;;
+  esac
+}
+check_keyfile() { # check_keyfile <resolved-path> -- call directly (not via $()) so die() aborts the script
+  local f="$1" mode g o
+  [ -f "$f" ] || die "identity file not found: $f"
+  mode=$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null || true)
+  [ -n "$mode" ] || return 0
+  g="${mode%?}"; g="${g#"${g%?}"}"
+  o="${mode#"${mode%?}"}"
+  if [ "$g" != "0" ] || [ "$o" != "0" ]; then
+    chmod 600 "$f" 2>/dev/null && say "chmod 600 $f (was $mode — ssh refuses group/other-readable keys)" \
+      || warn "$f is mode $mode (group/other-readable) and chmod 600 failed — ssh may refuse it"
+  fi
+}
+looks_like_keyfile() { # looks_like_keyfile <path> -- existing file named like a key, or PEM-shaped content
+  local p="$1"
+  [ -f "$p" ] || return 1
+  case "$p" in
+    *.pem|*.key|*id_rsa) return 0 ;;
+  esac
+  [ -r "$p" ] && head -c 11 "$p" 2>/dev/null | grep -q '^-----BEGIN'
+}
+
 need_state() { [ -f "$CONF" ] || die "no $CONF here. cd into the problem repo, or run: isukit init <repo-url>"; }
 load()       { need_state; . "$CONF"; [ -f "$STATE/manifest" ] && . "$STATE/manifest" || true; }
 
@@ -77,10 +106,24 @@ cmd_host() {
     *) die "usage: isukit host {app|bench} <ssh-target|local> [ssh opts...]" ;;
   esac
   if [ -n "$opts" ]; then
+    local w val prev="" expanded=""
+    for w in $opts; do
+      case "$w" in
+        --identity=*) val=$(expand_tilde "${w#--identity=}"); check_keyfile "$val"; w="--identity=$val" ;;
+        --key=*)      val=$(expand_tilde "${w#--key=}");      check_keyfile "$val"; w="--key=$val" ;;
+        -i=*)         val=$(expand_tilde "${w#-i=}");         check_keyfile "$val"; w="-i=$val" ;;
+        *)            w=$(expand_tilde "$w") ;;
+      esac
+      case "$prev" in
+        -i|--identity|--key) check_keyfile "$w" ;;
+      esac
+      expanded="$expanded $w"; prev="$w"
+    done
+    expanded="${expanded# }"
     local opts_q
-    opts_q=$(printf '%s' "$opts" | sed "s/'/'\\\\''/g")
+    opts_q=$(printf '%s' "$expanded" | sed "s/'/'\\\\''/g")
     sed -i.bak "s|^SSH_OPTS=.*|SSH_OPTS='$opts_q'|" "$CONF"; rm -f "$CONF.bak"
-    say "SSH_OPTS = $opts"
+    say "SSH_OPTS = $expanded"
   fi
   say "$role = $target"
 }
@@ -222,7 +265,8 @@ cmd_probe() {
   local override
   override=$( . "$CONF" 2>/dev/null; printf '%s' "${APP_UNIT_OVERRIDE:-}" )
   say "probing app host: $APP"
-  printf 'APP_UNIT_OVERRIDE=%s\n%s\n' "$override" "$PROBE_SCRIPT" | rsh_stdin "$APP" > "$STATE/manifest.tmp" || die "probe failed"
+  printf 'APP_UNIT_OVERRIDE=%s\n%s\n' "$override" "$PROBE_SCRIPT" | rsh_stdin "$APP" > "$STATE/manifest.tmp" \
+    || die "probe failed — check connectivity by hand: ssh ${SSH_OPTS:-} $APP true"
   mv "$STATE/manifest.tmp" "$STATE/manifest"
   cat "$STATE/manifest"
   echo
@@ -338,14 +382,15 @@ S BENCH_SUBCMD "$SUB"
 cmd_benchprobe() {
   load
   say "probing benchmarker on $BENCH"
-  printf '%s\n' "$BENCH_PROBE_SCRIPT" | rsh_stdin "$BENCH" > "$STATE/bench-manifest.tmp" || die "benchprobe failed"
+  printf '%s\n' "$BENCH_PROBE_SCRIPT" | rsh_stdin "$BENCH" > "$STATE/bench-manifest.tmp" \
+    || die "benchprobe failed — check connectivity by hand: ssh ${SSH_OPTS:-} $BENCH true"
   mv "$STATE/bench-manifest.tmp" "$STATE/bench-manifest"
   cat "$STATE/bench-manifest"
   echo
   . "$STATE/bench-manifest"
 
   if [ -z "${BENCH_BIN:-}" ]; then
-    warn "no benchmarker binary found under /home/isucon on $BENCH — normal if it lives elsewhere or off-host; set BENCH_CMD by hand"
+    warn "no benchmarker binary found under /home/isucon on $BENCH — normal if it lives elsewhere or off-host; set it by hand: isukit benchcmd '<command>'"
     return 0
   fi
 
@@ -366,7 +411,7 @@ cmd_benchprobe() {
   local composed="sudo -iu ${BENCH_OWNER:-isucon} sh -c '$cmdline'"
   say "composed BENCH_CMD (auto, from the binary's own --help):"
   printf '    %s\n' "$composed"
-  warn "unverified — see $STATE/bench-help.txt for the full flag list if this needs correcting"
+  warn "unverified — see $STATE/bench-help.txt for the full flag list; if this needs correcting: isukit benchcmd '<corrected command>'"
 
   if grep -q "^BENCH_CMD=''" "$CONF" 2>/dev/null; then
     cmd_benchcmd "$composed"
@@ -480,7 +525,12 @@ cmd_logs() {
 # ---------------------------------------------------------------- bench
 cmd_bench() {
   load
-  [ -n "${BENCH_CMD:-}" ] || die "BENCH_CMD is empty in $CONF — fill it from the repo README"
+  if [ -z "${BENCH_CMD:-}" ]; then
+    warn "BENCH_CMD is empty in $CONF — attempting to auto-compose it"
+    cmd_benchprobe
+    load
+    [ -n "${BENCH_CMD:-}" ] || die "BENCH_CMD is still empty after benchprobe — set it by hand: isukit benchcmd '<command>'"
+  fi
   local note="${*:-}"
   local sha ts raw
   sha=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
@@ -502,13 +552,18 @@ cmd_bench() {
 
 cmd_score() {
   need_state
-  [ -f "$STATE/scores.tsv" ] || die "no runs yet"
+  [ -f "$STATE/scores.tsv" ] || die "no runs yet — run: isukit bench"
   { printf 'WHEN\tSHA\tSCORE\tNOTE\tLOG\n'; cat "$STATE/scores.tsv"; } | column -t -s $'\t'
 }
 
 # ---------------------------------------------------------------- analysis
 cmd_alp() {
   load
+  rsh "$APP" "command -v alp >/dev/null" || {
+    warn "alp not installed on $APP — installing"
+    cmd_setup
+    rsh "$APP" "command -v alp >/dev/null" || die "alp still not installed after isukit setup — install by hand on $APP"
+  }
   rsh "$APP" "sudo -n test -s /var/log/nginx/isukit.log 2>/dev/null" || \
     die "no isukit.log (or it's empty) — run: isukit logs on, then a bench"
   say "alp (sorted by summed response time — the only ranking that matters)"
@@ -520,8 +575,11 @@ cmd_slow() {
   load
   rsh "$APP" "sudo -n test -s /tmp/isukit-slow.log 2>/dev/null" || \
     die "no slow log (or it's empty) — run: isukit logs on, then a bench"
-  rsh "$APP" "command -v pt-query-digest >/dev/null" || \
-    die "pt-query-digest not installed on $APP"
+  rsh "$APP" "command -v pt-query-digest >/dev/null" || {
+    warn "pt-query-digest not installed on $APP — installing"
+    cmd_setup
+    rsh "$APP" "command -v pt-query-digest >/dev/null" || die "pt-query-digest still not installed after isukit setup — install by hand on $APP"
+  }
   say "pt-query-digest (top queries by total time)"
   rsh "$APP" "set -o pipefail; sudo -n pt-query-digest --limit=15 /tmp/isukit-slow.log | head -80"
 }
@@ -590,8 +648,8 @@ cmd_deploy() {
   fi
   say "building -> $out"
   local tmp="/tmp/isukit-build.$$"
-  rsh "$APP" "cd $GO_DIR && go build -o $tmp . 2>&1 | head -40 && echo BUILD_OK" || die "build failed"
-  rsh "$APP" "sudo -n install -m 0755 -o ${APP_USER:-isucon} $tmp '$out' && rm -f $tmp" || die "install failed"
+  rsh "$APP" "cd $GO_DIR && go build -o $tmp . 2>&1 | head -40 && echo BUILD_OK" || die "build failed — see the compiler output above"
+  rsh "$APP" "sudo -n install -m 0755 -o ${APP_USER:-isucon} $tmp '$out' && rm -f $tmp" || die "install failed — check sudo permissions for ${APP_USER:-isucon} on $APP"
   cmd_restart
 }
 
@@ -616,8 +674,13 @@ cmd_finalize() {
   rsh "$APP" "sudo -n systemctl reboot" || true
   say "3/4 waiting for it to come back"
   local i=0
-  until rsh "$APP" "true" 2>/dev/null; do i=$((i+1)); [ $i -gt 60 ] && die "host did not return"; sleep 5; done
-  rsh "$APP" "systemctl is-active ${UNITS_ACTIVE:-}" || warn "some units did not come up on their own — enable them"
+  until rsh "$APP" "true" 2>/dev/null; do
+    i=$((i+1))
+    [ $i -gt 60 ] && die "host did not return after reboot — check by hand: ssh ${SSH_OPTS:-} $APP true"
+    sleep 5
+  done
+  rsh "$APP" "systemctl is-active ${UNITS_ACTIVE:-}" \
+    || warn "some units did not come up on their own — enable them: ssh ${SSH_OPTS:-} $APP sudo systemctl enable --now ${UNITS_ACTIVE:-}"
   say "4/4 scoring run"
   cmd_bench "post-reboot verification"
 }
@@ -645,30 +708,84 @@ abspath() { # abspath <path> -- resolve to an absolute path without requiring it
   esac
 }
 
+dump_argv() { # dump_argv -- print full_argv (set by cmd_go), one element per line
+  local n=0 a
+  printf 'received %d argument(s):\n' "${#full_argv[@]}"
+  for a in "${full_argv[@]}"; do
+    n=$((n+1))
+    printf "  [%d] '%s'\n" "$n" "$a"
+  done
+}
+
+die_unplaced() { # die_unplaced <bad-arg> -- self-diagnosing die: full argv dump via the die helper
+  local msg
+  msg="isukit go: could not place argument: '$1'
+  $(dump_argv)"
+  die "$msg"
+}
+
 cmd_go() {
+  local -a full_argv=(go "$@")
   local url="${1:-}" apph="${2:-}"
-  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port] [--ssh-opts 'raw']"
+  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port] [--ssh-opts 'raw'] [--debug-args]"
   shift 2 || true
 
-  local benchh="" keyfile="" port="" raw_opts=""
+  local a
+  for a in "$@"; do
+    if [ "$a" = "--debug-args" ]; then
+      say "isukit go: argv dump (--debug-args — no action taken)"
+      dump_argv >&2
+      exit 0
+    fi
+  done
+
+  local benchh="" keyfile="" port="" raw_opts="" val
   while [ "$#" -gt 0 ]; do
+    is_blank "$1" && { shift; continue; }
     case "$1" in
+      -i=*)             keyfile="${1#-i=}"; shift ;;
+      -i?*)             keyfile="${1#-i}"; shift ;;
       -i)
         [ "$#" -ge 2 ] || die "-i needs a keyfile argument"
         keyfile="$2"; shift 2 ;;
+      --identity=*)     keyfile="${1#--identity=}"; shift ;;
+      --identity)
+        [ "$#" -ge 2 ] || die "--identity needs a keyfile argument"
+        keyfile="$2"; shift 2 ;;
+      --key=*)          keyfile="${1#--key=}"; shift ;;
+      --key)
+        [ "$#" -ge 2 ] || die "--key needs a keyfile argument"
+        keyfile="$2"; shift 2 ;;
+      --port=*)         port="${1#--port=}"; shift ;;
+      --port)
+        [ "$#" -ge 2 ] || die "--port needs a port argument"
+        port="$2"; shift 2 ;;
       -p)
         [ "$#" -ge 2 ] || die "-p needs a port argument"
         port="$2"; shift 2 ;;
+      --ssh-opts=*)     raw_opts="${1#--ssh-opts=}"; shift ;;
       --ssh-opts)
         [ "$#" -ge 2 ] || die "--ssh-opts needs an argument"
         raw_opts="$2"; shift 2 ;;
+      --debug-args)
+        shift ;;
       -*)
-        die "unknown flag to 'isukit go': $1" ;;
+        die_unplaced "$1" ;;
       *)
-        [ -z "$benchh" ] || die "unexpected extra argument: $1"
-        benchh="$1"; shift ;;
+        if [ -n "$benchh" ] && [ -z "$keyfile" ] && looks_like_keyfile "$1"; then
+          warn "'$1' looks like an identity file given without -i — using it as the keyfile"
+          keyfile="$1"
+        elif [ -n "$benchh" ]; then
+          die_unplaced "$1"
+        else
+          benchh="$1"
+        fi
+        shift ;;
     esac
   done
+  if [ -n "$keyfile" ]; then
+    keyfile=$(expand_tilde "$keyfile")
+  fi
 
   cmd_init "$url"
   cmd_host app "$apph"
@@ -676,7 +793,10 @@ cmd_go() {
 
   if [ -n "$keyfile" ] || [ -n "$port" ]; then
     local abskey=""
-    [ -n "$keyfile" ] && abskey=$(abspath "$keyfile")
+    if [ -n "$keyfile" ]; then
+      abskey=$(abspath "$keyfile")
+      check_keyfile "$abskey"
+    fi
     {
       go_ssh_host_block isukit-app "$apph" "$abskey" "$port"
       printf '\n'
@@ -696,7 +816,15 @@ cmd_go() {
   cmd_probe
   cmd_setup
   cmd_logs on
-  say "ready. fill BENCH_CMD in $(pwd)/$CONF, then: isukit bench"
+
+  local final_bench_cmd
+  final_bench_cmd=$(. "$CONF" 2>/dev/null; printf '%s' "${BENCH_CMD:-}")
+  if [ -n "$final_bench_cmd" ]; then
+    say "ready. BENCH_CMD = $final_bench_cmd"
+    say "next: isukit bench"
+  else
+    warn "ready, but BENCH_CMD is still empty — set it: isukit benchcmd '<command>'"
+  fi
 }
 
 usage() { cat >&2 <<'EOF'
@@ -709,6 +837,10 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          isukit-app/isukit-bench) and set SSH_OPTS
                                          to '-F .isukit/ssh_config' for you — solves
                                          the ssh -p / scp -P mismatch below
+                                         -i also takes: -iKEY, -i=KEY, --identity KEY,
+                                         --identity=KEY, --key KEY, --key=KEY; -p also
+                                         takes --port N / --port=N; --debug-args prints
+                                         the raw argv it received and exits
 
   SETUP
     isukit init <repo-url> [dir]        clone + create .isukit/
