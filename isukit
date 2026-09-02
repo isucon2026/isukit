@@ -369,7 +369,7 @@ cmd_score() {
 # ---------------------------------------------------------------- analysis
 cmd_alp() {
   load
-  rsh "$APP" "sudo -n test -s /var/log/nginx/isukit.log" || \
+  rsh "$APP" "sudo -n test -s /var/log/nginx/isukit.log 2>/dev/null" || \
     die "no isukit.log (or it's empty) — run: isukit logs on, then a bench"
   say "alp (sorted by summed response time — the only ranking that matters)"
   rsh "$APP" "sudo -n alp ltsv --file=/var/log/nginx/isukit.log --sort=sum -r --limit=30 \
@@ -378,7 +378,7 @@ cmd_alp() {
 
 cmd_slow() {
   load
-  rsh "$APP" "sudo -n test -s /tmp/isukit-slow.log" || \
+  rsh "$APP" "sudo -n test -s /tmp/isukit-slow.log 2>/dev/null" || \
     die "no slow log (or it's empty) — run: isukit logs on, then a bench"
   rsh "$APP" "command -v pt-query-digest >/dev/null" || \
     die "pt-query-digest not installed on $APP"

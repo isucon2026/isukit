@@ -17,7 +17,14 @@
 
 ## 1. isukit とは何か
 
-`~/personal-projects/isucon/isukit/` にある **bash 1枚**。依存なし。やることは4つだけ。
+**bash 1枚**。依存なし。配布元は https://github.com/mako-for-it/isukit （public）。
+
+```
+git clone https://github.com/mako-for-it/isukit.git ~/isukit
+export PATH="$HOME/isukit:$PATH"      # または ln -s ~/isukit/isukit /usr/local/bin/isukit
+```
+
+やることは4つだけ。
 
 | | コマンド | 中身 |
 |---|---|---|
@@ -50,48 +57,90 @@
 
 ### 2-2. 練習（各自の AWS サンドボックスアカウント）
 
-まず**今どのアカウントにいるか確認**（別アカウントに立てる事故がいちばん多い）：
+**ap-northeast-1（東京）固定。** ログインと、今どのアカウントにいるかの確認：
 
 ```
-aws sts get-caller-identity
-aws configure list | grep region        # ap-northeast-1 であること
+aws sso login --profile sandbox
+export AWS_PROFILE=sandbox AWS_REGION=ap-northeast-1
+aws sts get-caller-identity        # 別アカウントに立てる事故がいちばん多い
 ```
 
-AMIは全部 **ap-northeast-1（東京）のみ**。
+#### 使えるAMI（2026-09-02 に実アカウントで確認済み）
 
-| 過去問 | 公式AMI | 備考 |
-|---|---|---|
-| isucon13 | `ami-041289d910c114864` | ベンチ同梱。**証明書期限切れの報告あり（2024/10〜11）** — ベンチがSSLで落ちたら証明書再生成が必要 |
-| isucon12-qualify | `ami-05c5b59deed48f66b` | `ubuntu` → `sudo su - isucon`。ベンチのバイナリ同梱 |
+| 過去問 | AMI | 状態 | SSH |
+|---|---|---|---|
+| isucon13（公式） | `ami-041289d910c114864` | **available** | `ubuntu` → `sudo su - isucon` |
+| isucon12-qualify（公式） | `ami-05c5b59deed48f66b` | **消滅（InvalidAMIID.NotFound）** | — |
+| isucon12-qualify（matsuu） | `ami-073140ad092048333` | **available** | `ubuntu` → `sudo -i -u isucon` |
+| isucon13（matsuu） | `ami-006d211cb716fe8a0` | 未検証 | `ubuntu` → `sudo -i -u isucon` |
+| isucon14（matsuu） | `ami-0fcf9e8e8675a9ee4` | 未検証 | `ubuntu` → `sudo -i -u isucon` |
 
-**isucon12-qualify がいちばん楽。** リポジトリに `cloudformation.yaml` があり、4台一式＋キーペア（SSM経由）をワンショットで作れる。isucon13 には無い。
+**公式AMIは予告なく消える。実際 isucon12-qualify の公式AMIはもう無い**（そのため公式リポジトリの `cloudformation.yaml` も現状そのままでは動かない）。フォールバックは
+[matsuu/aws-isucon](https://github.com/matsuu/aws-isucon) のAMI表 — webappとbenchの両方入り。**IDをハードコードせず、使う日にREADMEの表を見る**（作り直されて変わる）。
+
+さらに古い/無い年は [matsuu/cloud-init-isucon](https://github.com/matsuu/cloud-init-isucon)（素のUbuntuにuser-dataで構築。isucon10q/11q/11f/12q/12f/13/14/private-isu 対応）か、リポジトリ同梱の `provisioning/packer` / `provisioning/ansible`。
+
+#### 実際に立てる手順（このままコピペ可）
 
 ```
-# isucon12-qualify を一式立てる
-cd ~/personal-projects/isucon/isucon12-qualify
-aws cloudformation deploy --template-file cloudformation.yaml \
-  --stack-name isucon12q --capabilities CAPABILITY_IAM
+export AWS_PROFILE=sandbox AWS_REGION=ap-northeast-1
+VPC=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
+SUBNET=$(aws ec2 describe-subnets --filters Name=default-for-az,Values=true --query 'Subnets[0].SubnetId' --output text)
+MYIP=$(curl -s https://checkip.amazonaws.com)
+
+# ① 鍵（初回だけ）
+aws ec2 create-key-pair --key-name isukit-sandbox --query KeyMaterial --output text > ~/.ssh/isukit-sandbox.pem
+chmod 600 ~/.ssh/isukit-sandbox.pem
+
+# ② セキュリティグループ（自分のIPからの22番＋グループ内は全開放）
+SG=$(aws ec2 create-security-group --group-name isukit-sandbox \
+      --description "isucon practice" --vpc-id "$VPC" --query GroupId --output text)
+aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "$MYIP/32"
+aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol -1 --source-group "$SG"
+
+# ③ 起動。--block-device-mappings は必須（AMIの既定は 8GB / 16GB で、ベンチのログとデータで溢れる）
+aws ec2 run-instances \
+  --image-id ami-041289d910c114864 \
+  --instance-type c5.large \
+  --key-name isukit-sandbox --security-group-ids "$SG" --subnet-id "$SUBNET" \
+  --associate-public-ip-address \
+  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":30,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=isucon13-app},{Key=purpose,Value=isucon-practice}]' \
+  --query 'Instances[].InstanceId' --output text
+
+# ④ Public IP を取る。これが <app-host> の正体
+aws ec2 describe-instances --filters Name=tag:purpose,Values=isucon-practice \
+  Name=instance-state-name,Values=running \
+  --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress]' --output text
 ```
 
-AMIが消えていたら（公式READMEも「予告なく利用できなくなる可能性」と明記している）フォールバックは3つ：
+> **`--block-device-mappings` を省くと後で詰む。** 公式isucon13 AMIの既定ルートは **8GB gp2**、matsuu の isucon12-qualify は **16GB**。`long_query_time=0` のスローログはこれをすぐ埋める。**30GB gp3** にしておく。
 
-1. **matsuu/aws-isucon** — ISUCON5〜14を網羅したコミュニティ製AMI。使う時点でリポジトリの表からIDを引く（**ハードコードしない**。作り直されてIDが変わる）
-2. **自前ビルド** — `cd provisioning/packer && make build`（isucon13は Packer v1.9.4、isucon12-qualify は v1.8.0）
-3. **ansible** — 素のUbuntu 22.04に対して `cd provisioning/ansible && ./make_latest_files.sh && ansible-playbook -i inventory/localhost application.yml`。全言語のランタイムを焼くので遅い。`roles/xbuildwebapp/tasks/main.yml` で使わない言語を消すと速くなる
+#### isukit に渡す `<app-host>`
 
-**台数とスペック**（本番と同じ構成にする）：
+`<app-host>` は **ssh の宛先文字列そのもの**。`ubuntu@<Public IP>` を渡し、鍵は `SSH_OPTS` に書く：
 
-- app **3台 × c5.large**（2 vCPU / 4 GiB）
-- bench **1台 × c5.large**（本番はFargateだが練習はEC2が楽）
-- EBS は **gp3 20〜40GB**。リポジトリの最小は8GBだがベンチのデータで溢れる
+```
+isukit host app  ubuntu@43.207.152.140
+isukit host bench ubuntu@43.207.152.140      # 練習で1台に寄せる場合は app と同じでよい
+$EDITOR .isukit/config
+#   SSH_OPTS='-i ~/.ssh/isukit-sandbox.pem'
+```
+
+`~/.ssh/config` に書いてしまうなら `Host isu13` の別名を作って `isukit host app isu13` でもよい。どちらでも `isukit` は気にしない。
+
+#### 台数
+
+- 本気の練習：app **3台 × c5.large**（2 vCPU / 4 GiB）＋ bench **1台**。本番と同じ形
+- キットの動作確認や、1台構成のチューニング練習だけなら **1台**でよい（matsuu AMIはbench同梱なので同じ箱でベンチも回る）
 
 **費用**：c5.large は東京で約 **$0.107/時**。4台で6時間 ≈ **$3程度**。
 
 > **消し忘れが本当の出費。** 4台を止め忘れると月$300超。練習が終わったら必ず：
 > ```
-> aws cloudformation delete-stack --stack-name isucon12q      # CFnで立てた場合
-> aws ec2 describe-instances --filters Name=instance-state-name,Values=running \
->   --query 'Reservations[].Instances[].[InstanceId,InstanceType]' --output table
+> aws ec2 describe-instances --filters Name=tag:purpose,Values=isucon-practice \
+>   Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text \
+>   | xargs -r aws ec2 terminate-instances --instance-ids
 > ```
 > サンドボックスでも請求先は実在する。**その日のうちに落とす。**
 
@@ -126,6 +175,16 @@ git push -u origin main
 ```
 
 nginx と MySQL の設定ファイル（`/etc/nginx`、`/etc/mysql`）も一緒に git に入れておくと、あとで「誰がいつ何を変えたか」が追える。
+
+**リポジトリは private。作ったら残り2人を Collaborator に招待する**（招待しないと push できない）：
+
+```
+gh repo create <team>/<private-repo> --private
+gh api -X PUT repos/<team>/<private-repo>/collaborators/n000r111 -f permission=push
+gh api -X PUT repos/<team>/<private-repo>/collaborators/imaharu  -f permission=push
+```
+
+参加者： [mako-for-it](https://github.com/mako-for-it) / [n000r111](https://github.com/n000r111) / [imaharu](https://github.com/imaharu)
 
 ```
 # ② 3人それぞれのラップトップで。公開リポジトリではなく自分たちのリポジトリを渡す
