@@ -1,0 +1,126 @@
+# isukit
+
+One command from a repo URL to an instrumented, measurable app host.
+
+**Contest playbook — phases, team rules, failure modes: [`RUNBOOK.md`](RUNBOOK.md).**
+
+    ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target]
+
+That clones, probes the server, installs `alp` + `pt-query-digest`, and turns on
+LTSV nginx logging + `long_query_time=0`. Then you fill one line (`BENCH_CMD`)
+and you're in the loop.
+
+Put it on PATH: `ln -s "$PWD/isukit" ~/bin/isukit` (or just call it by path).
+
+## The loop
+
+    isukit bench "baseline"     # runs BENCH_CMD on the bench host, records score+git sha
+    isukit alp                  # endpoints ranked by SUMMED response time
+    isukit slow                 # queries ranked by total time
+    isukit pprof 30             # Go CPU profile, if pprof is wired in
+    # change exactly ONE thing
+    isukit deploy               # rsync + build onto the systemd ExecStart path + restart
+    isukit bench "added idx X"  # keep it or revert it — the number decides
+    isukit score                # full history
+
+`isukit probe` picks the app's systemd unit with a scored heuristic, not a
+guarantee — see "Why it probes instead of assuming" below. If it picked wrong:
+
+    isukit unit <systemd-unit-name>   # override + re-probe
+
+Endgame:
+
+    isukit finalize   # logs OFF -> reboot -> verify units came back -> score
+
+## Why it probes instead of assuming
+
+Nothing about ISUCON repo layout is stable. Checked across isucon9, 10-q, 10-f,
+11-q, 11-f, 12-q, 12-f, 13, 14, and private-isu — every one of these changed:
+
+| Thing | Observed range |
+|---|---|
+| Go source dir | `webapp/go`, `webapp/golang` |
+| Language set | 4–8 impls; Deno once, Java once, Perl comes and goes |
+| Build tool | Makefile → Taskfile.yml → neither |
+| docker-compose | root / per-language / `development/` / `dev/` / **absent entirely** (10-f, 12-f) |
+| systemd naming | `app.lang.service`, `app-lang.service`, `app-api-lang.service` + `app-web-lang.service`, one non-language wrapper unit |
+| Extra units | matcher, payment mock, JIA API mock, PowerDNS, shipment/payment simulators |
+| Env file | `/home/isucon/env.sh`, `/home/isucon/env`, none |
+| Env var names | `ISUCON13_MYSQL_*` (year-prefixed) → `ISUCON_DB_*` (year-agnostic) → ad-hoc `MYSQL_*` |
+| Web server | nginx — **except isucon10-final, which is Envoy** |
+| Datastore | MySQL 5.7 / 8.0 / 8.0.31, MariaDB 10.3, + per-tenant SQLite (12-q) |
+| Bench target flag | `-target`, `-target-url`, `-target-host`, `-target-addr`, `--target` |
+| App instances | 3 (usual), 5 (12-f), 1 documented (9) |
+
+Also: **there is no isucon15.** The org stopped sequential numbering after 14;
+the next event is ISUCON2026 (2026-10-31, run by Sakura Internet). Don't write
+tooling that assumes `isucon{N+1}`.
+
+`isukit probe` therefore reads none of that from the repo. It asks the running
+machine:
+
+- **systemd is the source of truth.** It lists units whose fragment lives under
+  `/etc/systemd/system` (i.e. provisioned, not distro), then `systemctl show`s
+  the active one for `WorkingDirectory`, `ExecStart`, `EnvironmentFiles`, `User`.
+  That single trick survives every naming convention above, including the Envoy
+  year and the docker-compose-wrapper year.
+- Web server and datastore by probing `is-active` across a candidate list.
+- nginx log path and config files from `nginx -T`, not a guessed path.
+- Go module dir by finding `go.mod` (excluding `bench*` and vendor).
+
+The one thing it can't discover is how to invoke the benchmarker — the flags
+share no common contract across years. So `BENCH_CMD` is a config line you paste
+from that year's README. `isukit init` greps the repo for the likely README
+sections to save you the hunt.
+
+**Known limit:** app-unit selection is a scored heuristic (workdir under
+`/home/isucon`, exec path, env file, running user, ...), not a certainty — an
+unusual layout can outscore the real app unit. `isukit probe` prints
+`APP_CANDIDATES` (all units it scored, highest first) and warns when its pick
+is low-confidence. Sanity-check that line; fix a wrong pick with
+`isukit unit <name>`.
+
+## Discipline (generic, not answer-specific)
+
+- **Rank by summed time, never by mean or by count.** A 3ms endpoint hit 40,000
+  times outranks a 900ms one hit twice. `alp --sort=sum` is the default here for
+  that reason. Same for `pt-query-digest`, which ranks by total time already.
+- **Bench before touching anything.** A baseline you didn't record is a change
+  you can't evaluate.
+- **One change per bench run.** Two changes and a score move tells you nothing.
+- **Measurement costs score.** `long_query_time=0` and LTSV logging are heavy.
+  `isukit logs off` before any run whose number you intend to keep.
+- **Nothing counts until it survives a reboot.** Runtime-only state — `SET
+  GLOBAL`, hand-started services, files in `/tmp`, disabled units — evaporates.
+  This is where large fractions of teams lose everything on the final run.
+  `isukit finalize` is that check.
+- **Read the app's own logs before optimising.** An error the benchmarker is
+  quietly retrying is worth more score than any index.
+
+## Files
+
+    .isukit/config        APP, BENCH, BENCH_CMD, SSH_OPTS, EXTRA_UNITS   (you edit this)
+    .isukit/manifest      probe output, sourced by every other command
+    .isukit/scores.tsv    when / sha / score / note / raw log
+    .isukit/bench-*.log   full benchmarker output per run
+
+All git-ignored. `.isukit/` lives inside each cloned problem repo, so multiple
+contests coexist without stepping on each other.
+
+## Caveats
+
+- `logs on` rewrites `/etc/nginx` after backing it up to `/etc/nginx.isukit.bak`;
+  `logs off` restores that backup wholesale. If the web server isn't nginx,
+  `probe` warns and `logs` does nothing for the web tier.
+- MySQL automation needs passwordless `sudo mysql` over the unix socket. `probe`
+  reports `MYSQL_OK=0` if that isn't available.
+- `pprof` requires `import _ "net/http/pprof"` plus a listener in the app; the
+  command tells you the snippet if the endpoint isn't there.
+- `deploy` assumes a Go app and builds onto the exact path systemd already
+  execs. For a non-Go impl, deploy by hand.
+- `SSH_OPTS` (config) is appended to every `ssh`/`scp` call — custom key, custom
+  port, custom config file. Note ssh takes `-p <port>` but scp takes `-P
+  <port>` — if you hand-roll a port flag, you need both forms.
+- `EXTRA_UNITS` (config) is a space-separated list of extra units that
+  `restart`/`finalize` also restart alongside the detected `APP_UNIT` —
+  matcher/mock/simulator services some years ship as separate units.

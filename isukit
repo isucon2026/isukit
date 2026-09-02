@@ -1,0 +1,561 @@
+#!/usr/bin/env bash
+# isukit — repo-agnostic ISUCON bootstrap + measurement loop.
+#
+# Design rule: DISCOVER, never assume. Verified against isucon9/10/11/12/13/14
+# and private-isu, where the following ALL varied year to year:
+#   webapp lang dir name (go | golang | node | nodejs), build tool (Make | Task |
+#   neither), compose file presence & naming, systemd unit naming
+#   (app.lang.service | app-api-lang.service | one wrapper unit), env file path
+#   (/home/isucon/env.sh | /home/isucon/env | none), web server (nginx | Envoy),
+#   DB (MySQL | MariaDB | +SQLite), benchmarker target flag (-target | -target-url
+#   | -target-host | -target-addr), instance count (3 | 5).
+# So: everything is read off the running server via systemd/nginx/mysql at probe
+# time. The only thing you type by hand is BENCH_CMD.
+
+set -euo pipefail
+
+KIT_VERSION=1
+STATE=".isukit"
+CONF="$STATE/config"
+
+die()  { printf '\033[31m!! %s\033[0m\n' "$*" >&2; exit 1; }
+say()  { printf '\033[36m:: %s\033[0m\n' "$*" >&2; }
+warn() { printf '\033[33m~~ %s\033[0m\n' "$*" >&2; }
+
+need_state() { [ -f "$CONF" ] || die "no $CONF here. cd into the problem repo, or run: isukit init <repo-url>"; }
+load()       { need_state; . "$CONF"; [ -f "$STATE/manifest" ] && . "$STATE/manifest" || true; }
+
+# ---------------------------------------------------------------- transport
+# Every host is either "local" or an ssh target. Same primitives either way.
+rsh() { # rsh <host> <command...>
+  local h="$1"; shift
+  if [ "$h" = "local" ]; then bash -lc "$*"; else ssh ${SSH_OPTS:-} -o StrictHostKeyChecking=accept-new "$h" "$*"; fi
+}
+rsh_stdin() { # rsh_stdin <host>   -- script on stdin
+  local h="$1"
+  if [ "$h" = "local" ]; then bash -s; else ssh ${SSH_OPTS:-} -o StrictHostKeyChecking=accept-new "$h" 'bash -s'; fi
+}
+rpull() { # rpull <host> <remote-path> <local-path>
+  local h="$1" r="$2" l="$3"
+  if [ "$h" = "local" ]; then cp "$r" "$l"; else scp ${SSH_OPTS:-} -q "$h:$r" "$l"; fi
+}
+
+# ---------------------------------------------------------------- init
+cmd_init() {
+  local url="${1:-}"; [ -n "$url" ] || die "usage: isukit init <repo-url> [dir]"
+  local dir="${2:-$(basename "$url" .git)}"
+  [ -d "$dir" ] || git clone "$url" "$dir"
+  cd "$dir"
+  mkdir -p "$STATE"
+  git rev-parse --verify work >/dev/null 2>&1 || git switch -c work >/dev/null 2>&1 || true
+  [ -f "$CONF" ] || cat > "$CONF" <<EOF
+# isukit config — edit APP/BENCH after 'isukit host', BENCH_CMD after 'isukit probe'
+APP=local          # ssh target of the app server (the one you tune), or 'local'
+BENCH=local        # ssh target of the bench server (the one that scores you)
+# Run verbatim on \$BENCH. Fill this from the repo README — the flag names differ
+# every single year (-target / -target-url / -target-host / -target-addr / ...).
+BENCH_CMD=''
+SSH_OPTS=''        # extra ssh/scp flags, e.g. '-F ./ssh_config' or '-i ~/key.pem -p 2222'
+EXTRA_UNITS=''     # space-separated extra units 'restart'/'finalize' also restart
+EOF
+  cat > "$STATE/.gitignore" <<'EOF'
+*
+EOF
+  say "initialised in $(pwd)"
+  say "next: isukit host app <ssh-target>   (and bench)   then: isukit probe"
+  grep -rilE 'bench|benchmark' README* docs/ 2>/dev/null | head -5 | sed 's/^/    read: /' >&2 || true
+}
+
+cmd_host() {
+  need_state
+  local role="${1:-}" target="${2:-}" opts=""
+  [ "$#" -gt 2 ] && { shift 2; opts="$*"; }
+  case "$role" in
+    app)   sed -i.bak "s|^APP=.*|APP=$target|"   "$CONF"; rm -f "$CONF.bak" ;;
+    bench) sed -i.bak "s|^BENCH=.*|BENCH=$target|" "$CONF"; rm -f "$CONF.bak" ;;
+    *) die "usage: isukit host {app|bench} <ssh-target|local> [ssh opts...]" ;;
+  esac
+  if [ -n "$opts" ]; then
+    local opts_q
+    opts_q=$(printf '%s' "$opts" | sed "s/'/'\\\\''/g")
+    sed -i.bak "s|^SSH_OPTS=.*|SSH_OPTS='$opts_q'|" "$CONF"; rm -f "$CONF.bak"
+    say "SSH_OPTS = $opts"
+  fi
+  say "$role = $target"
+}
+
+# ---------------------------------------------------------------- probe
+# The whole point of the kit. Interrogates the RUNNING SERVER, not the repo.
+PROBE_SCRIPT='
+set -u
+S() { printf "%s=%s\n" "$1" "$(printf "%q" "$2")"; }
+SUDO=""; sudo -n true 2>/dev/null && SUDO="sudo -n"
+
+# --- machine
+S HOST_CPUS  "$(nproc 2>/dev/null || echo ?)"
+S HOST_MEM   "$(free -m 2>/dev/null | awk "/^Mem:/{print \$2\"MB\"}")"
+S HOST_OS    "$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
+
+# --- locally-provisioned systemd units (fragment under /etc/systemd/system).
+# This is the year-agnostic hook: catches isuride-go.service, isucondition.go.service,
+# xsuportal-api-golang.service, isuports.service alike, without name guessing.
+UNITS=$(systemctl list-units --type=service --all --no-legend --plain 2>/dev/null | awk "{print \$1}" \
+  | while read -r u; do
+      f=$(systemctl show -p FragmentPath --value "$u" 2>/dev/null)
+      [ "${f#/etc/systemd/system/}" != "$f" ] && echo "$u"
+    done | sort -u | tr "\n" " ")
+S UNITS_LOCAL "$UNITS"
+ACTIVE=""; for u in $UNITS; do systemctl is-active --quiet "$u" && ACTIVE="$ACTIVE $u"; done
+S UNITS_ACTIVE "${ACTIVE# }"
+
+# --- introspect the active app unit: gives workdir, binary, env file, user.
+# Scored, not first-match-wins: alphabetical UNITS_LOCAL order used to hand this
+# to whatever infra unit sorted first (aws-env-*, blackauth, isupipe-cache).
+DENY_PAT="nginx* mysql* mariadb* redis* postgres* docker* containerd* envoy* memcached* aws-* cloud-init* systemd-* ssh* sshd* cron* getty* dbus* snap* unattended* chrony* ntp* rsyslog* datadog* td-agent* filebeat* node_exporter* netdata* envcheck* env-checker* blackauth* *mock* *pdns* *powerdns* *bench*"
+is_denied() {
+  local n="$1" p
+  for p in $DENY_PAT; do
+    [[ "$n" == $p ]] && return 0
+  done
+  return 1
+}
+CANDS=""; BEST=""; BESTSCORE=""
+for u in $ACTIVE; do
+  is_denied "$u" && continue
+  [ "$(systemctl show -p Type --value "$u" 2>/dev/null)" = "oneshot" ] && continue
+  wd=$(systemctl show -p WorkingDirectory --value "$u" 2>/dev/null)
+  execraw=$(systemctl show -p ExecStart --value "$u" 2>/dev/null)
+  execpath=$(printf "%s" "$execraw" | sed "s/.*path=\([^ ]*\).*/\1/")
+  envf=$(systemctl show -p EnvironmentFiles --value "$u" 2>/dev/null | sed "s/ (ignore_errors=[a-z]*)//g")
+  usr=$(systemctl show -p User --value "$u" 2>/dev/null)
+  sc=0
+  [ -n "$wd" ] && [ "${wd#/home/isucon}" != "$wd" ] && sc=$((sc+4))
+  [ "${execpath#/home/isucon}" != "$execpath" ] && sc=$((sc+3))
+  [ -n "$envf" ] && sc=$((sc+2))
+  [ "$usr" = "isucon" ] && sc=$((sc+2))
+  [ "${execraw#*compose}" != "$execraw" ] && [ -n "$wd" ] && [ "${wd#/home/isucon}" != "$wd" ] && sc=$((sc+2))
+  if [ "${execpath#/opt}" != "$execpath" ] || [ "${execpath#/usr/local/bin}" != "$execpath" ]; then
+    [ -z "$wd" ] && sc=$((sc-3))
+  fi
+  CANDS="$CANDS $u:$sc"
+  if [ -z "$BESTSCORE" ] || [ "$sc" -gt "$BESTSCORE" ]; then BEST="$u"; BESTSCORE="$sc"; fi
+done
+CANDS_SORTED=$(printf "%s\n" $CANDS | sort -t: -k2,2 -rn | tr "\n" " ")
+S APP_CANDIDATES "${CANDS_SORTED% }"
+
+APPUNIT="$BEST"; CONFIDENCE="low"
+if [ -n "${APP_UNIT_OVERRIDE:-}" ]; then
+  APPUNIT="$APP_UNIT_OVERRIDE"; CONFIDENCE="override"
+elif [ -n "$BESTSCORE" ] && [ "$BESTSCORE" -ge 6 ]; then
+  CONFIDENCE="high"
+fi
+S APP_UNIT "$APPUNIT"
+S APP_UNIT_CONFIDENCE "$CONFIDENCE"
+if [ -n "$APPUNIT" ]; then
+  S APP_WORKDIR  "$(systemctl show -p WorkingDirectory --value "$APPUNIT")"
+  S APP_EXEC_RAW "$(systemctl show -p ExecStart --value "$APPUNIT")"
+  S APP_EXEC     "$(systemctl show -p ExecStart --value "$APPUNIT" | sed "s/.*path=\([^ ]*\).*/\1/")"
+  S APP_ENVFILE  "$(systemctl show -p EnvironmentFiles --value "$APPUNIT" | sed "s/ (ignore_errors=[a-z]*)//g")"
+  S APP_USER     "$(systemctl show -p User --value "$APPUNIT")"
+fi
+
+# --- env file: path varies (env.sh / env / absent). Find it, do not assume.
+ENVF=""
+for c in /home/isucon/env.sh /home/isucon/env /home/isucon/.env; do [ -f "$c" ] && ENVF="$c" && break; done
+S ENV_FILE "$ENVF"
+[ -n "$ENVF" ] && S ENV_KEYS "$(grep -oE "^(export +)?[A-Z_][A-Z0-9_]*" "$ENVF" | sed "s/export *//" | tr "\n" " ")"
+
+# --- source tree on the server + which languages are present
+SRC=""
+for c in /home/isucon/webapp /home/isucon/*/webapp /home/isucon/private_isu/webapp; do [ -d "$c" ] && SRC="$c" && break; done
+S SRC_DIR "$SRC"
+[ -n "$SRC" ] && S SRC_LANGS "$(ls -1 "$SRC" 2>/dev/null | tr "\n" " ")"
+GOMODS=$(find /home/isucon -maxdepth 5 -name go.mod \
+  -not -path "*/vendor/*" -not -path "*/bench*" -not -path "*/blackauth*" \
+  -not -path "*/portal*" -not -path "*/data/*" -not -path "*/env-checker*" \
+  -not -path "*/envcheck*" -not -path "*/tools/*" 2>/dev/null)
+GOMOD=""
+for g in $GOMODS; do [ "${g#*/webapp/}" != "$g" ] && GOMOD="$g" && break; done
+[ -z "$GOMOD" ] && GOMOD=$(printf "%s\n" $GOMODS | head -1)
+S GO_DIR "$(dirname "${GOMOD:-/}" 2>/dev/null)"
+S GO_VER "$(go version 2>/dev/null || echo none)"
+
+# --- web server: nginx is usual, Envoy happened (isucon10-final), h2o/caddy possible
+WEB=""
+for s in nginx h2o envoy caddy apache2 httpd; do systemctl is-active --quiet "$s" 2>/dev/null && WEB="$s" && break; done
+S WEB_SERVER "$WEB"
+if [ "$WEB" = "nginx" ]; then
+  ALOG_LINES="$($SUDO nginx -T 2>/dev/null | grep -vE "^[[:space:]]*#" | grep -oE "access_log[[:space:]]+[^ ;]+" | awk "{print \$2}")"
+  S NGINX_ACCESS_LOGS "$(printf "%s" "$ALOG_LINES" | tr "\n" " ")"
+  NGINX_LASTLOG=""
+  for p in $ALOG_LINES; do [ "$p" != "off" ] && NGINX_LASTLOG="$p"; done
+  S NGINX_ACCESS_LOG "$NGINX_LASTLOG"
+  S NGINX_CONFS "$($SUDO nginx -T 2>/dev/null | grep -oE "^# configuration file [^:]+" | awk "{print \$4}" | tr "\n" " ")"
+  S NGINX_HAS_CONFD "$($SUDO nginx -T 2>/dev/null | grep -cE "include.*conf\.d" || true)"
+fi
+
+# --- datastores: MySQL/MariaDB usual, SQLite appeared (isucon12-q), redis common
+DB=""
+for s in mysql mariadb postgresql; do systemctl is-active --quiet "$s" 2>/dev/null && DB="$s" && break; done
+S DB_SERVER "$DB"
+S CACHE "$(for s in redis-server redis memcached; do systemctl is-active --quiet $s 2>/dev/null && echo -n "$s "; done)"
+MYSQL="$SUDO mysql"
+if $MYSQL -e "SELECT 1" >/dev/null 2>&1; then
+  S MYSQL_OK 1
+  S MYSQL_VER  "$($MYSQL -N -B -e "SELECT VERSION()" 2>/dev/null)"
+  S MYSQL_SLOW "$($MYSQL -N -B -e "SELECT @@slow_query_log_file" 2>/dev/null)"
+  S MYSQL_DBS  "$($MYSQL -N -B -e "SHOW DATABASES" 2>/dev/null | grep -vE "^(information_schema|performance_schema|mysql|sys)$" | tr "\n" " ")"
+else
+  S MYSQL_OK 0
+fi
+S SQLITE_FILES "$(find /home/isucon -maxdepth 4 \( -name "*.db" -o -name "*.sqlite*" \) 2>/dev/null | head -5 | tr "\n" " ")"
+
+# --- tooling we depend on
+S HAS_ALP  "$(command -v alp >/dev/null && echo 1 || echo 0)"
+S HAS_PTQD "$(command -v pt-query-digest >/dev/null && echo 1 || echo 0)"
+S HAS_DOCKER "$(command -v docker >/dev/null && echo 1 || echo 0)"
+'
+
+cmd_probe() {
+  load
+  local override
+  override=$( . "$CONF" 2>/dev/null; printf '%s' "${APP_UNIT_OVERRIDE:-}" )
+  say "probing app host: $APP"
+  printf 'APP_UNIT_OVERRIDE=%s\n%s\n' "$override" "$PROBE_SCRIPT" | rsh_stdin "$APP" > "$STATE/manifest.tmp" || die "probe failed"
+  mv "$STATE/manifest.tmp" "$STATE/manifest"
+  cat "$STATE/manifest"
+  echo
+  . "$STATE/manifest"
+  [ "${APP_UNIT:-}" = "" ] && warn "no app systemd unit found — is the app containerised? check UNITS_LOCAL / docker ps"
+  if [ -n "${APP_UNIT:-}" ] && [ "${APP_UNIT_CONFIDENCE:-}" != "high" ] && [ "${APP_UNIT_CONFIDENCE:-}" != "override" ]; then
+    warn "picked '$APP_UNIT' with LOW confidence — candidates: ${APP_CANDIDATES:-none}"
+    warn "if that's wrong: isukit unit <name>"
+  fi
+  [ "${WEB_SERVER:-}" != "nginx" ] && warn "web server is '${WEB_SERVER:-none}', not nginx — 'isukit logs' handles nginx only; profile at the app layer instead"
+  [ "${MYSQL_OK:-0}" != "1" ] && warn "cannot reach mysql as root over socket — slow-log automation is off"
+  grep -q "^BENCH_CMD=''" "$CONF" && warn "BENCH_CMD is empty — set it in $CONF from the repo README (flags differ every year)"
+  say "manifest written to $STATE/manifest"
+}
+
+cmd_unit() {
+  need_state
+  local name="${1:-}"; [ -n "$name" ] || die "usage: isukit unit <systemd-unit-name>"
+  if grep -q "^APP_UNIT_OVERRIDE=" "$CONF" 2>/dev/null; then
+    sed -i.bak "s|^APP_UNIT_OVERRIDE=.*|APP_UNIT_OVERRIDE=$name|" "$CONF"; rm -f "$CONF.bak"
+  else
+    printf 'APP_UNIT_OVERRIDE=%s\n' "$name" >> "$CONF"
+  fi
+  say "APP_UNIT_OVERRIDE = $name — re-probing"
+  cmd_probe
+}
+
+# ---------------------------------------------------------------- tools
+cmd_setup() {
+  load
+  say "installing alp + percona-toolkit on $APP"
+  rsh_stdin "$APP" <<'EOS'
+set -e
+command -v alp >/dev/null || {
+  V=1.0.21; A=$(uname -m); case "$A" in x86_64) A=amd64;; aarch64) A=arm64;; esac
+  cd /tmp && curl -fsSL -o alp.tar.gz "https://github.com/tkuchiki/alp/releases/download/v${V}/alp_linux_${A}.tar.gz" \
+    && tar xzf alp.tar.gz && sudo install -m755 alp /usr/local/bin/alp && echo "alp installed"
+}
+command -v pt-query-digest >/dev/null || {
+  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+    && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq percona-toolkit >/dev/null \
+    && echo "percona-toolkit installed"
+} || echo "percona-toolkit install failed (non-fatal)"
+alp --version 2>/dev/null || true
+EOS
+  say "done"
+}
+
+# ---------------------------------------------------------------- logs
+LOGS_SCRIPT='
+set -u
+SUDO="sudo -n"
+RC=0
+# --- nginx: LTSV carrying request_time, which the stock "combined" format lacks.
+if systemctl is-active --quiet nginx 2>/dev/null; then
+  if [ "$MODE" = on ]; then
+    [ -d /etc/nginx.isukit.bak ] || $SUDO cp -a /etc/nginx /etc/nginx.isukit.bak
+    $SUDO mkdir -p /etc/nginx/conf.d
+    $SUDO tee /etc/nginx/conf.d/00-isukit.conf >/dev/null <<"NGXCONF"
+log_format ltsv "time:$time_iso8601\tmethod:$request_method\turi:$request_uri\tstatus:$status\tsize:$body_bytes_sent\treqtime:$request_time\tapptime:$upstream_response_time\tvhost:$host";
+access_log /var/log/nginx/isukit.log ltsv;
+NGXCONF
+    for f in $(grep -rlE "^[[:space:]]*access_log" /etc/nginx 2>/dev/null | grep -v 00-isukit.conf); do
+      $SUDO sed -i "s|^\([[:space:]]*\)access_log|\1#isukit# access_log|" "$f"
+    done
+    grep -qE "include.*conf\.d" /etc/nginx/nginx.conf 2>/dev/null || \
+      $SUDO sed -i "0,/^http {/s|^http {|http {\n    include /etc/nginx/conf.d/*.conf;|" /etc/nginx/nginx.conf
+    if $SUDO nginx -t && $SUDO systemctl reload nginx; then
+      echo "nginx: ltsv -> /var/log/nginx/isukit.log"
+    else
+      echo "nginx: FAILED to enable ltsv logging" >&2
+      RC=1
+    fi
+  else
+    if [ -d /etc/nginx.isukit.bak ]; then
+      $SUDO rm -rf /etc/nginx && $SUDO cp -a /etc/nginx.isukit.bak /etc/nginx
+      if $SUDO nginx -t && $SUDO systemctl reload nginx; then
+        echo "nginx: config restored from backup"
+      else
+        echo "nginx: FAILED to restore config" >&2
+        RC=1
+      fi
+    fi
+  fi
+fi
+# --- mysql: long_query_time=0 captures every query. MUST be off for scoring runs.
+if $SUDO mysql -e "SELECT 1" >/dev/null 2>&1; then
+  if [ "$MODE" = on ]; then
+    if $SUDO mysql -e "SET GLOBAL slow_query_log_file=\"/tmp/isukit-slow.log\"; SET GLOBAL long_query_time=0; SET GLOBAL slow_query_log=1;" 2>/dev/null; then
+      echo "mysql: slow log -> /tmp/isukit-slow.log (long_query_time=0)"
+      [ -n "${APP_UNIT:-}" ] && $SUDO systemctl restart "$APP_UNIT" && echo "app: restarted $APP_UNIT to pick up fresh connections"
+    else
+      echo "mysql: FAILED to enable slow log" >&2
+      RC=1
+    fi
+  else
+    if $SUDO mysql -e "SET GLOBAL slow_query_log=0;" 2>/dev/null; then
+      echo "mysql: slow log off"
+    else
+      echo "mysql: FAILED to disable slow log" >&2
+      RC=1
+    fi
+  fi
+fi
+exit $RC
+'
+
+cmd_logs() {
+  load
+  local mode="${1:-}"
+  case "$mode" in on|off) ;; *) die "usage: isukit logs {on|off}" ;; esac
+  say "logs $mode on $APP"
+  printf 'MODE=%s\nAPP_UNIT=%s\n%s\n' "$mode" "${APP_UNIT:-}" "$LOGS_SCRIPT" | rsh_stdin "$APP"
+}
+
+# ---------------------------------------------------------------- bench
+cmd_bench() {
+  load
+  [ -n "${BENCH_CMD:-}" ] || die "BENCH_CMD is empty in $CONF — fill it from the repo README"
+  local note="${*:-}"
+  local sha ts raw
+  sha=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
+  ts=$(date +%Y%m%d-%H%M%S)
+  raw="$STATE/bench-$ts.log"
+  say "bench on $BENCH: $BENCH_CMD"
+  set +e
+  rsh "$BENCH" "$BENCH_CMD" 2>&1 | tee "$raw"
+  local rc=${PIPESTATUS[0]}
+  set -e
+  local score
+  score=$(grep -oiE '"?(total[ _-]?)?score"?[^0-9-]{0,12}-?[0-9]+' "$raw" | tail -1 | grep -oE '\-?[0-9]+$' || true)
+  [ -n "$score" ] || score="?"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$sha" "$score" "${note:-}" "$raw" >> "$STATE/scores.tsv"
+  say "score=$score  sha=$sha  rc=$rc  raw=$raw"
+  [ "$score" = "?" ] && warn "could not parse a score — read $raw, then fix the line in $STATE/scores.tsv by hand"
+  return 0
+}
+
+cmd_score() {
+  need_state
+  [ -f "$STATE/scores.tsv" ] || die "no runs yet"
+  { printf 'WHEN\tSHA\tSCORE\tNOTE\tLOG\n'; cat "$STATE/scores.tsv"; } | column -t -s $'\t'
+}
+
+# ---------------------------------------------------------------- analysis
+cmd_alp() {
+  load
+  rsh "$APP" "sudo -n test -s /var/log/nginx/isukit.log" || \
+    die "no isukit.log (or it's empty) — run: isukit logs on, then a bench"
+  say "alp (sorted by summed response time — the only ranking that matters)"
+  rsh "$APP" "sudo -n alp ltsv --file=/var/log/nginx/isukit.log --sort=sum -r --limit=30 \
+    -m '/api/[^/]+/[0-9a-zA-Z-]+,/[0-9a-zA-Z-]{20,}' 2>&1 | head -50"
+}
+
+cmd_slow() {
+  load
+  rsh "$APP" "sudo -n test -s /tmp/isukit-slow.log" || \
+    die "no slow log (or it's empty) — run: isukit logs on, then a bench"
+  rsh "$APP" "command -v pt-query-digest >/dev/null" || \
+    die "pt-query-digest not installed on $APP"
+  say "pt-query-digest (top queries by total time)"
+  rsh "$APP" "set -o pipefail; sudo -n pt-query-digest --limit=15 /tmp/isukit-slow.log | head -80"
+}
+
+cmd_pprof() {
+  load
+  local sec="${1:-30}" port="${2:-6060}"
+  say "CPU profile ${sec}s via $APP:$port/debug/pprof — needs net/http/pprof imported and a listener in the app"
+  rsh "$APP" "curl -s -o /tmp/isukit-cpu.pprof 'http://localhost:$port/debug/pprof/profile?seconds=$sec'" \
+    || die "pprof endpoint not reachable — add: import _ \"net/http/pprof\"  +  go func(){ http.ListenAndServe(\":$port\", nil) }()"
+  rpull "$APP" /tmp/isukit-cpu.pprof "$STATE/cpu.pprof"
+  say "go tool pprof -http=: $STATE/cpu.pprof"
+}
+
+# ---------------------------------------------------------------- deploy
+cmd_deploy() {
+  load
+  local force=0
+  [ "${1:-}" = "--force" ] && force=1
+  local local_src
+  local_src=$(find . -maxdepth 4 -name go.mod -not -path "*/bench*" -not -path "*/vendor/*" | head -1)
+  [ -n "$local_src" ] || die "no local go.mod found under $(pwd)"
+  local_src=$(dirname "$local_src")
+
+  if [ "${APP_EXEC_RAW#*compose}" != "${APP_EXEC_RAW:-}" ]; then
+    # COMPOSE MODE: app unit runs docker compose — rsync source, then up --build.
+    local cfile remote_dir
+    cfile=$(printf "%s" "$APP_EXEC_RAW" | sed -n 's/.*-f *\([^ ]*\).*/\1/p')
+    [ -n "$cfile" ] || die "app unit runs docker compose but no -f <file> found in ExecStart — deploy by hand"
+    remote_dir=$(dirname "$cfile")
+    say "COMPOSE MODE: rsync $local_src/ -> $APP:$remote_dir/"
+    if [ "$APP" = "local" ]; then
+      rsync -a --delete --exclude .git "$local_src/" "$remote_dir/"
+    else
+      rsync -a --delete --exclude .git -e "ssh ${SSH_OPTS:-}" "$local_src/" "$APP:$remote_dir/"
+    fi
+    say "docker compose -f $cfile up -d --build"
+    rsh "$APP" "cd $remote_dir && sudo -n docker compose -f $cfile up -d --build 2>&1 | tail -40"
+    return 0
+  fi
+
+  # BINARY MODE: build straight onto the path systemd already execs.
+  [ -n "${GO_DIR:-}" ] || die "no GO_DIR in manifest — run: isukit probe"
+  local out="${APP_EXEC:-}"
+  [ -n "$out" ] || die "no APP_EXEC in manifest — run: isukit probe, or build by hand"
+  if [ "$force" != 1 ]; then
+    [ "${out#/home/isucon}" != "$out" ] || die "APP_EXEC ($out) isn't under /home/isucon — refusing to overwrite it. Pass --force to override."
+    local out_dir
+    out_dir=$(dirname "$out")
+    if [ "$out_dir" != "$GO_DIR" ] && { [ -z "${APP_WORKDIR:-}" ] || [ "$out_dir" != "$APP_WORKDIR" ]; }; then
+      die "APP_EXEC ($out) is not in GO_DIR ($GO_DIR) or APP_WORKDIR (${APP_WORKDIR:-unset}) — refusing to overwrite a binary outside the app's own build/work directory. Pass --force to override."
+    fi
+    if rsh "$APP" "test -f '$out'" 2>/dev/null; then
+      local head2
+      head2=$(rsh "$APP" "head -c2 '$out' 2>/dev/null" || true)
+      [ "$head2" != "#!" ] || die "APP_EXEC ($out) looks like a script (starts with #!), not a Go binary — refusing to overwrite it. Pass --force to override."
+    fi
+  fi
+  local exec_base
+  exec_base=$(basename "$out")
+  say "rsync $local_src/ -> $APP:$GO_DIR/"
+  if [ "$APP" = "local" ]; then
+    rsync -a --exclude .git --exclude "$exec_base" "$local_src/" "$GO_DIR/"
+  else
+    rsync -a --exclude .git --exclude "$exec_base" -e "ssh ${SSH_OPTS:-}" "$local_src/" "$APP:$GO_DIR/"
+  fi
+  say "building -> $out"
+  local tmp="/tmp/isukit-build.$$"
+  rsh "$APP" "cd $GO_DIR && go build -o $tmp . 2>&1 | head -40 && echo BUILD_OK" || die "build failed"
+  rsh "$APP" "sudo -n install -m 0755 -o ${APP_USER:-isucon} $tmp '$out' && rm -f $tmp" || die "install failed"
+  cmd_restart
+}
+
+cmd_restart() {
+  load
+  local units="${APP_UNIT:-} ${EXTRA_UNITS:-}"
+  units="$(printf '%s' "$units" | sed 's/^ *//;s/ *$//')"
+  [ -n "$units" ] || die "no APP_UNIT in manifest — run: isukit probe"
+  say "restarting:$units"
+  rsh "$APP" "sudo -n systemctl restart $units && sleep 2 && systemctl is-active $units"
+}
+
+# ---------------------------------------------------------------- finalize
+# Generalized reproducibility gate: the benchmark must pass after a cold boot.
+# Every year, a large fraction of teams FAIL here on settings they only ever
+# applied at runtime (SET GLOBAL, manual service starts, /tmp artefacts).
+cmd_finalize() {
+  load
+  say "1/4 turning measurement logging OFF (it costs real score)"
+  cmd_logs off
+  say "2/4 rebooting $APP"
+  rsh "$APP" "sudo -n systemctl reboot" || true
+  say "3/4 waiting for it to come back"
+  local i=0
+  until rsh "$APP" "true" 2>/dev/null; do i=$((i+1)); [ $i -gt 60 ] && die "host did not return"; sleep 5; done
+  rsh "$APP" "systemctl is-active ${UNITS_ACTIVE:-}" || warn "some units did not come up on their own — enable them"
+  say "4/4 scoring run"
+  cmd_bench "post-reboot verification"
+}
+
+# ---------------------------------------------------------------- one-shot
+cmd_go() {
+  local url="${1:-}" apph="${2:-}" benchh="${3:-}"
+  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit go <repo-url> <app-ssh-target> [bench-ssh-target]"
+  cmd_init "$url"
+  cmd_host app "$apph"
+  cmd_host bench "${benchh:-$apph}"
+  cmd_probe
+  cmd_setup
+  cmd_logs on
+  say "ready. fill BENCH_CMD in $(pwd)/$CONF, then: isukit bench"
+}
+
+usage() { cat >&2 <<'EOF'
+isukit — repo-agnostic ISUCON bootstrap + measurement loop
+
+  ONE COMMAND
+    isukit go <repo-url> <app-host> [bench-host]   clone, probe, install tools, enable logs
+
+  SETUP
+    isukit init <repo-url> [dir]        clone + create .isukit/
+    isukit host {app|bench} <target> [ssh opts...]   ssh target, or 'local'
+                                         ssh opts go into SSH_OPTS (config), e.g.
+                                         '-F ./ssh_config' or '-i ~/key.pem -p 2222'
+                                         note: scp needs -P for port, not -p — if you
+                                         hand-edit SSH_OPTS for a custom port, check both
+    isukit probe                        interrogate the server, write .isukit/manifest
+    isukit unit <systemd-unit-name>     override the auto-detected app unit, re-probe
+    isukit setup                        install alp + pt-query-digest on the app host
+
+  LOOP
+    isukit logs {on|off}                nginx LTSV + mysql slow log (off for scoring runs)
+    isukit bench [note]                 run BENCH_CMD, record score+sha to scores.tsv
+    isukit alp                          top endpoints by SUMMED response time
+    isukit slow                         top queries by total time
+    isukit pprof [sec] [port]           pull a Go CPU profile
+    isukit deploy [--force]             rsync source up, build/compose, restart
+                                         --force skips the "does this look like a
+                                         built binary under /home/isucon" safety check
+    isukit restart                      restart APP_UNIT (+ EXTRA_UNITS, if set)
+    isukit score                        run history
+
+  ENDGAME
+    isukit finalize                     logs off -> reboot -> verify -> score
+
+  CONFIG (.isukit/config)
+    SSH_OPTS       extra ssh/scp flags applied to every remote call
+    EXTRA_UNITS    space-separated extra units 'restart'/'finalize' also restart
+
+  App-unit auto-detection is a scored heuristic, not certain — it can pick wrong
+  on unusual layouts. 'isukit probe' prints APP_CANDIDATES and warns on low
+  confidence; sanity-check it there, and fix it with 'isukit unit <name>'.
+EOF
+exit 1; }
+
+main() {
+  local c="${1:-}"; shift || true
+  case "$c" in
+    go)       cmd_go "$@" ;;
+    init)     cmd_init "$@" ;;
+    host)     cmd_host "$@" ;;
+    probe)    cmd_probe ;;
+    unit)     cmd_unit "$@" ;;
+    setup)    cmd_setup ;;
+    logs)     cmd_logs "$@" ;;
+    bench)    cmd_bench "$@" ;;
+    score)    cmd_score ;;
+    alp)      cmd_alp ;;
+    slow)     cmd_slow ;;
+    pprof)    cmd_pprof "$@" ;;
+    deploy)   cmd_deploy "$@" ;;
+    restart)  cmd_restart ;;
+    finalize) cmd_finalize ;;
+    *)        usage ;;
+  esac
+}
+main "$@"
