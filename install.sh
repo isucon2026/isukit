@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # isukit installer.
-#   curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash
 # Args after the script (via `bash -s --`) are forwarded to the freshly
 # installed isukit, so this also works as a one-shot:
 #   curl -fsSL .../install.sh | bash -s -- go <repo-url> ubuntu@1.2.3.4 -i ~/.ssh/key.pem
 set -euo pipefail
 
-REPO_URL="https://github.com/mako-for-it/isukit"
+REPO_URL="https://github.com/isucon2026/isukit"
 SRC="${ISUKIT_HOME:-$HOME/.isukit-src}"
 
 say()  { printf '\033[36m:: %s\033[0m\n' "$*" >&2; }

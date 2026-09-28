@@ -17,12 +17,12 @@
 
 ## 1. isukit とは何か
 
-**bash 1枚**。依存なし。配布元は https://github.com/mako-for-it/isukit （public）。
+**bash 1枚**。依存なし。配布元は https://github.com/isucon2026/isukit （public）。
 
 インストールは1行。
 
 ```
-curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash
 ```
 
 `~/.isukit-src` に clone して、`isukit` を PATH の通る場所に置く。2回目以降は更新になる。PATH が通っていなければ、追加すべき `export` 行をそのまま出力するのでそれを貼る。
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh 
 **インストールと立ち上げを丸ごと1行**にもできる（`--` の後ろはそのまま `isukit` に渡る）。
 
 ```
-curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
   | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/<key>.pem
 ```
 
