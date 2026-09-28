@@ -17,6 +17,12 @@ One bash script, no dependencies. It does four things and nothing else:
    part of ISUCON repo layout is stable across years — Go dir, build tool,
    compose presence, unit naming, env file, env var names and bench flags all
    differ. Interrogating systemd is the one trick that survives all of them.
+   When systemd finds nothing (isucon6-final, isucon8-final, or a local
+   `make up` dev stack all run under docker-compose), `probe` falls back to
+   `docker ps` and still fills in `WEB_SERVER`/`DB_SERVER`, setting
+   `STACK_IN_DOCKER=1`. `deploy` / `logs on` / `slow on` still only ever touch
+   host config, so they no-op on that box — edit the compose file / container
+   config directly, then `isukit restart`.
 3. **Measure** — `bench` records score + git sha per run; `alp` / `slow` /
    `pprof` rank endpoints and queries by *summed* time; `score` is the history.
 4. **Ship** — `deploy` builds onto the exact path systemd already execs;
@@ -351,3 +357,16 @@ isukit ship "note"          # new branch -> commit -> push -> draft PR
 isukit revert [sha]         # git revert to undo a change
 isukit finalize             # the endgame sequence (all hosts)
 ```
+
+### Key manifest fields
+
+| Key | Meaning |
+|---|---|
+| `APP_UNIT` | Discovered systemd unit for the app |
+| `APP_UNIT_CONFIDENCE` | Confidence in `APP_UNIT`: `high` / `low` / `override` |
+| `ENV_FILE` | Path to the env file the app reads |
+| `WEB_SERVER` | Discovered web server (e.g. `nginx`) |
+| `DB_SERVER` | Discovered datastore (e.g. `mysql`) |
+| `STACK_IN_DOCKER` | `1` if web and/or db was found only via `docker ps` (`systemctl` saw nothing). `logs on` / `slow on` only ever rewrite host config, so they're silent no-ops here — edit the compose file / container config directly, then `isukit restart` |
+| `PROC_MANAGER` | `systemd` or `supervisor`. When `supervisor`, `APP_UNIT` is `supervisor.service`, and restarting it restarts every program under it |
+| `SUPERVISOR_PROGRAMS` | Only set when `PROC_MANAGER=supervisor`. Space-separated program names from `supervisorctl status`. Restart a single one with `supervisorctl restart <program>` |

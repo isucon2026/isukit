@@ -190,7 +190,7 @@ cd ~/personal-projects/isucon/isucon13/development && make up && make go
 ```
 
 isucon13 は言語別に8つ、isucon12-qualify は19個の compose ファイルを同梱している。
-**isukit の `probe` / `deploy` / `logs` はこの構成では効かない**（systemdが無い）。手元のMacでも同じ理由で `probe` は空の manifest を書いて警告だけ出す。
+**`isukit probe` はこの構成でも動く**：`systemctl` が何も見つけなくても `docker ps` にフォールバックして `WEB_SERVER` / `DB_SERVER` を埋め、`STACK_IN_DOCKER=1` を立てる。効かないのは `deploy` と `logs on` / `slow on`（ホスト側の設定を書き換えるだけで、コンテナの中身には触れない）。手元のMacで打っても同じ：アプリ自体は systemd unit を持たないので `APP_UNIT` は空のまま警告になるが、web/db 側は拾える。
 
 ---
 
@@ -488,3 +488,16 @@ isukit finalize                # 終盤の締め処理一式（全ホスト再�
 .isukit/bench-help.txt ベンチマーカーの --help 全文
 .isukit/ssh_config     `go -i` が書く ssh 設定
 ```
+
+### manifest の主なキー
+
+| キー | 意味 |
+|---|---|
+| `APP_UNIT` | 検出したアプリの systemd unit 名 |
+| `APP_UNIT_CONFIDENCE` | `APP_UNIT` の確信度：`high` / `low` / `override` |
+| `ENV_FILE` | アプリが読む env ファイルのパス |
+| `WEB_SERVER` | 検出した web サーバー（`nginx` など） |
+| `DB_SERVER` | 検出したデータストア（`mysql` など） |
+| `STACK_IN_DOCKER` | `1` なら web/db の少なくとも一方は `docker ps` でしか見つかっていない（`systemctl` は何も見ていない）。`logs on` / `slow on` はホスト側の設定を書き換えるだけなので無反応 — compose ファイル/コンテナ設定を直接編集して `isukit restart` |
+| `PROC_MANAGER` | `systemd` か `supervisor`。`supervisor` のとき `APP_UNIT` は `supervisor.service` になり、それを再起動すると配下の全プログラムが道連れで再起動する |
+| `SUPERVISOR_PROGRAMS` | `PROC_MANAGER=supervisor` のときだけ立つ。`supervisorctl status` のプログラム名一覧（スペース区切り）。1言語だけ再起動したいなら `supervisorctl restart <program>` を使う |

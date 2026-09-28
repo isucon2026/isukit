@@ -54,11 +54,21 @@ Then, before touching anything:
 2. Confirm `isukit probe` output matches reality — especially `APP_UNIT`. If confidence
    is `low`, read `APP_CANDIDATES` and fix it with `isukit unit <name>` before doing
    anything else. Every later step depends on this being right.
-3. If the contest handed out **more than one instance**, register the others:
+3. Check `.isukit/manifest` for `STACK_IN_DOCKER` and `PROC_MANAGER` before you touch
+   logging or restarts.
+   - `STACK_IN_DOCKER=1` means the web and/or db tier only showed up via `docker ps`
+     (isucon6-final, isucon8-final). `isukit logs on` / `isukit slow on` rewrite HOST
+     config and are silent no-ops there — do not trust them, and do not conclude "no
+     slow queries" from an empty slow log on this box. Edit the compose file / container
+     config instead, then `isukit restart`.
+   - `PROC_MANAGER=supervisor` (isucon5-final) means `APP_UNIT` is `supervisor.service`:
+     restarting it restarts every language at once. To restart a single program, use
+     `supervisorctl restart <program>` with a name from `SUPERVISOR_PROGRAMS`.
+4. If the contest handed out **more than one instance**, register the others:
    `isukit host add <target>` for each. `restart` and `finalize` then cover all of them.
    ISUCON2026 explicitly does **not** guarantee the order instances come back in, so never
    build a fix that assumes one host is up before another.
-4. Take a baseline: `isukit bench baseline`. A loop with no baseline cannot attribute
+5. Take a baseline: `isukit bench baseline`. A loop with no baseline cannot attribute
    anything.
 
 (Before contest day: `launch/prestage.sh` stages the AWS account, VPC/subnet, security
