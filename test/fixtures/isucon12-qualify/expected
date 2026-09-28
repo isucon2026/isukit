@@ -1,0 +1,6 @@
+APP_UNIT=isuports.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=nginx
+DB_SERVER=mysql
+CACHE="redis-server "
+SRC_LANGS="go java node perl php python ruby rust tenant_db "

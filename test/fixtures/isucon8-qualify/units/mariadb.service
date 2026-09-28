@@ -1,0 +1,11 @@
+[Unit]
+Description=MariaDB database server
+After=network.target
+
+[Service]
+Type=simple
+User=mysql
+ExecStart=/usr/sbin/mysqld
+
+[Install]
+WantedBy=multi-user.target

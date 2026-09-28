@@ -1,0 +1,11 @@
+[Unit]
+Description=h2o - the optimized HTTP/1, HTTP/2 server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/h2o -c /etc/h2o/h2o.conf
+
+[Install]
+WantedBy=multi-user.target

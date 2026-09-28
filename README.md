@@ -28,9 +28,11 @@ the loop.
     isukit alp                  # endpoints ranked by SUMMED response time
     isukit slow                 # queries ranked by total time
     isukit pprof 30             # Go CPU profile, if pprof is wired in
+    isukit attribute            # compare last two runs; KEEP / REVERT / INCONCLUSIVE
     # change exactly ONE thing
     isukit deploy               # rsync + build onto the systemd ExecStart path + restart
-    isukit bench "added idx X"  # keep it or revert it — the number decides
+    isukit bench "added idx X"  # record the score; manual mode prompts for the value
+    isukit ship "added idx X"   # commit everything + push + draft PR, one change per commit
     isukit score                # full history
 
 `isukit probe` picks the app's systemd unit with a scored heuristic, not a
@@ -38,9 +40,13 @@ guarantee — see "Why it probes instead of assuming" below. If it picked wrong:
 
     isukit unit <systemd-unit-name>   # override + re-probe
 
+Diagnostic:
+
+    isukit doctor               # non-destructive check + auto-repair of config, connectivity, bench mode
+
 Endgame:
 
-    isukit finalize   # logs OFF -> reboot -> verify units came back -> score
+    isukit finalize             # logs OFF -> reboot ALL hosts -> verify units -> score
 
 ## Why it probes instead of assuming
 
@@ -109,13 +115,19 @@ is low-confidence. Sanity-check that line; fix a wrong pick with
 
 ## Files
 
-    .isukit/config        APP, BENCH, BENCH_CMD, SSH_OPTS, EXTRA_UNITS   (you edit this)
+    .isukit/config        APP, BENCH, BENCH_CMD, SSH_OPTS, EXTRA_UNITS, EXTRA_HOSTS, BENCH_MODE
     .isukit/manifest      probe output, sourced by every other command
     .isukit/scores.tsv    when / sha / score / note / raw log
     .isukit/bench-*.log   full benchmarker output per run
 
 All git-ignored. `.isukit/` lives inside each cloned problem repo, so multiple
 contests coexist without stepping on each other.
+
+Subdirectories: [`launch/`](launch/README.md) holds AWS pre-contest staging and
+instance bootstrap scripts; [`skills/isucon/`](skills/isucon/SKILL.md) is a Claude
+skill for the measure → diagnose → fix → ship → re-measure loop; [`test/`](test/)
+is an offline fixture suite that validates the discovery logic against every past
+ISUCON's real systemd units and configs.
 
 ## Caveats
 
@@ -142,3 +154,16 @@ contests coexist without stepping on each other.
 - `EXTRA_UNITS` (config) is a space-separated list of extra units that
   `restart`/`finalize` also restart alongside the detected `APP_UNIT` —
   matcher/mock/simulator services some years ship as separate units.
+- `EXTRA_HOSTS` (config) is a space-separated list of additional app instances
+  (set via `isukit host add <target>`). Both `restart` and `finalize` iterate
+  every host; restart order is not guaranteed across instances.
+- `BENCH_MODE` (config) is either `auto` (runs `BENCH_CMD` over ssh to the bench
+  host) or `manual` (you enqueue the run in the contest portal and record the
+  score with `isukit bench --score <N>`). `isukit benchprobe` auto-detects `manual`
+  mode when no benchmarker binary is found. On contest day (ISUCON11 onward) the
+  benchmark is triggered from a web portal, not from ssh, so `manual` mode is the
+  correct production state — not a failure. Flip modes with `isukit benchmode <mode>`.
+  In manual mode, use `isukit bench --score <N> "<note>"` to record a passing run,
+  or `isukit bench --fail "<note>"` when the run errored.
+- `isukit revert [<sha>]` undoes a single commit on an `isukit/*` branch — useful
+  for reverting a bad change mid-contest without losing the record in `scores.tsv`.

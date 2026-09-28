@@ -1,0 +1,5 @@
+APP_UNIT=isutrain-go.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=nginx
+DB_SERVER=
+SRC_LANGS="go perl php python ruby "

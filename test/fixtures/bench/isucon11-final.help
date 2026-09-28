@@ -1,0 +1,25 @@
+Usage of ./benchmarker:
+  -exit-status
+    	set exit status non-zero when a benchmark result is failing
+  -is-debug
+    	silence debug log
+  -mem-profile string
+    	path of output heap profile at max memStats.sys allocated. ex: memprof
+  -no-load
+    	exit on finished prepare
+  -no-prepare
+    	only load and validation step
+  -no-resource
+    	do not verify page resource
+  -no-validation-timeout
+    	do not timeout in validation
+  -profile string
+    	ex: cpu.out
+  -prom-out string
+    	prometheus text-file output path
+  -target string
+    	ex: localhost:9292 (default "")
+  -tls
+    	target server is a tls
+  -version
+    	show version and exit 1

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fixed plausible core count -- HOST_CPUS is not asserted by any fixture.
+echo 4

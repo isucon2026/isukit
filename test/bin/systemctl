@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""systemctl stub for isukit's offline probe test harness.
+
+Answers from ISUKIT_FIXTURE (a fixture dir under test/fixtures/<year>/):
+  units/*.service   -- the units systemd "knows about" (list-units output);
+                       FragmentPath for each is reported as /etc/systemd/system/<name>.
+  active            -- newline list of bare (no .service suffix) unit names
+                       that are currently active (is-active).
+
+Any WorkingDirectory/ExecStart/EnvironmentFile path in a unit file that starts
+with the literal string /home/isucon is rewritten to $ISUKIT_FAKE_HOME/... so
+it lines up with the same substitution run-probe-tests.sh applies to the
+extracted PROBE_SCRIPT text (see that script for why).
+
+Supports exactly what PROBE_SCRIPT calls: list-units, is-active, show -p PROP
+[--value] UNIT. list-unit-files and cat are supported too (not called by
+PROBE_SCRIPT today, but asked for in the test spec) for robustness.
+"""
+import sys, os, glob
+
+FIX = os.environ.get("ISUKIT_FIXTURE")
+FAKE_HOME = os.environ.get("ISUKIT_FAKE_HOME", "/home/isucon")
+REAL_HOME = "/home/isucon"
+
+if not FIX:
+    sys.stderr.write("systemctl-stub: ISUKIT_FIXTURE not set\n")
+    sys.exit(1)
+
+UNITS_DIR = os.path.join(FIX, "units")
+
+
+def rewrite(v):
+    if v and v.startswith(REAL_HOME):
+        return FAKE_HOME + v[len(REAL_HOME):]
+    return v
+
+
+def unit_names():
+    if not os.path.isdir(UNITS_DIR):
+        return []
+    return sorted(os.path.basename(p) for p in glob.glob(os.path.join(UNITS_DIR, "*.service")))
+
+
+def norm(name):
+    return name if name.endswith(".service") else name + ".service"
+
+
+def parse_unit(name):
+    path = os.path.join(UNITS_DIR, name)
+    props = {"WorkingDirectory": "", "ExecStart": "", "EnvironmentFile": [], "User": "", "Type": "simple"}
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("["):
+                continue
+            if "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip()
+            if k == "WorkingDirectory":
+                props["WorkingDirectory"] = rewrite(v)
+            elif k == "ExecStart":
+                # ExecStart may carry a leading '-'/'@' systemd modifier on the path
+                props["ExecStart"] = " ".join(rewrite(tok) if i == 0 else tok
+                                               for i, tok in enumerate(v.split()))
+            elif k == "EnvironmentFile":
+                props["EnvironmentFile"].append(rewrite(v.lstrip("-")))
+            elif k == "User":
+                props["User"] = v
+            elif k == "Type":
+                props["Type"] = v
+    return props
+
+
+def active_set():
+    p = os.path.join(FIX, "active")
+    names = set()
+    if not os.path.isfile(p):
+        return names
+    with open(p) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            names.add(line[: -len(".service")] if line.endswith(".service") else line)
+    return names
+
+
+def main(argv):
+    if not argv:
+        return 1
+    cmd = argv[0]
+
+    if cmd == "list-units":
+        for n in unit_names():
+            print(f"{n} loaded active running {n}")
+        return 0
+
+    if cmd == "list-unit-files":
+        for n in unit_names():
+            print(f"{n} enabled")
+        return 0
+
+    if cmd == "is-active":
+        quiet = "--quiet" in argv[1:]
+        unit = None
+        for a in argv[1:]:
+            if not a.startswith("-"):
+                unit = a
+        if unit is None:
+            return 1
+        bare = unit[: -len(".service")] if unit.endswith(".service") else unit
+        active = bare in active_set()
+        if not quiet:
+            print("active" if active else "inactive")
+        return 0 if active else 3
+
+    if cmd == "show":
+        rest = [a for a in argv[1:] if a != "--value"]
+        value_only = "--value" in argv[1:]
+        prop = None
+        unit = None
+        i = 0
+        while i < len(rest):
+            if rest[i] == "-p" and i + 1 < len(rest):
+                prop = rest[i + 1]
+                i += 2
+                continue
+            unit = rest[i]
+            i += 1
+        if not prop or not unit:
+            return 1
+        uname = norm(unit)
+        data = parse_unit(uname) or {"WorkingDirectory": "", "ExecStart": "", "EnvironmentFile": [], "User": "", "Type": "simple"}
+        fragpath = f"/etc/systemd/system/{uname}" if os.path.isfile(os.path.join(UNITS_DIR, uname)) else ""
+
+        outs = {
+            "FragmentPath": fragpath,
+            "WorkingDirectory": data["WorkingDirectory"],
+            "User": data["User"],
+            "Type": data["Type"],
+        }
+        if data["ExecStart"]:
+            path = data["ExecStart"].split()[0]
+            outs["ExecStart"] = (
+                f"{{ path={path} ; argv[]={data['ExecStart']} ; ignore_errors=no ; "
+                f"start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }}"
+            )
+        else:
+            outs["ExecStart"] = ""
+        if data["EnvironmentFile"]:
+            outs["EnvironmentFiles"] = " ".join(f"{p} (ignore_errors=no)" for p in data["EnvironmentFile"])
+        else:
+            outs["EnvironmentFiles"] = ""
+
+        lines = []
+        for p in prop.split(","):
+            v = outs.get(p, "")
+            lines.append(v if value_only else f"{p}={v}")
+        print("\n".join(lines))
+        return 0
+
+    if cmd == "cat":
+        unit = argv[-1]
+        uname = norm(unit)
+        path = os.path.join(UNITS_DIR, uname)
+        if os.path.isfile(path):
+            with open(path) as f:
+                sys.stdout.write(f.read())
+            return 0
+        return 1
+
+    # Unknown subcommand: succeed quietly rather than break a probe on an
+    # incidental call PROBE_SCRIPT doesn't actually make.
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

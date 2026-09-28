@@ -1,0 +1,11 @@
+[Unit]
+Description=MySQL Community Server
+After=network.target
+
+[Service]
+Type=simple
+User=mysql
+ExecStart=/usr/sbin/mysqld
+
+[Install]
+WantedBy=multi-user.target

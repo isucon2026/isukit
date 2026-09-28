@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fixed plausible free(1) -m output -- HOST_MEM is not asserted by any fixture.
+cat <<'EOF'
+              total        used        free      shared  buff/cache   available
+Mem:           3936        512        256          64        3168        3200
+Swap:             0           0           0
+EOF

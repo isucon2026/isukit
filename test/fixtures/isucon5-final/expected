@@ -1,0 +1,7 @@
+APP_UNIT=supervisor.service
+APP_UNIT_CONFIDENCE=low
+WEB_SERVER=nginx
+DB_SERVER=postgresql
+SRC_LANGS="golang java node perl php python ruby scala sql static "
+PROC_MANAGER=supervisor
+SUPERVISOR_PROGRAMS="ruby "

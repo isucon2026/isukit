@@ -1,0 +1,25 @@
+Usage of ./bench:
+  -data-dir string
+    	Data directory (default "data")
+  -debug
+    	Debug mode
+  -duration duration
+    	Benchmark duration (default 1m0s)
+  -exit-error-on-fail
+    	Exit error on fail
+  -initialize-request-timeout duration
+    	Initialize request timeout (default 30s)
+  -prepare-only
+    	Prepare only
+  -reproduce
+    	reproduce contest day mode. default: false
+  -request-timeout duration
+    	Default request timeout (default 30s)
+  -skip-prepare
+    	Skip prepare
+  -strict-prepare
+    	strict prepare mode. default: true (default true)
+  -target-addr string
+    	Benchmark target address e.g. host:port
+  -target-url string
+    	Benchmark target URL (default "https://t.isucon.dev")

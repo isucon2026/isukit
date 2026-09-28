@@ -1,0 +1,5 @@
+APP_UNIT=isuumo.go.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=nginx
+DB_SERVER=mysql
+SRC_LANGS="deno go nodejs perl php python ruby rust "

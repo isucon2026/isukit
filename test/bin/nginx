@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""nginx stub. -T dumps fixture/nginx/**/*.conf as `# configuration file <path>:`
+blocks (path = /etc/nginx/<relative path under fixture/nginx/>), the same shape
+`nginx -T` prints for real. -v prints a fixed version banner. No fixture/nginx/
+dir -> exit 1, empty output (nginx not actually present/configured)."""
+import sys, os, glob
+
+FIX = os.environ.get("ISUKIT_FIXTURE", "")
+NGINX_DIR = os.path.join(FIX, "nginx")
+
+
+def main(argv):
+    if "-v" in argv:
+        sys.stderr.write("nginx version: nginx/1.18.0 (Ubuntu)\n")
+        return 0
+
+    if "-T" in argv:
+        if not os.path.isdir(NGINX_DIR):
+            return 1
+        files = sorted(
+            p for p in glob.glob(os.path.join(NGINX_DIR, "**", "*.conf"), recursive=True)
+        )
+        if not files:
+            return 1
+        for f in files:
+            rel = os.path.relpath(f, NGINX_DIR)
+            print(f"# configuration file /etc/nginx/{rel}:")
+            with open(f) as fh:
+                sys.stdout.write(fh.read())
+            print()
+        return 0
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

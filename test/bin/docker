@@ -1,0 +1,17 @@
+#!/bin/bash
+# docker stub for isukit's offline probe harness.
+#
+# This stub exists to SHADOW the real docker on the developer's laptop: the probe
+# runs `command -v docker` and, if found, `docker ps`. Without a stub on PATH that
+# reads the host's actual container list into a fixture's output -- nondeterministic,
+# and a live query against Mako's machine from a test run.
+#
+# Answers `ps` from $ISUKIT_FIXTURE/docker-ps.txt (one "<image> <name>" per line,
+# which is what `--format "{{.Image}} {{.Names}}"` produces). A fixture with no
+# such file models a host where docker is installed but nothing is running -- so
+# the probe's container fallback contributes nothing, exactly as on a host-native year.
+set -u
+[ "${1:-}" = "ps" ] || exit 0
+f="${ISUKIT_FIXTURE:-}/docker-ps.txt"
+[ -f "$f" ] && cat "$f"
+exit 0

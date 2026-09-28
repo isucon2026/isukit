@@ -1,0 +1,12 @@
+[Unit]
+Description=PowerDNS Authoritative Server
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=pdns
+ExecStart=/usr/sbin/pdns_server --guardian=no --daemon=no --disable-syslog --write-pid=no
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
