@@ -6,11 +6,11 @@
 
 ## インストール
 
-    curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash
 
 `${ISUKIT_HOME:-$HOME/.isukit-src}` に clone / 更新し、`isukit` を PATH の通る場所にシンボリックリンクする。スクリプトの後ろに続けた引数はそのままインストール直後の `isukit` に渡るので、これは「ゼロから、調査・計測可能な状態のホストまで」を1行で終わらせる本物のワンライナーでもある。
 
-    curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh \
+    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
       | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
 
     ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port]

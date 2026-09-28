@@ -6,13 +6,13 @@ One command from a repo URL to an instrumented, measurable app host.
 
 ## Install
 
-    curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash
 
 Clones/updates into `${ISUKIT_HOME:-$HOME/.isukit-src}` and symlinks `isukit`
 onto PATH. Args after the script forward to the freshly installed `isukit`, so
 this is also a genuine one-liner from zero to a probed, instrumented host:
 
-    curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh \
+    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
       | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
 
     ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port]
