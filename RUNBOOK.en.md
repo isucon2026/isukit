@@ -81,6 +81,189 @@ isukit os       # quick OS snapshot: uptime / vmstat / iostat / mpstat / free / 
 
 ---
 
+## Where the servers come from
+
+### Production (ISUCON2026)
+
+- **Date: Saturday, 2026-10-31, 10:00–18:00 JST (8 hours)**
+- Teams are **up to 3 people**
+- **Registration closed in early August 2026** (three rounds of 300/300/335 seats, all filled)
+- This year's organizer is Sakura Internet (venue: their Osaka HQ, Blooming Camp) — but **the contest environment runs on AWS, not Sakura's cloud**
+- Rule: **each competitor brings their own AWS account and launches the AMI the organizers announce, on their own EC2, after the contest starts**
+
+So the production setup is: organizers publish an AMI ID → you launch EC2 in your own account → you SSH in with your own key. No bastion, no VPN. **The procedure you build in practice is the procedure you use for real.**
+
+Login is the `ubuntu` user, then `sudo su - isucon`.
+
+### Practice (each person's own AWS sandbox account)
+
+**Fixed to ap-northeast-1 (Tokyo).** Log in and confirm which account you're actually in:
+
+```
+aws sso login --profile sandbox
+export AWS_PROFILE=sandbox AWS_REGION=ap-northeast-1
+aws sts get-caller-identity        # launching into the wrong account is the single most common accident here
+```
+
+#### Recommended: use the `launch/` scripts (practice the exact procedure you'll use for real)
+
+The kit ships `launch/prestage.sh` / `launch/launch.sh` — the same scripts you'll use on contest day. Practicing with these, rather than hand-assembling raw AWS CLI calls, makes the practice run *be* the contest-day procedure. Verified end-to-end against a real account (`395103361978`) on 2026-09-28:
+
+```
+cd ~/personal-projects/isucon/isukit
+
+# ① prestage — the T-7d-equivalent step for real contest day. Needs no AMI, so do this well before contest day.
+launch/prestage.sh \
+  --key-name isukit \
+  --key-file ~/claude-workspace/isukit.pem \
+  --region ap-northeast-1 \
+  --sg-name isukit-ssh \
+  --allow-ip <n000r111's IP> \
+  --allow-ip <imaharu's IP>
+```
+
+**Security groups cannot be changed after the instances launch. That's not an AWS limitation — it's an ISUCON rule (禁止事項, a forbidden action).** Every teammate's IP has to be in via `--allow-ip` by the time you prestage. Miss one and that person has no SSH for the entire 8 hours, with no legal remedy. The script prints the CIDRs it actually put into the SG, so check that output against the roster — not the flags you typed.
+
+`isukit.pem` (the file behind `--key-file`) gets distributed to the team out of band. It's already `.gitignore`d — never let it land in the shared repo.
+
+```
+# ② launch — T+0, once the organizers announce the AMI
+launch/launch.sh \
+  --ami ami-0fcf9e8e8675a9ee4 \
+  --type t3.small \
+  --count 1 \
+  --name-prefix isucon \
+  --yes
+```
+
+`--ami` / `--type` / `--count` have no defaults on purpose. The design is that a human reads what the organizers announce on the day and types it in each time — the kit never guesses. `--root-gb` is practice-only (a bigger-than-default root volume keeps the bench log from filling the disk); on contest day the manual's sizing wins instead — changing the instance shape at all risks a 禁止事項 violation.
+
+Once it's up, you rejoin the normal measurement flow:
+
+```
+isukit init <contest-repo-url> <dir>
+isukit host app ubuntu@<public-ip> -i ~/claude-workspace/isukit.pem
+isukit probe        # discovers the stack; reads nothing from the repo
+isukit benchprobe    # switches BENCH_MODE to manual if no benchmarker binary is found
+isukit setup         # installs alp + percona-toolkit
+isukit logs on       # nginx LTSV + mysql long_query_time=0
+isukit doctor        # non-destructive health check + self-repair
+```
+
+`BENCH_MODE=manual` is **the correct production state**, not a failure — since ISUCON11, the benchmark is triggered from the portal UI, and SSHing into the benchmarker host is an explicit 禁止事項.
+
+Clean up once practice is done:
+
+```
+aws ec2 terminate-instances --instance-ids <ids>
+# wait for 'terminated', then:
+aws ec2 delete-security-group --group-name isukit-ssh
+aws ec2 delete-key-pair --key-name isukit
+```
+
+**Verified AMI (2026-09-28):** `ami-0fcf9e8e8675a9ee4` (ap-northeast-1, x86_64) is a box with the whole isucon14 problem baked in — `isuride-*` systemd units, MySQL 8.0.46, nginx, even `alp` preinstalled. `isukit probe` nailed it in one shot with `APP_UNIT_CONFIDENCE=high`. Proven as a practice box. The matching row in the table below is now updated to verified too.
+
+Teammates can't get into the console with their own SSO (org-level Identity Center only lets the account owner hand out permissions). If console access is needed, an IAM user directly under the account is the fallback — but SSH + the portal is normally all you need.
+
+#### Manual: spin it up directly with the AWS CLI
+
+The raw commands, for when you want to understand what the scripts above do internally, or want to build it without them.
+
+#### Available AMIs (confirmed against the real account, 2026-09-02)
+
+| Past contest | AMI | Status | SSH |
+|---|---|---|---|
+| isucon13 (official) | `ami-041289d910c114864` | **available** | `ubuntu` → `sudo su - isucon` |
+| isucon12-qualify (official) | `ami-05c5b59deed48f66b` | **gone (InvalidAMIID.NotFound)** | — |
+| isucon12-qualify (matsuu) | `ami-073140ad092048333` | **available** | `ubuntu` → `sudo -i -u isucon` |
+| isucon13 (matsuu) | `ami-006d211cb716fe8a0` | unverified | `ubuntu` → `sudo -i -u isucon` |
+| isucon14 (matsuu) | `ami-0fcf9e8e8675a9ee4` | **verified** (2026-09-28, ships `isuride-*` units / MySQL 8.0.46 / nginx / alp, `APP_UNIT_CONFIDENCE=high`) | `ubuntu` → `sudo -i -u isucon` |
+
+**Official AMIs vanish without notice.** The isucon12-qualify official AMI is already gone (which is also why the official repo's `cloudformation.yaml` doesn't work as-is anymore). The fallback is the AMI table in [matsuu/aws-isucon](https://github.com/matsuu/aws-isucon) — it includes both webapp and bench boxes. **Don't hardcode an ID — check the README's table on the day you use it** (they get rebuilt and change).
+
+For years even older or missing, there's [matsuu/cloud-init-isucon](https://github.com/matsuu/cloud-init-isucon) (builds onto plain Ubuntu via user-data; covers isucon10q/11q/11f/12q/12f/13/14/private-isu), or the repo's own `provisioning/packer` / `provisioning/ansible`.
+
+#### Actually launching it (copy-paste ready)
+
+```
+export AWS_PROFILE=sandbox AWS_REGION=ap-northeast-1
+VPC=$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId' --output text)
+SUBNET=$(aws ec2 describe-subnets --filters Name=default-for-az,Values=true --query 'Subnets[0].SubnetId' --output text)
+MYIP=$(curl -s https://checkip.amazonaws.com)
+
+# ① key (once, first time only)
+aws ec2 create-key-pair --key-name isukit-sandbox --query KeyMaterial --output text > ~/.ssh/isukit-sandbox.pem
+chmod 600 ~/.ssh/isukit-sandbox.pem
+
+# ② security group (port 22 from your own IP + everything open within the group)
+SG=$(aws ec2 create-security-group --group-name isukit-sandbox \
+      --description "isucon practice" --vpc-id "$VPC" --query GroupId --output text)
+aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr "$MYIP/32"
+aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol -1 --source-group "$SG"
+
+# ③ launch. --block-device-mappings is mandatory (the AMI defaults to 8GB / 16GB, which the bench's logs and data will fill)
+aws ec2 run-instances \
+  --image-id ami-041289d910c114864 \
+  --instance-type c5.large \
+  --key-name isukit-sandbox --security-group-ids "$SG" --subnet-id "$SUBNET" \
+  --associate-public-ip-address \
+  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":30,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=isucon13-app},{Key=purpose,Value=isucon-practice}]' \
+  --query 'Instances[].InstanceId' --output text
+
+# ④ get the public IP. This is what <app-host> actually is
+aws ec2 describe-instances --filters Name=tag:purpose,Values=isucon-practice \
+  Name=instance-state-name,Values=running \
+  --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,PublicIpAddress]' --output text
+```
+
+> **Skip `--block-device-mappings` and you'll get stuck later.** The official isucon13 AMI's default root is **8GB gp2**; matsuu's isucon12-qualify is **16GB**. A slow log with `long_query_time=0` fills that fast. Use **30GB gp3**.
+
+#### The `<app-host>` you hand to isukit
+
+`<app-host>` is literally the ssh destination string. Pass `ubuntu@<Public IP>` and the key via `-i`:
+
+```
+isukit host app   ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem
+isukit host bench ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem   # fine to reuse the app box for bench too, if you're consolidating onto one instance for practice
+```
+
+If there are multiple app instances (expected for ISUCON2026), register the extra hosts:
+
+```
+isukit host add ubuntu@43.207.152.141 -i ~/.ssh/isukit-sandbox.pem
+isukit host add ubuntu@43.207.152.142 -i ~/.ssh/isukit-sandbox.pem
+```
+
+`restart` and `finalize` sweep every host (restart order isn't guaranteed).
+
+#### Instance count
+
+- A serious practice run: app **3× c5.large** (2 vCPU / 4 GiB) + bench **1**. Same shape as production.
+- Just checking the kit works, or practicing single-host tuning: **1 instance is enough** (the matsuu AMI ships the bench too, so it runs on the same box).
+
+**Cost:** c5.large runs about **$0.107/hr** in Tokyo. Four instances for six hours ≈ **~$3**.
+
+> **Forgetting to tear down is the real expense.** Leave four instances running and it's $300+/month. Always, once practice is done:
+> ```
+> aws ec2 describe-instances --filters Name=tag:purpose,Values=isucon-practice \
+>   Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text \
+>   | xargs -r aws ec2 terminate-instances --instance-ids
+> ```
+> Even in a sandbox, someone real gets billed. **Tear it down the same day.**
+
+### Local-only, if that's all you need
+
+The absolute score numbers aren't meaningful this way, but it's still real practice touching the code.
+
+```
+cd ~/personal-projects/isucon/isucon13/development && make up && make go
+```
+
+isucon13 ships 8 compose files (one per language); isucon12-qualify ships 19. `isukit probe` still works against this setup — when `systemctl` finds nothing it falls back to `docker ps`, fills in `WEB_SERVER` / `DB_SERVER`, and sets `STACK_IN_DOCKER=1`. What doesn't work is `deploy` and `logs on` / `slow on` (they only ever rewrite host config, never touch what's inside a container). Same story running it on your own Mac: the app itself has no systemd unit, so `APP_UNIT` stays empty and warns, but web/db still get picked up.
+
+---
+
 ## Phase 0 — Access (before the clock)
 
 ```
