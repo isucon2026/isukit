@@ -691,6 +691,21 @@ cmd_logs() {
   local mode="${1:-}"
   case "$mode" in on|off) ;; *) die "usage: isukit logs {on|off}" ;; esac
   say "logs $mode on $APP"
+  # ISUCON practice AMIs commonly ship an 8GB root. long_query_time=0 below
+  # logs every query, and a benchmark run can produce gigabytes of slow log
+  # fast enough to fill that root and wedge the app mid-run — warn, but still
+  # enable it, since a short run under thin headroom may be exactly what's wanted.
+  if [ "$mode" = on ]; then
+    local avail_kb
+    avail_kb=$(rsh "$APP" "df -P /tmp | tail -1 | tr -s ' ' | cut -d' ' -f4" 2>/dev/null || true)
+    if [ -n "$avail_kb" ]; then
+      if [ "$avail_kb" -lt 2097152 ] 2>/dev/null; then
+        warn "only $((avail_kb / 1024))MB free on /tmp on $APP — long_query_time=0 logs EVERY query; a benchmark run can produce gigabytes and a full root wedges the app. enabling anyway."
+      fi
+    else
+      warn "could not check free space on /tmp on $APP before enabling slow logging"
+    fi
+  fi
   printf 'MODE=%s\nAPP_UNIT=%s\n%s\n' "$mode" "${APP_UNIT:-}" "$LOGS_SCRIPT" | rsh_stdin "$APP"
 }
 
@@ -1141,7 +1156,8 @@ cmd_finalize() {
 
 # ---------------------------------------------------------------- one-shot
 go_ssh_host_block() { # go_ssh_host_block <alias> <user@host|host> <keyfile> <port>
-  local alias="$1" target="$2" key="$3" port="$4" user="" host="$target"
+  local alias="$1" target="$2" key="$3" port="$4" user=""
+  local host="$target" # split: local expands all args before assigning, so $target isn't set yet on one line
   if [ "${target#*@}" != "$target" ]; then
     user="${target%%@*}"
     host="${target#*@}"

@@ -17,12 +17,12 @@
 
 ## 1. isukit とは何か
 
-**bash 1枚**。依存なし。配布元は https://github.com/mako-for-it/isukit （public）。
+**bash 1枚**。依存なし。配布元は https://github.com/isucon2026/isukit （public）。
 
 インストールは1行。
 
 ```
-curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash
 ```
 
 `~/.isukit-src` に clone して、`isukit` を PATH の通る場所に置く。2回目以降は更新になる。PATH が通っていなければ、追加すべき `export` 行をそのまま出力するのでそれを貼る。
@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh 
 **インストールと立ち上げを丸ごと1行**にもできる（`--` の後ろはそのまま `isukit` に渡る）。
 
 ```
-curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
   | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/<key>.pem
 ```
 
@@ -97,6 +97,70 @@ export AWS_PROFILE=sandbox AWS_REGION=ap-northeast-1
 aws sts get-caller-identity        # 別アカウントに立てる事故がいちばん多い
 ```
 
+#### 推奨：`launch/` のスクリプトを使う（本番と同じ手順で練習する）
+
+キット同梱の `launch/prestage.sh` / `launch/launch.sh` は本番当日に使うのと同じスクリプト。生のAWS CLIを手で組み立てるより、これで練習する方が当日の手順そのものになる。2026-09-28に実アカウント（`395103361978`）で end-to-end 検証済み：
+
+```
+cd ~/personal-projects/isucon/isukit
+
+# ① prestage — 本番なら T-7d 相当。AMI を必要としないので当日より前に済ませておく
+launch/prestage.sh \
+  --key-name isukit \
+  --key-file ~/claude-workspace/isukit.pem \
+  --region ap-northeast-1 \
+  --sg-name isukit-ssh \
+  --allow-ip <n000r111のIP> \
+  --allow-ip <imaharuのIP>
+```
+
+**セキュリティグループは起動後に変更できない。これはAWSの制約ではなく、ISUCONのルール上の禁止事項。** チームメンバー全員のIPを `--allow-ip` で prestage の時点までに入れておくこと。入れ忘れると、8時間まるごとSSHできないまま復旧手段が無い。スクリプトは実際にSGへ入ったCIDRを出力するので、フラグではなくその出力をロスターと突き合わせて確認する。
+
+`isukit.pem`（`--key-file` の実体）はチームへ別経路で配布する。`.gitignore` 済みなので、間違っても共有リポジトリには置かない。
+
+```
+# ② launch — T+0、運営がAMIを発表してから
+launch/launch.sh \
+  --ami ami-0fcf9e8e8675a9ee4 \
+  --type t3.small \
+  --count 1 \
+  --name-prefix isucon \
+  --yes
+```
+
+`--ami` / `--type` / `--count` にデフォルトが無いのは意図的。運営が当日発表する値をその都度人間が読んで打ち込む設計で、キットが勝手に推測することはない。`--root-gb` は練習専用のオプション（既定より大きいルートボリュームでベンチのログ溢れを防げる）で、本番当日はマニュアルの指定が優先——インスタンス形状を変えること自体が禁止事項に触れうる。
+
+立ち上げたらあとは通常の計測フローに合流する：
+
+```
+isukit init <contest-repo-url> <dir>
+isukit host app ubuntu@<public-ip> -i ~/claude-workspace/isukit.pem
+isukit probe        # スタックを発見。リポジトリは読まない
+isukit benchprobe    # ベンチマーカーが無ければ BENCH_MODE を manual に切替
+isukit setup         # alp + percona-toolkit を導入
+isukit logs on       # nginx LTSV + mysql long_query_time=0
+isukit doctor        # 非破壊の健全性チェック＋自己修復
+```
+
+`BENCH_MODE=manual` は**正しい本番状態**であって失敗ではない——ISUCON11以降はベンチマークがポータルUIから起動され、ベンチマーカーホストへのSSHは明確な禁止事項。
+
+練習が終わったら片付ける：
+
+```
+aws ec2 terminate-instances --instance-ids <ids>
+# 'terminated' を待ってから：
+aws ec2 delete-security-group --group-name isukit-ssh
+aws ec2 delete-key-pair --key-name isukit
+```
+
+**検証済みAMI（2026-09-28）：** `ami-0fcf9e8e8675a9ee4`（ap-northeast-1、x86_64）は isucon14 の問題一式が焼き込まれた箱——`isuride-*` の systemd unit、MySQL 8.0.46、nginx、`alp` まで最初から入っている。`isukit probe` は `APP_UNIT_CONFIDENCE=high` で一発で当てた。練習台として実績あり。下の表の該当行もこれで検証済みに更新。
+
+チームメンバーは自分のSSOではコンソールに入れない（組織レベルのIdentity Centerはアカウント所有者しか権限を配れない）。コンソールが要る場合はアカウント直下のIAMユーザーがフォールバックだが、通常はSSH＋ポータルだけで足りる。
+
+#### 手動でAWS CLIから直接立てる場合
+
+上のスクリプトが内部でやっていることを理解したいとき、あるいはスクリプトを使わずに組み立てたいときの生コマンド。
+
 #### 使えるAMI（2026-09-02 に実アカウントで確認済み）
 
 | 過去問 | AMI | 状態 | SSH |
@@ -105,7 +169,7 @@ aws sts get-caller-identity        # 別アカウントに立てる事故がい�
 | isucon12-qualify（公式） | `ami-05c5b59deed48f66b` | **消滅（InvalidAMIID.NotFound）** | — |
 | isucon12-qualify（matsuu） | `ami-073140ad092048333` | **available** | `ubuntu` → `sudo -i -u isucon` |
 | isucon13（matsuu） | `ami-006d211cb716fe8a0` | 未検証 | `ubuntu` → `sudo -i -u isucon` |
-| isucon14（matsuu） | `ami-0fcf9e8e8675a9ee4` | 未検証 | `ubuntu` → `sudo -i -u isucon` |
+| isucon14（matsuu） | `ami-0fcf9e8e8675a9ee4` | **検証済み**（2026-09-28、`isuride-*` unit / MySQL 8.0.46 / nginx / alp 同梱、`APP_UNIT_CONFIDENCE=high`） | `ubuntu` → `sudo -i -u isucon` |
 
 **公式AMIは予告なく消える。実際 isucon12-qualify の公式AMIはもう無い**（そのため公式リポジトリの `cloudformation.yaml` も現状そのままでは動かない）。フォールバックは
 [matsuu/aws-isucon](https://github.com/matsuu/aws-isucon) のAMI表 — webappとbenchの両方入り。**IDをハードコードせず、使う日にREADMEの表を見る**（作り直されて変わる）。
