@@ -29,10 +29,14 @@ says "launch N of instance type T from AMI X" and leaves the how to you.
   fill) for practice runs; don't use it on contest day unless the manual
   says so.
 - **Instance type, security groups, and `envcheck` can't change after
-  launch.** Everything that can be gotten right in advance — key pair, VPC,
-  subnet, security group rules — is verified (and only-if-missing created) by
-  `prestage.sh`, days before the contest, so there's nothing left to decide
-  under time pressure at T+0.
+  launch.** This is an ISUCON rule, not an AWS limit — nothing stops you from
+  editing a security group after boot, but doing so is a disqualifiable move
+  on contest day. Everything that can be gotten right in advance — key pair,
+  VPC, subnet, security group rules — is verified (and only-if-missing
+  created) by `prestage.sh`, days before the contest, so there's nothing left
+  to decide under time pressure at T+0.
+- **The key file `prestage.sh` writes (`--key-file`) is gitignored — never
+  put it in the shared repo.** Distribute it to the team out of band.
 - **`--allow-ip <cidr-or-ip>` (repeatable) authorizes teammates' SSH access.**
   `prestage.sh` always authorizes the operator's own auto-detected IP with no
   flags needed; pass `--allow-ip` once per teammate to add theirs too (a bare

@@ -1,169 +1,108 @@
 # isukit
 
-One command from a repo URL to an instrumented, measurable app host.
+リポジトリのURLから1コマンドで、計測できる状態のアプリホストまで持っていく。
 
-**Contest playbook — phases, team rules, failure modes: [`RUNBOOK.md`](RUNBOOK.md).**
+**コンテストの立ち回り — フェーズ、チームルール、失敗パターン: [`RUNBOOK.md`](RUNBOOK.md)。**
 
-## Install
+## インストール
 
     curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh | bash
 
-Clones/updates into `${ISUKIT_HOME:-$HOME/.isukit-src}` and symlinks `isukit`
-onto PATH. Args after the script forward to the freshly installed `isukit`, so
-this is also a genuine one-liner from zero to a probed, instrumented host:
+`${ISUKIT_HOME:-$HOME/.isukit-src}` に clone / 更新し、`isukit` を PATH の通る場所にシンボリックリンクする。スクリプトの後ろに続けた引数はそのままインストール直後の `isukit` に渡るので、これは「ゼロから、調査・計測可能な状態のホストまで」を1行で終わらせる本物のワンライナーでもある。
 
     curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh \
       | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
 
     ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port]
 
-That clones, probes the server, installs `alp` + `pt-query-digest`, turns on
-LTSV nginx logging + `long_query_time=0`, and composes `BENCH_CMD` by reading
-the benchmarker binary's own `--help`. Sanity-check that line, then you're in
-the loop.
+これで clone → サーバー調査 → `alp` + `pt-query-digest` のインストール → LTSV nginx ログと `long_query_time=0` の有効化 → ベンチマーカー本体の `--help` を読んでの `BENCH_CMD` 組み立て、まで一通り終わる。その行を目視で確認したら、あとはループに入るだけ。
 
-## The loop
+## ループ
 
-    isukit bench "baseline"     # runs BENCH_CMD on the bench host, records score+git sha
-    isukit alp                  # endpoints ranked by SUMMED response time
-    isukit slow                 # queries ranked by total time
-    isukit pprof 30             # Go CPU profile, if pprof is wired in
-    isukit attribute            # compare last two runs; KEEP / REVERT / INCONCLUSIVE
-    # change exactly ONE thing
-    isukit deploy               # rsync + build onto the systemd ExecStart path + restart
-    isukit bench "added idx X"  # record the score; manual mode prompts for the value
-    isukit ship "added idx X"   # commit everything + push + draft PR, one change per commit
-    isukit score                # full history
+    isukit bench "baseline"     # BENCH_CMD をベンチホストで実行し、スコアとgit shaを記録
+    isukit alp                  # エンドポイントを合計レスポンスタイム順に
+    isukit slow                 # クエリを合計時間順に
+    isukit pprof 30             # Go CPUプロファイル（pprofが組み込まれていれば）
+    isukit attribute            # 直近2回の計測を比較；KEEP / REVERT / INCONCLUSIVE
+    # 変更は必ず1つだけ
+    isukit deploy                # rsync + build → systemdのExecStartパス → 再起動
+    isukit bench "added idx X"   # スコアを記録（manualモードでは値の入力を求められる）
+    isukit ship "added idx X"    # 全部commit + push + draft PR、1変更1コミット
+    isukit score                 # 全履歴
 
-`isukit probe` picks the app's systemd unit with a scored heuristic, not a
-guarantee — see "Why it probes instead of assuming" below. If it picked wrong:
+`isukit probe` はスコア付きヒューリスティックでアプリのsystemd unitを選ぶ。保証ではない — 理由は下の「なぜリポジトリを読まずにサーバーに聞くのか」を参照。選択が外れていたら：
 
-    isukit unit <systemd-unit-name>   # override + re-probe
+    isukit unit <systemd-unit-name>   # 上書き + 再probe
 
-Diagnostic:
+診断用：
 
-    isukit doctor               # non-destructive check + auto-repair of config, connectivity, bench mode
+    isukit doctor               # config / 接続性 / ベンチモードの非破壊チェック＋自動修復
 
-Endgame:
+終盤：
 
-    isukit finalize             # logs OFF -> reboot ALL hosts -> verify units -> score
+    isukit finalize              # ログOFF → 全ホスト再起動 → unit確認 → スコア計測
 
-## Why it probes instead of assuming
+## なぜリポジトリを読まずにサーバーに聞くのか
 
-Nothing about ISUCON repo layout is stable. Checked across isucon9, 10-q, 10-f,
-11-q, 11-f, 12-q, 12-f, 13, 14, and private-isu — every one of these changed:
+ISUCONのリポジトリ構成は何ひとつ安定していない。isucon9, 10-q, 10-f, 11-q, 11-f, 12-q, 12-f, 13, 14, private-isu を横断して確認した限り、以下は全部年によって変わっている：
 
-| Thing | Observed range |
+| 項目 | 確認された範囲 |
 |---|---|
-| Go source dir | `webapp/go`, `webapp/golang` |
-| Language set | 4–8 impls; Deno once, Java once, Perl comes and goes |
-| Build tool | Makefile → Taskfile.yml → neither |
-| docker-compose | root / per-language / `development/` / `dev/` / **absent entirely** (10-f, 12-f) |
-| systemd naming | `app.lang.service`, `app-lang.service`, `app-api-lang.service` + `app-web-lang.service`, one non-language wrapper unit |
-| Extra units | matcher, payment mock, JIA API mock, PowerDNS, shipment/payment simulators |
-| Env file | `/home/isucon/env.sh`, `/home/isucon/env`, none |
-| Env var names | `ISUCON13_MYSQL_*` (year-prefixed) → `ISUCON_DB_*` (year-agnostic) → ad-hoc `MYSQL_*` |
-| Web server | nginx — **except isucon10-final, which is Envoy** |
-| Datastore | MySQL 5.7 / 8.0 / 8.0.31, MariaDB 10.3, + per-tenant SQLite (12-q) |
-| Bench target flag | `-target`, `-target-url`, `-target-host`, `-target-addr`, `--target` |
-| App instances | 3 (usual), 5 (12-f), 1 documented (9) |
+| Goのソースディレクトリ | `webapp/go`, `webapp/golang` |
+| 言語セット | 4〜8実装；Denoが1回、Javaが1回、Perlは出たり消えたり |
+| ビルドツール | Makefile → Taskfile.yml → どちらも無し |
+| docker-compose | root / 言語別 / `development/` / `dev/` / **丸ごと無し**（10-f, 12-f） |
+| systemdの命名 | `app.lang.service`, `app-lang.service`, `app-api-lang.service` + `app-web-lang.service`、言語非依存のラッパーunitが1つだけの年も |
+| 追加unit | matcher、payment mock、JIA API mock、PowerDNS、shipment/payment simulator |
+| envファイル | `/home/isucon/env.sh`, `/home/isucon/env`, 無し |
+| 環境変数名 | `ISUCON13_MYSQL_*`（年プレフィックス付き）→ `ISUCON_DB_*`（年非依存）→ その場しのぎの `MYSQL_*` |
+| webサーバー | nginx — **ただしisucon10-finalだけEnvoy** |
+| データストア | MySQL 5.7 / 8.0 / 8.0.31、MariaDB 10.3、＋テナント別SQLite（12-q） |
+| ベンチのターゲット指定フラグ | `-target`, `-target-url`, `-target-host`, `-target-addr`, `--target` |
+| アプリのインスタンス数 | 3（通常）、5（12-f）、ドキュメント上は1（9） |
 
-Also: **there is no isucon15.** The org stopped sequential numbering after 14;
-the next event is ISUCON2026 (2026-10-31, run by Sakura Internet). Don't write
-tooling that assumes `isucon{N+1}`.
+補足：**isucon15は存在しない。** 運営は14以降で連番方式をやめており、次のイベントはISUCON2026（2026-10-31、さくらインターネット主催）。`isucon{N+1}` を前提にしたツールを書かないこと。
 
-`isukit probe` therefore reads none of that from the repo. It asks the running
-machine:
+`isukit probe` はだからこそリポジトリの中身を一切読まない。動いているマシンそのものに聞く：
 
-- **systemd is the source of truth.** It lists units whose fragment lives under
-  `/etc/systemd/system` (i.e. provisioned, not distro), then `systemctl show`s
-  the active one for `WorkingDirectory`, `ExecStart`, `EnvironmentFiles`, `User`.
-  That single trick survives every naming convention above, including the Envoy
-  year and the docker-compose-wrapper year.
-- Web server and datastore by probing `is-active` across a candidate list.
-- nginx log path and config files from `nginx -T`, not a guessed path.
-- Go module dir by finding `go.mod` (excluding `bench*` and vendor).
+- **systemdが正。** `/etc/systemd/system` 配下にfragmentを持つunit（＝distro標準ではなく後から入れられたunit）を列挙し、動いているものに `systemctl show` を打って `WorkingDirectory` / `ExecStart` / `EnvironmentFiles` / `User` を取る。この1つのトリックが、上の表の命名規則・Envoyの年・docker-composeラッパーの年、全部を生き延びる。
+- webサーバーとデータストアは候補リストへの `is-active` 確認で特定。
+- nginxのログパスと設定ファイルは推測ではなく `nginx -T` から取る。
+- Goのモジュールディレクトリは `go.mod` を探して特定（`bench*` とvendorは除外）。
 
-The benchmarker invocation is the same story: no common flag contract across
-years, so `isukit probe` (via `isukit benchprobe`) finds the benchmarker binary
-under `/home/isucon` on `$BENCH`, reads its own `--help`, and composes
-`BENCH_CMD` from that — see "BENCH_CMD is auto-composed, verify it" below.
+ベンチマーカーの起動コマンドも同じ話：年をまたいだ共通のフラグ契約が無いので、`isukit probe`（内部で `isukit benchprobe`）が `$BENCH` 上の `/home/isucon` 配下からベンチマーカーのバイナリを見つけ、そのバイナリ自身の `--help` を読んで `BENCH_CMD` を組み立てる — 詳しくは下の「`BENCH_CMD` は自動生成される、確認すること」を参照。
 
-**Known limit:** app-unit selection is a scored heuristic (workdir under
-`/home/isucon`, exec path, env file, running user, ...), not a certainty — an
-unusual layout can outscore the real app unit. `isukit probe` prints
-`APP_CANDIDATES` (all units it scored, highest first) and warns when its pick
-is low-confidence. Sanity-check that line; fix a wrong pick with
-`isukit unit <name>`.
+**既知の限界：** アプリunitの選定はスコア付きヒューリスティック（`/home/isucon` 配下のworkdir、execパス、envファイル、実行ユーザー、…）であって確実ではない。珍しいレイアウトだと本物のアプリunitより高スコアが出ることもある。`isukit probe` はスコアを付けた全候補を `APP_CANDIDATES` として出力し、選択が低信頼のときは警告する。その行は必ず目視確認し、外れていたら `isukit unit <name>` で直す。
 
-## Discipline (generic, not answer-specific)
+## 鉄則（答え固有ではなく一般則）
 
-- **Rank by summed time, never by mean or by count.** A 3ms endpoint hit 40,000
-  times outranks a 900ms one hit twice. `alp --sort=sum` is the default here for
-  that reason. Same for `pt-query-digest`, which ranks by total time already.
-- **Bench before touching anything.** A baseline you didn't record is a change
-  you can't evaluate.
-- **One change per bench run.** Two changes and a score move tells you nothing.
-- **Measurement costs score.** `long_query_time=0` and LTSV logging are heavy.
-  `isukit logs off` before any run whose number you intend to keep.
-- **Nothing counts until it survives a reboot.** Runtime-only state — `SET
-  GLOBAL`, hand-started services, files in `/tmp`, disabled units — evaporates.
-  This is where large fractions of teams lose everything on the final run.
-  `isukit finalize` is that check.
-- **Read the app's own logs before optimising.** An error the benchmarker is
-  quietly retrying is worth more score than any index.
+- **必ず合計時間で並べる。平均でも件数でもない。** 3msのエンドポイントが40,000回呼ばれていれば、900msが2回より重い。ここでの `alp --sort=sum` が既定なのもそのため。`pt-query-digest` も同じ理由で合計時間順。
+- **何かを触る前にベンチする。** 記録していないベースラインは、評価できない変更と同義。
+- **1回のベンチにつき変更は1つ。** 2つ変えてスコアが動いても、何も分からない。
+- **計測はスコアを削る。** `long_query_time=0` とLTSVロギングは重い。記録として残したい計測の前には `isukit logs off`。
+- **再起動を生き延びないものはカウントされない。** `SET GLOBAL`、手で起動したサービス、`/tmp` のファイル、disabledなunit — ランタイムだけの状態は全部消える。多くのチームが最終計測でここを全部失う。`isukit finalize` がそのチェック。
+- **最適化の前にアプリ自身のログを読む。** ベンチマーカーが黙ってリトライしているエラーは、どんなインデックスよりスコアを稼ぐ。
 
-## Files
+## ファイル
 
     .isukit/config        APP, BENCH, BENCH_CMD, SSH_OPTS, EXTRA_UNITS, EXTRA_HOSTS, BENCH_MODE
-    .isukit/manifest      probe output, sourced by every other command
-    .isukit/scores.tsv    when / sha / score / note / raw log
-    .isukit/bench-*.log   full benchmarker output per run
+    .isukit/manifest      probeの出力。他の全コマンドがこれを読む
+    .isukit/scores.tsv    日時 / sha / スコア / メモ / 生ログへのパス
+    .isukit/bench-*.log   ベンチマーカーの生出力（実行ごと）
 
-All git-ignored. `.isukit/` lives inside each cloned problem repo, so multiple
-contests coexist without stepping on each other.
+全部git-ignore済み。`.isukit/` はcloneした各問題リポジトリの中に入るので、複数のコンテストが互いに干渉せず同居できる。
 
-Subdirectories: [`launch/`](launch/README.md) holds AWS pre-contest staging and
-instance bootstrap scripts; [`skills/isucon/`](skills/isucon/SKILL.md) is a Claude
-skill for the measure → diagnose → fix → ship → re-measure loop; [`test/`](test/)
-is an offline fixture suite that validates the discovery logic against every past
-ISUCON's real systemd units and configs.
+サブディレクトリ：[`launch/`](launch/README.md) はAWSでの競技前ステージングとインスタンス起動スクリプト。[`skills/isucon/`](skills/isucon/SKILL.md) は計測 → 診断 → 修正 → ship → 再計測ループ用のClaude skill。[`test/`](test/) は過去の全ISUCONの実際のsystemd unitと設定を使って発見ロジックをオフライン検証するフィクスチャ集。
 
-## Caveats
+## 注意点
 
-- **BENCH_CMD is auto-composed, verify it.** `isukit benchprobe` picks the
-  largest ELF binary under `/home/isucon` matching a benchmarker-ish name,
-  reads its `--help`, and builds `sudo -iu <owner> sh -c '...'` from whatever
-  target/nameserver flags it finds — this is the line most likely to need
-  human correction. `.isukit/bench-help.txt` holds the full flag list it was
-  read from. Fix it with `isukit benchcmd '<command>'` (no argument prints the
-  current value); `isukit benchprobe` never overwrites a `BENCH_CMD` you've
-  already set.
-- `logs on` rewrites `/etc/nginx` after backing it up to `/etc/nginx.isukit.bak`;
-  `logs off` restores that backup wholesale. If the web server isn't nginx,
-  `probe` warns and `logs` does nothing for the web tier.
-- MySQL automation needs passwordless `sudo mysql` over the unix socket. `probe`
-  reports `MYSQL_OK=0` if that isn't available.
-- `pprof` requires `import _ "net/http/pprof"` plus a listener in the app; the
-  command tells you the snippet if the endpoint isn't there.
-- `deploy` assumes a Go app and builds onto the exact path systemd already
-  execs. For a non-Go impl, deploy by hand.
-- `SSH_OPTS` (config) is appended to every `ssh`/`scp` call — custom key, custom
-  port, custom config file. Note ssh takes `-p <port>` but scp takes `-P
-  <port>` — if you hand-roll a port flag, you need both forms.
-- `EXTRA_UNITS` (config) is a space-separated list of extra units that
-  `restart`/`finalize` also restart alongside the detected `APP_UNIT` —
-  matcher/mock/simulator services some years ship as separate units.
-- `EXTRA_HOSTS` (config) is a space-separated list of additional app instances
-  (set via `isukit host add <target>`). Both `restart` and `finalize` iterate
-  every host; restart order is not guaranteed across instances.
-- `BENCH_MODE` (config) is either `auto` (runs `BENCH_CMD` over ssh to the bench
-  host) or `manual` (you enqueue the run in the contest portal and record the
-  score with `isukit bench --score <N>`). `isukit benchprobe` auto-detects `manual`
-  mode when no benchmarker binary is found. On contest day (ISUCON11 onward) the
-  benchmark is triggered from a web portal, not from ssh, so `manual` mode is the
-  correct production state — not a failure. Flip modes with `isukit benchmode <mode>`.
-  In manual mode, use `isukit bench --score <N> "<note>"` to record a passing run,
-  or `isukit bench --fail "<note>"` when the run errored.
-- `isukit revert [<sha>]` undoes a single commit on an `isukit/*` branch — useful
-  for reverting a bad change mid-contest without losing the record in `scores.tsv`.
+- **`BENCH_CMD` は自動生成される、確認すること。** `isukit benchprobe` は `/home/isucon` 配下で最大サイズのELFバイナリのうちベンチマーカーらしい名前のものを選び、その `--help` を読んで、見つかったtarget/nameserver系フラグから `sudo -iu <owner> sh -c '...'` を組み立てる — ここが一番人間の手直しが必要になりやすい行。読み取り元のフラグ一覧全部は `.isukit/bench-help.txt` に残る。修正は `isukit benchcmd '<command>'`（引数無しだと現在値を表示）。`isukit benchprobe` は一度手で設定した `BENCH_CMD` を上書きしない。
+- `logs on` は `/etc/nginx` を `/etc/nginx.isukit.bak` にバックアップしてから書き換える。`logs off` はそのバックアップをまるごと復元する。webサーバーがnginxでない場合、`probe` が警告してwebサイドの `logs` は何もしない。
+- MySQLの自動化にはソケット越しのパスワード無し `sudo mysql` が必要。使えない場合 `probe` は `MYSQL_OK=0` と報告する。
+- `pprof` には `import _ "net/http/pprof"` とリスナーがアプリ側に必要。エンドポイントが無ければ、コマンド自身が追加すべきスニペットを教えてくれる。
+- `deploy` はGoアプリを前提としており、systemdが既にexecしている正確なパスへビルドする。他言語実装は手でデプロイする。
+- `SSH_OPTS`（config）は全ての `ssh`/`scp` 呼び出しに付与される — カスタム鍵、カスタムポート、カスタム設定ファイルなど。`ssh` は `-p <port>`、`scp` は `-P <port>` と大文字小文字が違う点に注意 — 手でポートフラグを組み立てる場合は両方の形が要る。
+- `EXTRA_UNITS`（config）はスペース区切りの追加unitリストで、`restart`/`finalize` は検出した `APP_UNIT` と一緒にこれらも再起動する — matcher/mock/simulator系のサービスを別unitとして持つ年向け。
+- `EXTRA_HOSTS`（config）はスペース区切りの追加アプリインスタンスのリスト（`isukit host add <target>` で設定）。`restart` と `finalize` はどちらも全ホストを回るが、インスタンス間の再起動順は保証されない。
+- `BENCH_MODE`（config）は `auto`（`BENCH_CMD` をベンチホストへsshして実行）か `manual`（コンテストポータルで実行をキューし、`isukit bench --score <N>` でスコアを記録）のどちらか。`isukit benchprobe` はベンチマーカーのバイナリが見つからないと自動で `manual` モードを検出する。本番環境（ISUCON11以降）ではベンチマークはWebポータルから起動されssh経由ではないので、`manual` モードは失敗ではなく正しい本番状態。モードの切り替えは `isukit benchmode <mode>`。manualモードでは、合格した実行の記録に `isukit bench --score <N> "<note>"`、エラーで終わった実行の記録に `isukit bench --fail "<note>"` を使う。
+- `isukit revert [<sha>]` は `isukit/*` ブランチ上の1コミットを取り消す — 競技中に`scores.tsv`の記録を失わずに悪い変更を戻すときに使う。
