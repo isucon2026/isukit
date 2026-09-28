@@ -74,6 +74,23 @@ rsh_stdin() { # rsh_stdin <host>   -- script on stdin
   local h="$1"
   if [ "$h" = "local" ]; then bash -s; else ssh ${SSH_OPTS:-} -o StrictHostKeyChecking=accept-new "$h" 'bash -s'; fi
 }
+# Scripts that run on the host itself live as plain files in remote/, next to
+# the real isukit (install.sh puts a symlink to it on PATH, so resolve that).
+kit_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [ -L "$src" ]; do
+    dir=$(cd "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd "$(dirname "$src")" && pwd
+}
+remote_script() { # remote_script <name> -- print remote/<name>, for piping into rsh_stdin
+  local f
+  f="$(kit_dir)/remote/$1"
+  [ -f "$f" ] || die "missing $f — reinstall isukit (install.sh) so remote/ sits next to it"
+  cat "$f"
+}
 rpull() { # rpull <host> <remote-path> <local-path>
   local h="$1" r="$2" l="$3"
   if [ "$h" = "local" ]; then cp "$r" "$l"; else scp ${SSH_OPTS:-} -q "$h:$r" "$l"; fi
@@ -134,6 +151,8 @@ SSH_OPTS=''        # extra ssh/scp flags, e.g. '-F ./ssh_config' or '-i ~/key.pe
 EXTRA_UNITS=''     # space-separated extra units 'restart'/'finalize' also restart
 EXTRA_HOSTS=''     # space-separated extra ssh targets — other app instances;
                    # 'restart'/'finalize' hit these too. add with: isukit host add <target>
+ETC_REPO=''        # server dir whose etc/ holds the /etc symlink targets ('isukit etc');
+                   # empty = git root of the probed SRC_DIR, else SRC_DIR
 EOF
   fi
   cat > "$STATE/.gitignore" <<'EOF'
@@ -598,6 +617,12 @@ LOGS_SCRIPT='
 set -u
 SUDO="sudo -n"
 RC=0
+# find -L + readlink -f: once `isukit etc adopt` has run, nginx.conf and the site
+# confs are symlinks into the repo. grep -r skips them, and sed -i on the link
+# would replace it with a plain file and silently cut the repo out. Edit the real
+# file behind every link instead (sites-enabled and sites-available resolve to
+# the same file, hence sort -u). The adopt backups (*.orig) are left untouched.
+ngx_files() { find -L /etc/nginx -type f ! -name "*.orig" ! -name "*.isukit-tmp" 2>/dev/null | xargs -r grep -lE "$1" 2>/dev/null | xargs -r readlink -f | sort -u; }
 # --- nginx: LTSV carrying request_time, which the stock "combined" format lacks.
 if systemctl is-active --quiet nginx 2>/dev/null; then
   if [ "$MODE" = on ]; then
@@ -607,11 +632,12 @@ if systemctl is-active --quiet nginx 2>/dev/null; then
 log_format ltsv "time:$time_iso8601\tmethod:$request_method\turi:$request_uri\tstatus:$status\tsize:$body_bytes_sent\treqtime:$request_time\tapptime:$upstream_response_time\tvhost:$host";
 access_log /var/log/nginx/isukit.log ltsv;
 NGXCONF
-    for f in $(grep -rlE "^[[:space:]]*access_log" /etc/nginx 2>/dev/null | grep -v 00-isukit.conf); do
-      $SUDO sed -i "s|^\([[:space:]]*\)access_log|\1#isukit# access_log|" "$f"
+    for f in $(ngx_files "^[[:space:]]*access_log" | grep -v 00-isukit.conf); do
+      $SUDO sed -i.isukit-tmp "s|^\([[:space:]]*\)access_log|\1#isukit# access_log|" "$f" && $SUDO rm -f "$f.isukit-tmp"
     done
-    grep -qE "include.*conf\.d" /etc/nginx/nginx.conf 2>/dev/null || \
-      $SUDO sed -i "0,/^http {/s|^http {|http {\n    include /etc/nginx/conf.d/*.conf;|" /etc/nginx/nginx.conf
+    NGX_MAIN=$(readlink -f /etc/nginx/nginx.conf)
+    grep -qE "include.*conf\.d" "$NGX_MAIN" 2>/dev/null || \
+      $SUDO sed -i "0,/^http {/s|^http {|http {\n    include /etc/nginx/conf.d/*.conf; # isukit-include|" "$NGX_MAIN"
     if $SUDO nginx -t && $SUDO systemctl reload nginx; then
       echo "nginx: ltsv -> /var/log/nginx/isukit.log"
     else
@@ -619,12 +645,20 @@ NGXCONF
       RC=1
     fi
   else
-    if [ -d /etc/nginx.isukit.bak ]; then
-      $SUDO rm -rf /etc/nginx && $SUDO cp -a /etc/nginx.isukit.bak /etc/nginx
+    # Undo exactly what "on" did, by its markers. Restoring /etc/nginx.isukit.bak
+    # wholesale would clobber repo symlinks made after the backup (or resurrect
+    # stale ones), and throw away any tuning done since. The backup stays on disk
+    # for manual recovery only.
+    MARKED=$(ngx_files "#isukit# |# isukit-include$")
+    if [ -f /etc/nginx/conf.d/00-isukit.conf ] || [ -n "$MARKED" ]; then
+      $SUDO rm -f /etc/nginx/conf.d/00-isukit.conf
+      for f in $MARKED; do
+        $SUDO sed -i.isukit-tmp -e "s|#isukit# access_log|access_log|" -e "/# isukit-include$/d" "$f" && $SUDO rm -f "$f.isukit-tmp"
+      done
       if $SUDO nginx -t && $SUDO systemctl reload nginx; then
-        echo "nginx: config restored from backup"
+        echo "nginx: isukit logging removed, original access_log lines back"
       else
-        echo "nginx: FAILED to restore config" >&2
+        echo "nginx: FAILED to reload after removing isukit logging (backup: /etc/nginx.isukit.bak)" >&2
         RC=1
       fi
     fi
@@ -658,6 +692,149 @@ cmd_logs() {
   case "$mode" in on|off) ;; *) die "usage: isukit logs {on|off}" ;; esac
   say "logs $mode on $APP"
   printf 'MODE=%s\nAPP_UNIT=%s\n%s\n' "$mode" "${APP_UNIT:-}" "$LOGS_SCRIPT" | rsh_stdin "$APP"
+}
+
+# ---------------------------------------------------------------- etc
+# Middleware config under git: the real nginx / mysql / systemd files move into
+# <server repo>/etc/<same path minus /etc/> and /etc keeps a symlink to each, so
+# the repo is the only copy and every tuning change is a diff. Mirroring the path
+# (etc/nginx/sites-available/isucon.conf, etc/mysql/mysql.conf.d/mysqld.cnf) is
+# what lets status/push/re-link work from the repo alone, with no mapping file.
+# Each adopted file keeps its pre-link original next to it as <path>.orig.
+# The host side lives in remote/etc-adopt.sh and remote/etc-status.sh.
+
+local_repo_root() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
+
+etc_repo() { # the server-side dir whose etc/ holds the linked configs
+  if [ -n "${ETC_REPO:-}" ]; then printf '%s\n' "$ETC_REPO"; return 0; fi
+  [ -n "${SRC_DIR:-}" ] || die "don't know where the app repo lives on $APP — run: isukit probe, or set ETC_REPO=<dir> in $CONF"
+  local top
+  top=$(rsh "$APP" "git -C '$SRC_DIR' rev-parse --show-toplevel 2>/dev/null" 2>/dev/null || true)
+  printf '%s\n' "${top:-$SRC_DIR}"
+}
+
+etc_managed() { # etc_managed <repo> -- true if /etc on $APP already links into <repo>/etc
+  [ -n "$(rsh "$APP" "find /etc/nginx /etc/mysql /etc/systemd/system -maxdepth 3 -type l -lname '$1/etc/*' 2>/dev/null | head -1" 2>/dev/null)" ]
+}
+
+logs_are_on() { rsh "$APP" "test -f /etc/nginx/conf.d/00-isukit.conf" 2>/dev/null; }
+
+etc_rsync() { # etc_rsync <src> <dst> -- one side is $APP:..., the other local
+  local rp="--rsync-path=sudo -n rsync"
+  if [ "$APP" = "local" ]; then
+    sudo -n rsync -rlt --exclude '*.orig' "${1#local:}" "${2#local:}"
+  else
+    rsync -rlt --exclude '*.orig' "$rp" -e "ssh ${SSH_OPTS:-}" "$1" "$2"
+  fi
+}
+
+cmd_etc() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    adopt)  cmd_etc_adopt "$@" ;;
+    status) cmd_etc_status ;;
+    push)   cmd_etc_push ;;
+    pull)   cmd_etc_pull ;;
+    *) die "usage: isukit etc {adopt [/etc/path...]|status|push|pull}" ;;
+  esac
+}
+
+cmd_etc_adopt() {
+  load
+  local repo targets="$*" was_on=0 rc=0
+  repo=$(etc_repo)
+  logs_are_on && was_on=1
+  say "etc adopt on $APP: /etc -> $repo/etc/ (symlinks; originals kept as <path>.orig)"
+  { printf 'REPO=%q\nAPP_UNIT=%q\nTARGETS=%q\n' "$repo" "${APP_UNIT:-}" "$targets"; remote_script etc-adopt.sh; } \
+    | rsh_stdin "$APP" || rc=$?
+  # restarting mysqld drops the SET GLOBAL slow-log settings; put them back.
+  if [ "$was_on" = 1 ]; then
+    say "measurement logging was on — re-applying it"
+    cmd_logs on || warn "could not re-apply logging — run: isukit logs on"
+  fi
+  [ "$rc" = 0 ] || warn "some files were not adopted (see above) — the rest are linked"
+  cmd_etc_pull
+  say "next: review $(local_repo_root)/etc/, then: isukit ship \"etc: put middleware config under git\""
+  return "$rc"
+}
+
+cmd_etc_status() {
+  load
+  local repo
+  repo=$(etc_repo)
+  { printf 'REPO=%q\n' "$repo"; remote_script etc-status.sh; } | rsh_stdin "$APP"
+}
+
+cmd_etc_pull() { # server repo etc/ -> local repo etc/, minus isukit's own logging edits
+  load
+  local repo root f
+  repo=$(etc_repo)
+  root=$(local_repo_root)
+  # never overwrite local edits that have not been pushed yet
+  git -C "$root" diff --quiet -- etc 2>/dev/null \
+    || die "local etc/ has uncommitted edits — push them (isukit etc push) and commit, or discard them, before pulling"
+  mkdir -p "$root/etc"
+  say "etc pull: $APP:$repo/etc/ -> $root/etc/"
+  etc_rsync "$APP:$repo/etc/" "$root/etc/" || die "rsync from $APP failed"
+  # 'logs on' comments out access_log through the links, i.e. in the server's
+  # repo copy. That is measurement state, not tuning — keep it out of git.
+  for f in $(grep -RlsE "#isukit# |# isukit-include$" "$root/etc" || true); do
+    sed -i.isukit-tmp -e "s|#isukit# access_log|access_log|" -e "/# isukit-include$/d" "$f" && rm -f "$f.isukit-tmp"
+  done
+  git -C "$root" status --short -- etc 2>/dev/null || true
+}
+
+cmd_etc_push() { # local repo etc/ -> server repo etc/ (i.e. live /etc), then reload what changed
+  load
+  local repo root changed was_on=0 rc=0
+  repo=$(etc_repo)
+  root=$(local_repo_root)
+  [ -d "$root/etc" ] || die "no $root/etc — nothing to push (start with: isukit etc adopt)"
+  # diff by checksum before copying: the changed paths decide what gets reloaded.
+  local lsum rsum
+  lsum=$(cd "$root/etc" && find . -type f ! -name '*.orig' -exec cksum {} + | LC_ALL=C sort)
+  rsum=$(rsh "$APP" "cd '$repo/etc' 2>/dev/null && find . -type f ! -name '*.orig' -exec cksum {} + | LC_ALL=C sort" 2>/dev/null || true)
+  changed=$(LC_ALL=C comm -23 <(printf '%s\n' "$lsum") <(printf '%s\n' "$rsum") | awk 'NF{print $3}' | sed 's|^\./||')
+  if [ -z "$changed" ]; then
+    say "etc push: $APP:$repo/etc/ already matches — nothing to reload"
+    return 0
+  fi
+  logs_are_on && was_on=1
+  say "etc push: $root/etc/ -> $APP:$repo/etc/"
+  printf '    %s\n' $changed >&2
+  etc_rsync "$root/etc/" "$APP:$repo/etc/" || die "rsync to $APP failed"
+  rsh "$APP" "sudo -n chown -R \"\$(stat -c %U '$repo')\" '$repo/etc'" 2>/dev/null || true
+
+  local restart_db=0 reload_nginx=0 units=""
+  printf '%s\n' $changed | grep -q '^nginx/' && reload_nginx=1
+  printf '%s\n' $changed | grep -q '^mysql/' && restart_db=1
+  units=$(printf '%s\n' $changed | sed -n 's|^systemd/system/||p' | tr '\n' ' ')
+
+  if [ "$reload_nginx" = 1 ]; then
+    rsh "$APP" "sudo -n nginx -t && sudo -n systemctl reload nginx" \
+      || { warn "nginx -t FAILED — the broken file is live on disk but nginx still runs the old config; fix it and push again"; rc=1; }
+  fi
+  if [ -n "$units" ]; then
+    rsh "$APP" "sudo -n systemctl daemon-reload" && say "systemd: daemon-reload ($units)"
+    local u
+    for u in $units; do
+      [ "$u" = "${APP_UNIT:-}" ] && continue
+      warn "unit $u changed — restart it when ready: ssh $APP sudo systemctl restart $u"
+    done
+  fi
+  if [ "$restart_db" = 1 ]; then
+    say "mysql config changed — restarting the DB (brief downtime)"
+    rsh "$APP" "for s in mysql mariadb; do systemctl is-active --quiet \$s && { sudo -n systemctl restart \$s; break; }; done; sudo -n mysql -e 'SELECT 1' >/dev/null" \
+      || { warn "mysql did not come back — check: ssh $APP sudo journalctl -u mysql -n 50"; rc=1; }
+  fi
+  # the push overwrote the server copies that 'logs on' had edited, and a DB
+  # restart drops SET GLOBAL — either way logging has to be put back.
+  if [ "$was_on" = 1 ] && { [ "$reload_nginx" = 1 ] || [ "$restart_db" = 1 ]; }; then
+    cmd_logs on || warn "could not re-apply logging — run: isukit logs on"
+  fi
+  # a file new to the repo is copied up but nothing reads it until it is linked.
+  cmd_etc_status | grep -vE '^linked ' >&2 || true
+  return "$rc"
 }
 
 # ---------------------------------------------------------------- bench
@@ -843,6 +1020,14 @@ cmd_deploy() {
   load
   local force=0
   [ "${1:-}" = "--force" ] && force=1
+  # configs first: once /etc links into the repo, the repo's etc/ is what runs.
+  if [ -d "$(local_repo_root)/etc" ] && [ -n "${ETC_REPO:-${SRC_DIR:-}}" ]; then
+    local erepo
+    erepo=$(etc_repo)
+    if etc_managed "$erepo"; then
+      cmd_etc_push || warn "etc push reported errors (above) — continuing with the app deploy"
+    fi
+  fi
   local local_src
   local_src=$(find . -maxdepth 4 -name go.mod -not -path "*/bench*" -not -path "*/vendor/*" | head -1)
   [ -n "$local_src" ] || die "no local go.mod found under $(pwd)"
@@ -1264,6 +1449,18 @@ cmd_doctor() {
     doctor_ok "measurement logging is off"
   fi
 
+  if [ -n "${ETC_REPO:-${SRC_DIR:-}}" ]; then
+    local erepo
+    erepo=$(etc_repo 2>/dev/null || true)
+    if [ -n "$erepo" ] && etc_managed "$erepo"; then
+      if cmd_etc_status >/dev/null 2>&1; then
+        doctor_ok "etc: /etc reads every managed config from $erepo/etc"
+      else
+        doctor_warn "etc: some configs in $erepo/etc are not what /etc reads — run: isukit etc status"
+      fi
+    fi
+  fi
+
   local pct
   pct=$(rsh "$APP" "df -P / | tail -1 | tr -s ' ' | cut -d' ' -f5 | tr -d '%'" 2>/dev/null || true)
   if [ -n "$pct" ]; then
@@ -1328,6 +1525,18 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
 
   LOOP
     isukit logs {on|off}                nginx LTSV + mysql slow log (off for scoring runs)
+    isukit etc adopt [/etc/path...]     put nginx/mysql/app-unit config under git: move
+                                         each file to <server repo>/etc/<same path>,
+                                         symlink /etc to it (original kept as .orig),
+                                         verify nginx -t / mysql restart, roll back a
+                                         tier that fails, then pull etc/ down locally.
+                                         no args = discover; handles AppArmor for mysqld
+    isukit etc status                   which repo etc/ files /etc actually reads
+    isukit etc push                     local etc/ -> server, reload/restart only the
+                                         tiers that changed (deploy does this too once
+                                         /etc is linked)
+    isukit etc pull                     server etc/ -> local etc/ (isukit's own logging
+                                         edits stripped)
     isukit bench [note] [--score N] [--fail]
                                          auto mode: run BENCH_CMD, record score+sha
                                          manual mode: no ssh — prints portal instructions;
@@ -1369,6 +1578,8 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     EXTRA_UNITS    space-separated extra units 'restart'/'finalize' also restart
     EXTRA_HOSTS    space-separated extra ssh targets; 'restart'/'finalize' hit these too
     BENCH_MODE     auto (ssh + BENCH_CMD) or manual (portal, paste the score)
+    ETC_REPO       server dir whose etc/ holds linked configs (default: git root of
+                   the probed SRC_DIR, else SRC_DIR)
 
   App-unit auto-detection is a scored heuristic, not certain — it can pick wrong
   on unusual layouts. 'isukit probe' prints APP_CANDIDATES and warns on low
@@ -1405,6 +1616,7 @@ main() {
     unit)     cmd_unit "$@" ;;
     setup)    cmd_setup ;;
     logs)     cmd_logs "$@" ;;
+    etc)      cmd_etc "$@" ;;
     bench)    cmd_bench "$@" ;;
     score)    cmd_score ;;
     alp)      cmd_alp ;;

@@ -9,7 +9,13 @@ bash test/run-all.sh isucon8-final    # one fixture (the other suite says "skip"
 bash test/run-all.sh -v isucon13      # ...and dump the full probe output
 ```
 
-Current state: **22 fixtures, 22 passed, 0 failed** (17 probe + 5 bench).
+Current state: **36 fixtures, 36 passed, 0 failed** (17 probe + 13 bench + 6 etc).
+
+`run-etc-tests.sh` is different in kind: it runs `remote/etc-adopt.sh` and
+`remote/etc-status.sh` as-is (plus `LOGS_SCRIPT`, extracted) against a throwaway
+`/etc` tree via `ETC_ROOT`, and checks the symlink contract — adopt, idempotence,
+status, `logs on`/`off` leaving linked files byte-identical, per-tier rollback,
+and the repo copy winning on a fresh box. It runs only on a full `run-all.sh`.
 
 ## Why fixtures instead of real hosts
 

@@ -35,6 +35,25 @@ the loop.
     isukit ship "added idx X"   # commit everything + push + draft PR, one change per commit
     isukit score                # full history
 
+## Middleware config under git
+
+    isukit etc adopt            # /etc -> <server repo>/etc/<same path>, symlinked back
+    isukit etc status           # which repo files /etc actually reads
+    isukit etc push             # local etc/ -> server; reload/restart only what changed
+    isukit etc pull             # server etc/ -> local etc/
+
+`adopt` discovers `nginx.conf`, the enabled site confs, every `.cnf` with a
+`[mysqld]` section and the app's unit file, moves each into
+`<server repo>/etc/` (e.g. `etc/nginx/sites-available/isucon.conf`), symlinks
+`/etc` to it and keeps the original as `<path>.orig`. It then checks each tier
+(`nginx -t` + reload, `daemon-reload`, mysql restart + `SELECT 1`) and rolls
+back only the tier that fails. On Ubuntu it also adds the AppArmor rule mysqld
+needs to read through the link. If the repo already has a file (rebuilding a
+box from the repo), the repo copy wins. Once `/etc` is linked, `deploy` runs
+`etc push` first. The server repo is the git root of the probed `SRC_DIR`;
+override with `ETC_REPO` in `.isukit/config`. The host-side scripts live in
+`remote/`.
+
 `isukit probe` picks the app's systemd unit with a scored heuristic, not a
 guarantee — see "Why it probes instead of assuming" below. If it picked wrong:
 
@@ -139,8 +158,13 @@ ISUCON's real systemd units and configs.
   read from. Fix it with `isukit benchcmd '<command>'` (no argument prints the
   current value); `isukit benchprobe` never overwrites a `BENCH_CMD` you've
   already set.
-- `logs on` rewrites `/etc/nginx` after backing it up to `/etc/nginx.isukit.bak`;
-  `logs off` restores that backup wholesale. If the web server isn't nginx,
+- `logs on` backs `/etc/nginx` up to `/etc/nginx.isukit.bak`, adds
+  `conf.d/00-isukit.conf` and comments existing `access_log` lines out as
+  `#isukit# access_log`, editing the real file behind any symlink. `logs off`
+  undoes exactly those marked edits (the backup is kept for manual recovery
+  only), so repo-linked configs stay linked and keep any tuning made since.
+  While logs are on, the server's repo copy carries those markers; `etc pull`
+  strips them. If the web server isn't nginx,
   `probe` warns and `logs` does nothing for the web tier.
 - MySQL automation needs passwordless `sudo mysql` over the unix socket. `probe`
   reports `MYSQL_OK=0` if that isn't available.

@@ -353,6 +353,7 @@ isukit pprof 30             # Go CPU profile -> .isukit/cpu.pprof
 isukit deploy               # rsync + build onto the systemd ExecStart path + restart
 isukit restart              # restart discovered app units (+ EXTRA_HOSTS)
 isukit logs on|off          # nginx LTSV + mysql slow log
+isukit etc adopt|status|push|pull  # nginx/mysql/unit config into the repo's etc/, symlinked from /etc
 isukit ship "note"          # new branch -> commit -> push -> draft PR
 isukit revert [sha]         # git revert to undo a change
 isukit finalize             # the endgame sequence (all hosts)

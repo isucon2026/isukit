@@ -211,7 +211,7 @@ git add -A && git commit -m "baseline: 手を入れる前の状態"
 git push -u origin main
 ```
 
-nginx と MySQL の設定ファイル（`/etc/nginx`、`/etc/mysql`）も一緒に git に入れておくと、あとで「誰がいつ何を変えたか」が追える。
+nginx と MySQL の設定ファイル（`/etc/nginx`、`/etc/mysql`）も一緒に git に入れておくと、あとで「誰がいつ何を変えたか」が追える。`isukit etc adopt` がそれをやる：設定の実体をこのリポジトリの `etc/` に移し、`/etc` からシンボリックリンクを張る（元ファイルは `<path>.orig`、MySQL の AppArmor 許可も追加）。以後は手元の `etc/` を編集して `isukit deploy`（または `isukit etc push`）で反映する。
 
 **リポジトリは private。作ったら残り2人を Collaborator に招待する**（招待しないと push できない）：
 
@@ -463,6 +463,7 @@ isukit benchcmd '<行>'         # BENCH_CMD を手で上書き／引数なしで
 isukit benchmode [auto|manual] # ベンチモードを表示または変更
 isukit unit <unit名>           # probe のunit選択を手で上書き
 isukit logs on|off             # nginx LTSV ＋ MySQLスローログ
+isukit etc adopt|status|push|pull  # nginx/MySQL/unit 設定を repo の etc/ に移して /etc からリンク・反映
 isukit doctor                  # config / 接続 / manifest / unit / ツール / ログ / ディスク / ベンチモードを診断・修復
 isukit os                      # サーバーのスナップショット（uptime / vmstat / iostat / mpstat / free / df）
 isukit bench "メモ"            # スコア＋git sha を .isukit/scores.tsv に記録 (manual モード: --score N / --fail)
