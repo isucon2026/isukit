@@ -146,18 +146,23 @@ if [ -z "$sg_id" ] || [ "$sg_id" = "None" ]; then
 fi
 say "security group: $sg_id"
 
-for cidr in "${targets[@]}"; do
-  has_rule=$(aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
-    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[?CidrIp=='${cidr}'].CidrIp" \
-    --output text 2>/dev/null || true)
+# chaining two JMESPath filter-projections (IpPermissions[?..].IpRanges[?..])
+# does not filter each element's CidrIp — it always evaluates to empty
+# regardless of the SG's actual contents. Flatten once up front and test
+# membership in bash instead.
+existing_cidrs_raw=$(aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
+  --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[].CidrIp" \
+  --output text 2>/dev/null || true)
+IFS=$'\t\n' read -r -d '' -a existing_cidrs < <(printf '%s\0' "$existing_cidrs_raw")
 
-  if [ -z "$has_rule" ]; then
+for cidr in "${targets[@]}"; do
+  if list_has "$cidr" "${existing_cidrs[@]+"${existing_cidrs[@]}"}"; then
+    say "SSH from $cidr already authorized"
+  else
     say "authorizing SSH (22) from $cidr..."
     aws ec2 authorize-security-group-ingress --region "$region" --group-id "$sg_id" \
       --protocol tcp --port 22 --cidr "$cidr" >/dev/null \
       || die "authorize-security-group-ingress failed for $cidr"
-  else
-    say "SSH from $cidr already authorized"
   fi
 done
 
