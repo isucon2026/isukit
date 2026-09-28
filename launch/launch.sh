@@ -17,15 +17,16 @@ envfile="$here/prestage.env"
 # shellcheck source=/dev/null
 . "$envfile"
 
-ami="" type="" count="" prefix="isucon" yes=0
+ami="" type="" count="" prefix="isucon" yes=0 root_gb=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --ami)         ami="$2"; shift 2 ;;
     --type)        type="$2"; shift 2 ;;
     --count)       count="$2"; shift 2 ;;
     --name-prefix) prefix="$2"; shift 2 ;;
+    --root-gb)     root_gb="$2"; shift 2 ;;
     --yes)         yes=1; shift ;;
-    *) die "unknown arg: $1 (usage: launch.sh --ami <id> --type <type> --count <n> [--name-prefix p] [--yes])" ;;
+    *) die "unknown arg: $1 (usage: launch.sh --ami <id> --type <type> --count <n> [--name-prefix p] [--root-gb n] [--yes])" ;;
   esac
 done
 
@@ -33,6 +34,7 @@ done
 [ -n "$type" ]  || die "missing --type <instance-type> — the manual specifies this, don't guess"
 [ -n "$count" ] || die "missing --count <n> — the manual specifies how many instances, don't guess"
 case "$count" in ''|*[!0-9]*|0) die "--count must be a positive integer, got: $count" ;; esac
+case "$root_gb" in '') ;; *[!0-9]*|0) die "--root-gb must be a positive integer, got: $root_gb" ;; esac
 
 : "${AWS_REGION:?$envfile missing AWS_REGION — re-run prestage.sh}"
 : "${KEY_NAME:?$envfile missing KEY_NAME — re-run prestage.sh}"
@@ -40,9 +42,25 @@ case "$count" in ''|*[!0-9]*|0) die "--count must be a positive integer, got: $c
 : "${SUBNET_ID:?$envfile missing SUBNET_ID — re-run prestage.sh}"
 : "${SG_ID:?$envfile missing SG_ID — re-run prestage.sh}"
 
+block_device_args=()
+root_summary="AMI default"
+if [ -n "$root_gb" ]; then
+  root_device=$(aws ec2 describe-images --region "$AWS_REGION" --image-ids "$ami" \
+    --query 'Images[0].RootDeviceName' --output text) || die "describe-images failed (root device)"
+  [ -n "$root_device" ] && [ "$root_device" != "None" ] || die "couldn't read root device name for $ami"
+  ami_root_gb=$(aws ec2 describe-images --region "$AWS_REGION" --image-ids "$ami" \
+    --query "Images[0].BlockDeviceMappings[?DeviceName==\`$root_device\`]|[0].Ebs.VolumeSize" --output text) \
+    || die "describe-images failed (root size)"
+  [ -n "$ami_root_gb" ] && [ "$ami_root_gb" != "None" ] || die "couldn't read root volume size for $ami"
+  [ "$root_gb" -ge "$ami_root_gb" ] || die "--root-gb $root_gb is smaller than the AMI's own root ($ami_root_gb GB) — EBS can't shrink a volume"
+  warn "--root-gb $root_gb deviates from the AMI's default root ($ami_root_gb GB) — practice only, not contest day unless the manual says so."
+  block_device_args=(--block-device-mappings "[{\"DeviceName\":\"$root_device\",\"Ebs\":{\"VolumeSize\":$root_gb}}]")
+  root_summary="${root_gb}GB (AMI default ${ami_root_gb}GB)"
+fi
+
 echo "==============================================================" >&2
-printf '\033[35m   ABOUT TO LAUNCH %s x %s FROM %s IN %s\n   names: %s-1 .. %s-%s\n   subnet %s, sg %s, key %s\033[0m\n' \
-  "$count" "$type" "$ami" "$AWS_REGION" "$prefix" "$prefix" "$count" "$SUBNET_ID" "$SG_ID" "$KEY_NAME" >&2
+printf '\033[35m   ABOUT TO LAUNCH %s x %s FROM %s IN %s\n   names: %s-1 .. %s-%s\n   subnet %s, sg %s, key %s\n   root volume: %s\033[0m\n' \
+  "$count" "$type" "$ami" "$AWS_REGION" "$prefix" "$prefix" "$count" "$SUBNET_ID" "$SG_ID" "$KEY_NAME" "$root_summary" >&2
 echo "==============================================================" >&2
 warn "launching MORE or OTHER instances than the manual specifies is a rules violation — recheck ami/type/count now."
 warn "instance type and security groups can't be changed after launch — this is your last chance to get them right."
@@ -64,6 +82,7 @@ ids=$(aws ec2 run-instances \
   --security-group-ids "$SG_ID" \
   --user-data "file://$here/user-data.sh" \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$prefix}]" \
+  "${block_device_args[@]+"${block_device_args[@]}"}" \
   --query 'Instances[].InstanceId' --output text) || die "run-instances failed"
 
 n=1

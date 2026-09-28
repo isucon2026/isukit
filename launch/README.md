@@ -22,6 +22,12 @@ says "launch N of instance type T from AMI X" and leaves the how to you.
   `--ami`, `--type`, and `--count` as required flags with no defaults — it
   will not guess, and it will not create a "helper" or "bench" box of its
   own. A human reads the manual and types the three values in.
+- **`--root-gb <N>` is optional and defaults to nothing.** Leave it off and
+  `launch.sh` launches with the AMI's own root volume, byte for byte — the
+  contest-day-safe path. Pass it to size the root larger than the AMI ships
+  (common practice AMIs are 8GB, which `isukit logs on`'s slow query log can
+  fill) for practice runs; don't use it on contest day unless the manual
+  says so.
 - **Instance type, security groups, and `envcheck` can't change after
   launch.** Everything that can be gotten right in advance — key pair, VPC,
   subnet, security group rules — is verified (and only-if-missing created) by
