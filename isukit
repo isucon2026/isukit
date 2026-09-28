@@ -971,7 +971,8 @@ cmd_finalize() {
 
 # ---------------------------------------------------------------- one-shot
 go_ssh_host_block() { # go_ssh_host_block <alias> <user@host|host> <keyfile> <port>
-  local alias="$1" target="$2" key="$3" port="$4" user="" host="$target"
+  local alias="$1" target="$2" key="$3" port="$4" user=""
+  local host="$target" # split: local expands all args before assigning, so $target isn't set yet on one line
   if [ "${target#*@}" != "$target" ]; then
     user="${target%%@*}"
     host="${target#*@}"
