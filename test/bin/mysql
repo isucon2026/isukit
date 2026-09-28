@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""mysql stub. Answers the 4 queries PROBE_SCRIPT issues from fixture/mysql.tsv
+(tab-separated KEY<TAB>VALUE: VERSION, SLOW_LOG_FILE, DATABASES [space-separated]).
+No mysql.tsv in the fixture -> every call fails (exit 1, no output), simulating
+a host where mysql isn't reachable (Postgres/SQLite years)."""
+import sys, os
+
+FIX = os.environ.get("ISUKIT_FIXTURE", "")
+TSV = os.path.join(FIX, "mysql.tsv")
+
+
+def load():
+    data = {}
+    if not os.path.isfile(TSV):
+        return None
+    with open(TSV) as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#") or "\t" not in line:
+                continue
+            k, v = line.split("\t", 1)
+            data[k] = v
+    return data
+
+
+def main(argv):
+    data = load()
+    if data is None:
+        return 1
+
+    query = None
+    for i, a in enumerate(argv):
+        if a == "-e" and i + 1 < len(argv):
+            query = argv[i + 1]
+    if query is None:
+        return 1
+
+    q = query.strip().upper()
+    if q.startswith("SELECT 1"):
+        print("1")
+        return 0
+    if "VERSION()" in q:
+        print(data.get("VERSION", "8.0.30-0ubuntu0.20.04.1"))
+        return 0
+    if "SLOW_QUERY_LOG_FILE" in q:
+        print(data.get("SLOW_LOG_FILE", "/var/log/mysql/mysql-slow.log"))
+        return 0
+    if q.startswith("SHOW DATABASES"):
+        for db in data.get("DATABASES", "").split():
+            print(db)
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

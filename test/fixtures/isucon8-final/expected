@@ -1,0 +1,6 @@
+APP_UNIT=isucoin.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=nginx
+DB_SERVER=mysql
+SRC_LANGS="go mockservice mysql nginx perl php public python ruby "
+STACK_IN_DOCKER=1

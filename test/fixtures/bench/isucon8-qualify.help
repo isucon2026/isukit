@@ -1,0 +1,25 @@
+Usage of ./bench:
+  -data string
+    	path to data directory (default "./data")
+  -debug-log
+    	print debug log
+  -debug-mode
+    	add debugging info into request header
+  -duration duration
+    	benchamrk duration (default 1m0s)
+  -jobid string
+    	job id
+  -nolevelup
+    	dont increase load level
+  -output string
+    	path to write result json
+  -portal string
+    	portal site url (only used at workermode) (default "http://localhost:8888")
+  -remotes string
+    	remote addrs to benchmark (default "localhost:8080")
+  -tempdir string
+    	path to temp dir
+  -test
+    	run pretest only
+  -workermode
+    	workermode

@@ -1,0 +1,5 @@
+APP_UNIT=torb.perl.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=h2o
+DB_SERVER=mariadb
+SRC_LANGS="env.sh go nodejs perl php python ruby static "

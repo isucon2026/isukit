@@ -1,0 +1,3 @@
+nginx:alpine webapp_nginx_1
+mysql webapp_mysql_1
+webapp_php webapp_php_1

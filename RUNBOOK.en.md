@@ -17,6 +17,12 @@ One bash script, no dependencies. It does four things and nothing else:
    part of ISUCON repo layout is stable across years — Go dir, build tool,
    compose presence, unit naming, env file, env var names and bench flags all
    differ. Interrogating systemd is the one trick that survives all of them.
+   When systemd finds nothing (isucon6-final, isucon8-final, or a local
+   `make up` dev stack all run under docker-compose), `probe` falls back to
+   `docker ps` and still fills in `WEB_SERVER`/`DB_SERVER`, setting
+   `STACK_IN_DOCKER=1`. `deploy` / `logs on` / `slow on` still only ever touch
+   host config, so they no-op on that box — edit the compose file / container
+   config directly, then `isukit restart`.
 3. **Measure** — `bench` records score + git sha per run; `alp` / `slow` /
    `pprof` rank endpoints and queries by *summed* time; `score` is the history.
 4. **Ship** — `deploy` builds onto the exact path systemd already execs;
@@ -45,11 +51,14 @@ Go-only `deploy`, passwordless-`sudo` requirement) are in `README.md`.
 - **One bench owner.** Only one benchmark runs at a time, and one person queues
   them. Two concurrent runs make every number meaningless.
 - **One branch, small commits.** `isukit` records the git sha with every score;
-  that's only useful if a sha means one change.
+  that's only useful if a sha means one change. Use `isukit ship "<note>"` to
+  automate this: creates a new `isukit/<slug>` branch, commits, pushes, and opens
+  a draft PR — one commit per meaningful change, so it's revertable.
 - **One change per bench run.** Two changes and a score move tells you nothing
   about which one did it.
 - **Score drops → revert immediately.** Don't debug a regression during the
-  contest. Revert, re-bench to confirm you're back, move on.
+  contest. `isukit revert` undoes the last commit (or any commit by sha), then
+  re-bench to confirm you're back and move on.
 - **30-minute timebox.** A change that hasn't moved the score in 30 minutes gets
   dropped, not pushed harder.
 - **Say the number out loud.** Every bench result gets announced. Nobody
@@ -58,6 +67,17 @@ Go-only `deploy`, passwordless-`sudo` requirement) are in `README.md`.
 Suggested split for three people: one on infra/measurement (owns `isukit`,
 alp/slow output, deploys, the score log), one on DB (schema, indexes, queries),
 one on app code. The infra person is also the bench owner.
+
+---
+
+## First steps when things go wrong
+
+Run `isukit doctor` — it's a non-destructive diagnostic and auto-repair:
+
+```
+isukit doctor   # check config / connectivity / manifest / unit / tools / logs / disk / bench mode
+isukit os       # quick OS snapshot: uptime / vmstat / iostat / mpstat / free / df
+```
 
 ---
 
@@ -93,6 +113,35 @@ the README; don't guess it.
 
 Read `.isukit/manifest` aloud to the team: how many instances, which units are
 running, how much RAM, which datastore. That's your machine budget for the day.
+
+---
+
+## Bench modes: `auto` and `manual`
+
+**Auto mode** — `isukit bench` runs `BENCH_CMD` via ssh on the bench host.
+Standard for practice.
+
+**Manual mode** — the benchmarker is triggered from a contest portal (web UI),
+and you record the score by hand. **This is the correct production state on
+ISUCON11+.** SSH-triggered benches are forbidden; the benchmark portal is your
+only tool.
+
+On contest day, enqueue the run in the portal and record the result:
+
+```
+isukit bench --score 12345 "added index X"   # record a passing run
+isukit bench --fail "timeout"                 # record a failure
+```
+
+`isukit benchprobe` auto-detects `manual` mode when no benchmarker binary is
+found on the bench host. Switch modes by hand anytime:
+
+```
+isukit benchmode manual      # toggle auto ↔ manual
+isukit benchmode             # show current mode
+```
+
+**Why this matters:** practice with `manual` mode to be ready for contest day.
 
 ---
 
@@ -169,6 +218,18 @@ before doing it — this is a checklist of where to look, not a list of answers.
 After each one: `isukit deploy` → `isukit bench "<what you changed>"`. Keep or
 revert on the number alone.
 
+Benchmark scores jitter run-to-run, so small deltas are not meaningful. Use
+`isukit attribute` to compare the last two runs; it returns KEEP / REVERT /
+INCONCLUSIVE based on whether the delta exceeds the noise band (default ±10%):
+
+```
+isukit attribute           # default: ±10% threshold
+isukit attribute 5         # set threshold to ±5%
+```
+
+Always one change per run — if you stack two changes and the score moves, you
+don't know which one did it.
+
 ---
 
 ## Phase 3 — Distribute across instances (40–60%)
@@ -218,12 +279,13 @@ how good the idea is. This phase is about not losing what you already earned.
 
 ```
 isukit logs off          # measurement logging is costing you score right now
-isukit finalize          # logs off -> reboot -> verify units -> scoring run
+isukit finalize          # logs off -> reboot ALL hosts -> verify units -> scoring run
 ```
 
 `finalize` exists because runtime-only state evaporates on reboot, and the
-final scoring run happens on a machine that may have been restarted. Manually
-confirm each of these:
+final scoring run happens on a machine that may have been restarted. If you have
+multiple instances (set via `isukit host add`), `finalize` reboots all of them,
+though restart order is not guaranteed. Manually confirm each of these:
 
 - [ ] Every service you depend on is **enabled**, not merely running:
       `systemctl is-enabled <unit>` for each unit in `.isukit/manifest`.
@@ -261,17 +323,50 @@ These are the generic ways teams lose everything, independent of the year's prob
 
 ---
 
+## Subdirectories
+
+- **`launch/`** — AWS pre-contest staging and instance bootstrap scripts
+  (`prestage.sh`, `launch.sh`, `user-data.sh`). Used only if your organizers say
+  "launch from this AMI" with no turnkey template. See [`launch/README.md`](launch/README.md).
+- **`skills/isucon/`** — Claude AI skill for the measure → diagnose → fix →
+  ship → re-measure loop. Symlinked to `~/.claude/skills/` by `install.sh`.
+  Activate with `/isukit`.
+- **`test/`** — offline fixture suite that validates discovery logic against
+  real ISUCON systemd units and nginx configs from past years. Run with
+  `test/run-all.sh`. See [`test/README.md`](test/) — the "## Known discovery gaps"
+  section documents the tool's real limits.
+
+---
+
 ## Quick reference
 
 ```
-isukit probe            # re-read the server after any infra change
-isukit bench "note"     # score + git sha -> .isukit/scores.tsv
-isukit score            # full run history
-isukit alp              # endpoints by summed response time
-isukit slow             # queries by total time
-isukit pprof 30         # Go CPU profile -> .isukit/cpu.pprof
-isukit deploy           # rsync + build onto the systemd ExecStart path + restart
-isukit restart          # restart discovered app units
-isukit logs on|off      # nginx LTSV + mysql slow log
-isukit finalize         # the endgame sequence
+isukit doctor               # diagnose + auto-repair config, connectivity, bench mode
+isukit os                   # server snapshot: uptime / vmstat / iostat / mpstat / free / df
+isukit probe                # re-read the server after any infra change
+isukit bench "note"         # score + git sha -> .isukit/scores.tsv (manual mode: --score N / --fail)
+isukit score                # full run history
+isukit attribute [pct]      # compare last two runs; KEEP / REVERT / INCONCLUSIVE
+isukit alp                  # endpoints by summed response time
+isukit slow                 # queries by total time
+isukit pprof 30             # Go CPU profile -> .isukit/cpu.pprof
+isukit deploy               # rsync + build onto the systemd ExecStart path + restart
+isukit restart              # restart discovered app units (+ EXTRA_HOSTS)
+isukit logs on|off          # nginx LTSV + mysql slow log
+isukit ship "note"          # new branch -> commit -> push -> draft PR
+isukit revert [sha]         # git revert to undo a change
+isukit finalize             # the endgame sequence (all hosts)
 ```
+
+### Key manifest fields
+
+| Key | Meaning |
+|---|---|
+| `APP_UNIT` | Discovered systemd unit for the app |
+| `APP_UNIT_CONFIDENCE` | Confidence in `APP_UNIT`: `high` / `low` / `override` |
+| `ENV_FILE` | Path to the env file the app reads |
+| `WEB_SERVER` | Discovered web server (e.g. `nginx`) |
+| `DB_SERVER` | Discovered datastore (e.g. `mysql`) |
+| `STACK_IN_DOCKER` | `1` if web and/or db was found only via `docker ps` (`systemctl` saw nothing). `logs on` / `slow on` only ever rewrite host config, so they're silent no-ops here — edit the compose file / container config directly, then `isukit restart` |
+| `PROC_MANAGER` | `systemd` or `supervisor`. When `supervisor`, `APP_UNIT` is `supervisor.service`, and restarting it restarts every program under it |
+| `SUPERVISOR_PROGRAMS` | Only set when `PROC_MANAGER=supervisor`. Space-separated program names from `supervisorctl status`. Restart a single one with `supervisorctl restart <program>` |

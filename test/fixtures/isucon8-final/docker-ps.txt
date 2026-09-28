@@ -1,0 +1,3 @@
+nginx:1.15.3-alpine webapp_nginx_1
+webapp_isucoin webapp_isucoin_1
+mysql:8 webapp_mysql_1

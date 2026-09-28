@@ -57,6 +57,36 @@ esac
 VERSION=$(grep -m1 '^KIT_VERSION=' "$SRC/isukit" | cut -d= -f2)
 say "installed: $LINK (KIT_VERSION=$VERSION)"
 
+# Install Claude skill if present
+SKILL_SRC="$SRC/skills/isucon"
+if [ -d "$SKILL_SRC" ]; then
+  mkdir -p "$HOME/.claude/skills"
+
+  SKILL_LINK="$HOME/.claude/skills/isucon"
+  SKILL_SRC_ABS="$(cd "$SKILL_SRC" && pwd)"
+
+  if [ -L "$SKILL_LINK" ]; then
+    CURRENT_TARGET="$(readlink "$SKILL_LINK")"
+    if [ "$CURRENT_TARGET" = "$SKILL_SRC_ABS" ]; then
+      say "Claude skill already installed: /isucon"
+    else
+      warn "Claude skill symlink points to a different location:"
+      printf '  current:  %s\n' "$CURRENT_TARGET" >&2
+      printf '  expected: %s\n' "$SKILL_SRC_ABS" >&2
+      warn "resolve manually, then re-run this installer"
+    fi
+  elif [ -e "$SKILL_LINK" ]; then
+    warn "Claude skill path exists but is not a symlink: $SKILL_LINK"
+    warn "resolve manually, then re-run this installer"
+  else
+    if ln -s "$SKILL_SRC_ABS" "$SKILL_LINK"; then
+      say "installed Claude skill: /isucon"
+    else
+      warn "failed to create Claude skill symlink — proceeding without it"
+    fi
+  fi
+fi
+
 if [ "$#" -gt 0 ]; then
   exec "$LINK" "$@"
 fi

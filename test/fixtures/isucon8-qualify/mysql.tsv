@@ -1,0 +1,3 @@
+VERSION	10.1.34-MariaDB
+SLOW_LOG_FILE	/var/log/mariadb/mariadb-slow.log
+DATABASES	information_schema torb mysql performance_schema sys

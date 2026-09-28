@@ -42,14 +42,34 @@ curl -fsSL https://raw.githubusercontent.com/mako-for-it/isukit/main/install.sh 
 |---|---|---|
 | **① 立ち上げ** | `isukit go <repo-url> <app-host> [bench-host]` | リポジトリを clone → サーバーを調査 → `alp` と `pt-query-digest` を入れる → nginx の LTSV ログと `long_query_time=0` を有効化 |
 | **② 発見** | `isukit probe` | **動いているサーバーに直接聞く**。systemd unit / `WorkingDirectory` / `ExecStart` / env ファイル / データストアを特定して `.isukit/manifest` に書く |
-| **③ 計測** | `isukit bench` `alp` `slow` `pprof` `score` | スコアと git sha を毎回記録。エンドポイントとクエリを**合計時間**で並べる |
-| **④ 反映** | `isukit deploy` `finalize` | systemd が実際に exec しているパスへビルドして再起動 / 終盤の締め処理 |
+| **③ 計測** | `isukit bench` `alp` `slow` `attribute` `score` | スコアと git sha を毎回記録。エンドポイントとクエリを**合計時間**で並べる。`attribute` で 2 回の計測の有意差を判定 |
+| **④ 反映** | `isukit deploy` `ship` `revert` `finalize` | systemd が実際に exec しているパスへビルドして再起動 / 変更を commit + push + PR。終盤の締め処理 |
 
 **なぜリポジトリを読まずにサーバーに聞くのか**：ISUCONのリポジトリ構成は年ごとに何も安定していない。Goのディレクトリ名（`webapp/go` か `webapp/golang`）、ビルド方法（Make → Taskfile → 無し）、docker composeの有無、unit名、envファイルの場所と変数名、ベンチのフラグ名 — 全部違う。systemdに問い合わせるのが全年代で唯一通用する手。
 
 **`BENCH_CMD` は自動生成される。ただし唯一「人間が直す可能性が高い」行**でもある。ベンチマーカーのターゲット指定フラグは毎年違う（`-target` / `-target-url` / `-target-host` / `-target-addr` / `--target`）ので、isukit は**ベンチマーカーのバイナリ自身の `--help` を読んで**使えるフラグを判定し、コマンド行を組み立てて表示する。違っていたら `isukit benchcmd '<正しい行>'` で上書きする（エディタ不要）。使えるフラグの全一覧は `.isukit/bench-help.txt` に落ちている。
 
 コンテストごとの状態は clone した各リポジトリの中の `.isukit/` に入るので、複数のコンテストを並行して持てる。
+
+### ベンチモード：`auto` と `manual`
+
+**`auto` モード** — `isukit bench` は ssh で BENCH_CMD をベンチ用ホストで走す。練習環境の標準。
+
+**`manual` モード** — ベンチマーカーはポータル（web UI）から起動され、スコアは人間が記録する。ISUCON11以降の**本番環境はこれ**。ssh でベンチを走すのは禁止事項。
+
+```
+isukit bench --score 12345 "インデックス追加"    # スコアを記録
+isukit bench --fail "タイムアウト"                # 失敗を記録
+```
+
+`isukit benchprobe` はベンチマーカーバイナリが見つからないと自動的に `manual` 模式に切り替える。モードはいつでも手で変更可：
+
+```
+isukit benchmode manual      # auto ↔ manual に切替
+isukit benchmode             # 現在のモードを表示
+```
+
+**なぜ重要か**：本番ではベンチマーカーはサーバー上に無く、ポータルから起動される。スコアを ssh で記録できるのは練習だけ。本番に向けての練習では `manual` 模式を試しておく。
 
 ---
 
@@ -137,6 +157,15 @@ isukit host app   ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem
 isukit host bench ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem   # 練習で1台に寄せる場合は app と同じでよい
 ```
 
+複数のアプリインスタンスがある場合（ISUCON2026予定）、追加のホストを登録：
+
+```
+isukit host add ubuntu@43.207.152.141 -i ~/.ssh/isukit-sandbox.pem
+isukit host add ubuntu@43.207.152.142 -i ~/.ssh/isukit-sandbox.pem
+```
+
+`restart` と `finalize` はすべてのホストを回す（ただし再起動順は保証されない）。
+
 #### 台数
 
 - 本気の練習：app **3台 × c5.large**（2 vCPU / 4 GiB）＋ bench **1台**。本番と同じ形
@@ -161,7 +190,7 @@ cd ~/personal-projects/isucon/isucon13/development && make up && make go
 ```
 
 isucon13 は言語別に8つ、isucon12-qualify は19個の compose ファイルを同梱している。
-**isukit の `probe` / `deploy` / `logs` はこの構成では効かない**（systemdが無い）。手元のMacでも同じ理由で `probe` は空の manifest を書いて警告だけ出す。
+**`isukit probe` はこの構成でも動く**：`systemctl` が何も見つけなくても `docker ps` にフォールバックして `WEB_SERVER` / `DB_SERVER` を埋め、`STACK_IN_DOCKER=1` を立てる。効かないのは `deploy` と `logs on` / `slow on`（ホスト側の設定を書き換えるだけで、コンテナの中身には触れない）。手元のMacで打っても同じ：アプリ自体は systemd unit を持たないので `APP_UNIT` は空のまま警告になるが、web/db 側は拾える。
 
 ---
 
@@ -221,9 +250,9 @@ isukit init <repo-url> <既にあるディレクトリ名>
 - **ベンチ係は1人。** ベンチは同時に1本だけ。2本走ると全部の数字が無意味になる。キューイングも1人が持つ。
 - **デプロイ係も1人。** `isukit deploy` は **`rsync -a --delete` で自分の手元のツリーをサーバーに上書きする**。3人がそれぞれの手元から打つと最後の人が勝ち、`--delete` で他の2人が追加したファイルが消える。
 - **デプロイ直前に必ず `git pull`。** 上のルールの裏返し。pullを忘れたデプロイは、誰かの作業が抜けたツリーを本番に載せてベンチしていることになる。
-- **ベンチ直前に必ず commit。** `isukit bench` は `HEAD` の sha を記録するだけで、**コミットはしてくれない**。commitせずに回すと `scores.tsv` の全行が同じ sha になり、「どの変更が効いたか」という記録の意味が消える。
+- **ベンチ直前に必ず commit。** `isukit bench` は `HEAD` の sha を記録するだけで、**コミットはしてくれない**。commitせずに回すと `scores.tsv` の全行が同じ sha になり、「どの変更が効いたか」という記録の意味が消える。`isukit ship "<メモ>"` で自動化できる：新しい `isukit/<slug>` ブランチを作って commit → push → draft PR を開く。
 - **1回のベンチにつき変更は1つ。** 2つ入れてスコアが動いても、どちらが効いたか分からない。
-- **スコアが落ちたら即revert。** 競技中にリグレッションをデバッグしない。戻して、戻ったことをベンチで確認して、次へ。
+- **スコアが落ちたら即revert。** 競技中にリグレッションをデバッグしない。`isukit revert` で手元の最後のコミットを打ち消す（git revert）、または SHA を指定して任意のコミットを打ち消す。戻ったことをベンチで確認して、次へ。
 - **30分タイムボックス。** 30分でスコアが動かない変更は捨てる。粘らない。
 - **数字を声に出す。** ベンチ結果は毎回全員に共有。古いスコアを前提に最適化する人を作らない。
 
@@ -309,6 +338,15 @@ isukit slow
 
 1つやるごとに：`isukit deploy` → `isukit bench "何を変えたか"`。**数字だけで採否を決める。**
 
+ベンチのスコアは揺らぐので、小さい差は有意でない。`isukit attribute` で最後の2回の計測を比較し、差が ±10% を超えているかを判定。
+
+```
+isukit attribute           # デフォルト：±10% を閾値に KEEP / REVERT / INCONCLUSIVE を返す
+isukit attribute 5         # 閾値を ±5% に設定
+```
+
+1回の変更で複数のステップを入れていたら、どちらが効いたか分からない。必ず1つずつ。
+
 ### フェーズ3 — サーバー分散（40–60%）
 
 **1台をプロファイルし終えて、ボトルネックが分かってから。** 何が重いか分からないまま分けると、問題が移動するだけでネットワーク遅延が増える。
@@ -338,10 +376,10 @@ isukit slow
 
 ```
 isukit logs off          # 計測ログは今この瞬間もスコアを削っている
-isukit finalize          # logs off → 再起動 → unitの復帰確認 → 採点用ベンチ
+isukit finalize          # logs off → 全ホスト再起動 → unitの復帰確認 → 採点用ベンチ
 ```
 
-`finalize` があるのは、**実行時だけの状態は再起動で消える**のに、最終採点は再起動されたかもしれないマシンで走るから。以下は手で確認する：
+`finalize` があるのは、**実行時だけの状態は再起動で消える**のに、最終採点は再起動されたかもしれないマシンで走るから。複数ホストがある場合は全部を再起動するが、再起動順は保証されない。以下は手で確認する：
 
 - [ ] 依存している全サービスが **enabled**（動いているだけでは不十分）：`.isukit/manifest` の各unitに `systemctl is-enabled <unit>`
 - [ ] やった `SET GLOBAL` が**設定ファイルにも書いてある**。MySQLの実行時変数は再起動で消える
@@ -357,6 +395,13 @@ isukit finalize          # logs off → 再起動 → unitの復帰確認 → �
 ---
 
 ## 7. 詰まったとき（isukit のクセ）
+
+**最初に試すこと：** `isukit doctor` を走す。非破壊的な診断と自動修復を一通り試す。
+
+```
+isukit doctor   # config / 接続 / manifest / unit / ツール / ログ / ディスク / ベンチモードを確認・修復
+isukit os       # サーバーのスナップショット（uptime / vmstat / iostat / mpstat / free / df）
+```
 
 | 症状 | 対処 |
 |---|---|
@@ -393,25 +438,44 @@ isukit finalize          # logs off → 再起動 → unitの復帰確認 → �
 
 ---
 
+---
+
+## 8.5. キットの構成
+
+`isukit` リポジトリは以下のサブディレクトリを持つ：
+
+- **`launch/`** — AWS の pre-contest staging と T+0 インスタンス起動スクリプト（`prestage.sh`、`launch.sh`、`user-data.sh`）。本番で組織が指定した AMI をそのまま起動する場合のみ使用。詳しくは [`launch/README.md`](launch/README.md)
+- **`skills/isucon/`** — Claude AI の skill ファイル（`.claude/skills/` にシンボリックリンク）。計測 → 診断 → 修正 → ship → 再計測のループを支援するプロンプト集。`/isukit` でアクティベート
+- **`test/`** — ISUCON の過去年度の実際の systemd unit 設定と nginx 設定をフィクスチャとして保持し、isukit の発見ロジックをオフラインで検証するテストスイート。`test/run-all.sh` で実行。`test/README.md` の「## Known discovery gaps」セクションが tool の実際の限界を記録している
+
+---
+
 ## 9. コマンド早見表
 
 ```
 isukit go <repo-url> <host> -i <鍵>   # 丸ごと1コマンド：clone→probe→setup→logs→benchprobe
 isukit init <repo-url> [dir]   # clone（既存ディレクトリはそのまま採用）＋ work ブランチ
 isukit host app|bench <target> # ssh先を .isukit/config に設定（'local' も可）
+isukit host add <target>       # 追加ホストを EXTRA_HOSTS に追加
 isukit probe                   # サーバーを調査して .isukit/manifest を書く。インフラ変更後は毎回
 isukit benchprobe              # ベンチマーカーを発見して BENCH_CMD を自動生成（probe が自動で呼ぶ）
 isukit benchcmd '<行>'         # BENCH_CMD を手で上書き／引数なしで現在値を表示
+isukit benchmode [auto|manual] # ベンチモードを表示または変更
 isukit unit <unit名>           # probe のunit選択を手で上書き
 isukit logs on|off             # nginx LTSV ＋ MySQLスローログ
-isukit bench "メモ"            # スコア＋git sha を .isukit/scores.tsv に記録
+isukit doctor                  # config / 接続 / manifest / unit / ツール / ログ / ディスク / ベンチモードを診断・修復
+isukit os                      # サーバーのスナップショット（uptime / vmstat / iostat / mpstat / free / df）
+isukit bench "メモ"            # スコア＋git sha を .isukit/scores.tsv に記録 (manual モード: --score N / --fail)
 isukit score                   # 全履歴
+isukit attribute [noise_pct]   # 最後の2回計測の有意差を判定（デフォルト ±10%）
 isukit alp                     # エンドポイントを合計レスポンスタイム順
 isukit slow                    # クエリを合計時間順
 isukit pprof 30                # GoのCPUプロファイル → .isukit/cpu.pprof
 isukit deploy                  # rsync＋ビルド → systemdのExecStartパス → 再起動
-isukit restart                 # 検出したアプリunitを再起動
-isukit finalize                # 終盤の締め処理一式
+isukit restart                 # 検出したアプリunitを再起動（EXTRA_HOSTS も含む）
+isukit ship "<メモ>"            # 新ブランチ作成 → commit → push → draft PR
+isukit revert [<sha>]          # git revert で変更を打ち消す
+isukit finalize                # 終盤の締め処理一式（全ホスト再起動）
 ```
 
 **ファイル**（全部 git-ignore 済み、各リポジトリの `.isukit/` の中）
@@ -424,3 +488,16 @@ isukit finalize                # 終盤の締め処理一式
 .isukit/bench-help.txt ベンチマーカーの --help 全文
 .isukit/ssh_config     `go -i` が書く ssh 設定
 ```
+
+### manifest の主なキー
+
+| キー | 意味 |
+|---|---|
+| `APP_UNIT` | 検出したアプリの systemd unit 名 |
+| `APP_UNIT_CONFIDENCE` | `APP_UNIT` の確信度：`high` / `low` / `override` |
+| `ENV_FILE` | アプリが読む env ファイルのパス |
+| `WEB_SERVER` | 検出した web サーバー（`nginx` など） |
+| `DB_SERVER` | 検出したデータストア（`mysql` など） |
+| `STACK_IN_DOCKER` | `1` なら web/db の少なくとも一方は `docker ps` でしか見つかっていない（`systemctl` は何も見ていない）。`logs on` / `slow on` はホスト側の設定を書き換えるだけなので無反応 — compose ファイル/コンテナ設定を直接編集して `isukit restart` |
+| `PROC_MANAGER` | `systemd` か `supervisor`。`supervisor` のとき `APP_UNIT` は `supervisor.service` になり、それを再起動すると配下の全プログラムが道連れで再起動する |
+| `SUPERVISOR_PROGRAMS` | `PROC_MANAGER=supervisor` のときだけ立つ。`supervisorctl status` のプログラム名一覧（スペース区切り）。1言語だけ再起動したいなら `supervisorctl restart <program>` を使う |

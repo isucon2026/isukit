@@ -1,0 +1,12 @@
+[Unit]
+Description=MariaDB 10.3.25 database server
+After=network.target
+
+[Service]
+Type=simple
+User=mysql
+ExecStart=/usr/sbin/mariadbd
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

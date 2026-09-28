@@ -1,0 +1,5 @@
+APP_UNIT=isucondition.go.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=nginx
+DB_SERVER=mariadb
+SRC_LANGS="go nodejs perl php python ruby rust "

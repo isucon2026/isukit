@@ -1,0 +1,15 @@
+#!/bin/bash
+# sudo stub for isukit's offline probe harness.
+#
+# PROBE_SCRIPT probes with `sudo -n true` and, when that succeeds, prefixes its
+# nginx/mysql/docker calls with `sudo -n`. Real sudo would (a) depend on whether the
+# developer happens to have a cached timestamp, making test results differ between
+# runs, and (b) bypass this directory entirely -- sudo resets PATH, so the real
+# nginx/mysql/docker would answer instead of the stubs. Swallow the flags and exec
+# the rest in-process so every path stays inside test/bin.
+set -u
+while [ $# -gt 0 ]; do
+  case "$1" in -*) shift ;; *) break ;; esac
+done
+[ $# -eq 0 ] && exit 0
+exec "$@"

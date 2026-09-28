@@ -121,17 +121,34 @@ cmd_init() {
 # isukit config — edit APP/BENCH after 'isukit host', BENCH_CMD after 'isukit probe'
 APP=local          # ssh target of the app server (the one you tune), or 'local'
 BENCH=local        # ssh target of the bench server (the one that scores you)
+# auto = run BENCH_CMD over ssh on \$BENCH; manual = a human enqueues a run in the
+# contest portal and pastes the score back (contest day: no bench binary, no ssh
+# to the bench host allowed). 'isukit benchprobe' flips this to manual on its own
+# when it can't find a bench binary. Toggle by hand: isukit benchmode [auto|manual]
+BENCH_MODE=auto
 # Run verbatim on \$BENCH. Auto-composed by 'isukit probe' (see 'isukit benchprobe')
 # from the benchmarker binary's own --help output — verify it, the flag names
 # differ every year. Set/override by hand with: isukit benchcmd '<command>'
 BENCH_CMD=''
 SSH_OPTS=''        # extra ssh/scp flags, e.g. '-F ./ssh_config' or '-i ~/key.pem -p 2222'
 EXTRA_UNITS=''     # space-separated extra units 'restart'/'finalize' also restart
+EXTRA_HOSTS=''     # space-separated extra ssh targets — other app instances;
+                   # 'restart'/'finalize' hit these too. add with: isukit host add <target>
 EOF
   fi
   cat > "$STATE/.gitignore" <<'EOF'
 *
 EOF
+  if [ ! -f "$STATE/notes.md" ]; then
+    cat > "$STATE/notes.md" <<'EOF'
+## Manual facts
+- score formula:
+- /initialize path + time limit + required response fields:
+- fail conditions:
+- restart verification:
+- explicitly forbidden:
+EOF
+  fi
   say "initialised in $(pwd)"
   say "next: isukit host app <ssh-target>   (and bench)   then: isukit probe"
   grep -rilE 'bench|benchmark' README* docs/ 2>/dev/null | head -5 | sed 's/^/    read: /' >&2 || true
@@ -144,7 +161,22 @@ cmd_host() {
   case "$role" in
     app)   sed -i.bak "s|^APP=.*|APP=$target|"   "$CONF"; rm -f "$CONF.bak" ;;
     bench) sed -i.bak "s|^BENCH=.*|BENCH=$target|" "$CONF"; rm -f "$CONF.bak" ;;
-    *) die "usage: isukit host {app|bench} <ssh-target|local> [ssh opts...]" ;;
+    add)
+      [ -n "$target" ] || die "usage: isukit host add <ssh-target>"
+      local cur
+      cur=$( . "$CONF" 2>/dev/null; printf '%s' "${EXTRA_HOSTS:-}" )
+      case " $cur " in
+        *" $target "*) say "EXTRA_HOSTS already has $target — no-op" ;;
+        *)
+          cur=$(printf '%s' "$cur $target" | sed 's/^ *//;s/ *$//')
+          local cur_q
+          cur_q=$(printf '%s' "$cur" | sed "s/'/'\\\\''/g")
+          sed -i.bak "s|^EXTRA_HOSTS=.*|EXTRA_HOSTS='$cur_q'|" "$CONF"; rm -f "$CONF.bak"
+          say "EXTRA_HOSTS = $cur"
+          ;;
+      esac
+      return 0 ;;
+    *) die "usage: isukit host {app|bench|add} <ssh-target|local> [ssh opts...]" ;;
   esac
   if [ -n "$opts" ]; then
     local w val prev="" expanded=""
@@ -244,6 +276,20 @@ if [ -n "$APPUNIT" ]; then
   S APP_USER     "$(systemctl show -p User --value "$APPUNIT")"
 fi
 
+# --- process manager. isucon5-final ran every language under supervisord, so the only
+# systemd-visible unit is supervisor.service itself. `systemctl restart supervisor` does
+# restart the app, so keeping it as APP_UNIT is correct -- but it is the manager, not the
+# app, and the per-program handle is supervisorctl. Say which one this is instead of
+# leaving a bare low confidence score to imply it.
+PROC_MANAGER=systemd
+case "$APPUNIT" in
+  supervisor*)
+    PROC_MANAGER=supervisor
+    S SUPERVISOR_PROGRAMS "$($SUDO supervisorctl status 2>/dev/null | awk "{print \$1}" | tr "\n" " ")"
+    ;;
+esac
+S PROC_MANAGER "$PROC_MANAGER"
+
 # --- env file: path varies (env.sh / env / absent). Find it, do not assume.
 ENVF=""
 for c in /home/isucon/env.sh /home/isucon/env /home/isucon/.env; do [ -f "$c" ] && ENVF="$c" && break; done
@@ -266,10 +312,23 @@ S GO_DIR "$(dirname "${GOMOD:-/}" 2>/dev/null)"
 S GO_VER "$(go version 2>/dev/null || echo none)"
 
 # --- web server: nginx is usual, Envoy happened (isucon10-final), h2o/caddy possible
-WEB=""
-for s in nginx h2o envoy caddy apache2 httpd; do systemctl is-active --quiet "$s" 2>/dev/null && WEB="$s" && break; done
+WEB=""; WEB_SRC=""
+for s in nginx h2o envoy caddy apache2 httpd; do systemctl is-active --quiet "$s" 2>/dev/null && WEB="$s" && WEB_SRC=host && break; done
+# isucon8-final and isucon6-final ran the entire stack under docker-compose: systemctl
+# sees ONE wrapper unit and nothing else, so the systemctl sweep above reports "no web
+# server" on a box that plainly has one. Ask docker before believing that.
+DOCKER_PS=""
+command -v docker >/dev/null 2>&1 && DOCKER_PS="$($SUDO docker ps --format "{{.Image}} {{.Names}}" 2>/dev/null)"
+IN_DOCKER=0
+if [ -z "$WEB" ] && [ -n "$DOCKER_PS" ]; then
+  for s in nginx h2o envoy caddy apache httpd; do
+    printf "%s\n" "$DOCKER_PS" | grep -qi "$s" && WEB="$s" && WEB_SRC=docker && IN_DOCKER=1 && break
+  done
+fi
 S WEB_SERVER "$WEB"
-if [ "$WEB" = "nginx" ]; then
+# host-native nginx only: `nginx -T` on the host cannot see a containerised config, and
+# `isukit logs on` rewrites the host nginx.conf — both are wrong when WEB_SRC=docker.
+if [ "$WEB" = "nginx" ] && [ "$WEB_SRC" = "host" ]; then
   ALOG_LINES="$($SUDO nginx -T 2>/dev/null | grep -vE "^[[:space:]]*#" | grep -oE "access_log[[:space:]]+[^ ;]+" | awk "{print \$2}")"
   S NGINX_ACCESS_LOGS "$(printf "%s" "$ALOG_LINES" | tr "\n" " ")"
   NGINX_LASTLOG=""
@@ -282,7 +341,16 @@ fi
 # --- datastores: MySQL/MariaDB usual, SQLite appeared (isucon12-q), redis common
 DB=""
 for s in mysql mariadb postgresql; do systemctl is-active --quiet "$s" 2>/dev/null && DB="$s" && break; done
+if [ -z "$DB" ] && [ -n "$DOCKER_PS" ]; then
+  for s in mysql mariadb postgres; do
+    printf "%s\n" "$DOCKER_PS" | grep -qi "$s" && DB="$s" && IN_DOCKER=1 && break
+  done
+  [ "$DB" = "postgres" ] && DB=postgresql
+fi
 S DB_SERVER "$DB"
+# 1 = at least one of the web/db tiers was found only as a container. Everything that
+# edits host config (logs on, alp, slow) has to be done inside the container instead.
+S STACK_IN_DOCKER "$IN_DOCKER"
 S CACHE "$(for s in redis-server redis memcached; do systemctl is-active --quiet $s 2>/dev/null && echo -n "$s "; done)"
 MYSQL="$SUDO mysql"
 if $MYSQL -e "SELECT 1" >/dev/null 2>&1; then
@@ -318,9 +386,19 @@ cmd_probe() {
     warn "if that's wrong: isukit unit <name>"
   fi
   [ "${WEB_SERVER:-}" != "nginx" ] && warn "web server is '${WEB_SERVER:-none}', not nginx — 'isukit logs' handles nginx only; profile at the app layer instead"
+  if [ "${STACK_IN_DOCKER:-0}" = "1" ]; then
+    warn "web and/or db run as CONTAINERS, not host services — 'isukit logs on' and 'isukit slow on' edit host config and will do nothing here"
+    warn "edit the compose file / container config instead, then: isukit restart"
+  fi
+  [ "${PROC_MANAGER:-systemd}" = "supervisor" ] && warn "app is under supervisord, not systemd — '$APP_UNIT' restarts ALL of it; per-program: supervisorctl restart <${SUPERVISOR_PROGRAMS:-name}>"
   [ "${MYSQL_OK:-0}" != "1" ] && warn "cannot reach mysql as root over socket — slow-log automation is off"
   say "manifest written to $STATE/manifest"
-  cmd_benchprobe
+  # subshell: benchprobe's failure path is `die`, i.e. exit(1) of the whole
+  # script. The app manifest above is already written and useful on its own, so
+  # a bench host we cannot reach must not discard it — nor abort `isukit go`
+  # before setup/logs have run. benchprobe only writes files, so losing its
+  # shell state costs nothing.
+  ( cmd_benchprobe ) || warn "benchprobe failed — set the bench path by hand: isukit benchmode manual (portal), or isukit benchcmd '<command>'"
 }
 
 cmd_unit() {
@@ -431,7 +509,11 @@ cmd_benchprobe() {
   . "$STATE/bench-manifest"
 
   if [ -z "${BENCH_BIN:-}" ]; then
-    warn "no benchmarker binary found under /home/isucon on $BENCH — normal if it lives elsewhere or off-host; set it by hand: isukit benchcmd '<command>'"
+    warn "no benchmarker binary found under /home/isucon on $BENCH — expected on contest day, the portal runs the bench for you"
+    if grep -q "^BENCH_MODE=auto" "$CONF" 2>/dev/null && grep -q "^BENCH_CMD=''" "$CONF" 2>/dev/null; then
+      sed -i.bak "s|^BENCH_MODE=.*|BENCH_MODE=manual|" "$CONF"; rm -f "$CONF.bak"
+      say "BENCH_MODE = manual — 'isukit bench' will now prompt for the portal score"
+    fi
     return 0
   fi
 
@@ -473,6 +555,21 @@ cmd_benchcmd() {
   r=$(printf '%s' "$q" | sed 's/[\&|]/\\&/g')
   sed -i.bak "s|^BENCH_CMD=.*|BENCH_CMD='$r'|" "$CONF"; rm -f "$CONF.bak"
   say "BENCH_CMD = $line"
+}
+
+cmd_benchmode() {
+  need_state
+  local mode="${1:-}"
+  if [ -z "$mode" ]; then
+    ( . "$CONF" 2>/dev/null; printf '%s\n' "${BENCH_MODE:-auto}" )
+    return 0
+  fi
+  case "$mode" in
+    auto|manual) ;;
+    *) die "usage: isukit benchmode [auto|manual]" ;;
+  esac
+  sed -i.bak "s|^BENCH_MODE=.*|BENCH_MODE=$mode|" "$CONF"; rm -f "$CONF.bak"
+  say "BENCH_MODE = $mode"
 }
 
 # ---------------------------------------------------------------- tools
@@ -566,11 +663,25 @@ cmd_logs() {
 # ---------------------------------------------------------------- bench
 cmd_bench() {
   load
+  local mode="${BENCH_MODE:-auto}"
+
+  if [ "$mode" = "manual" ]; then
+    cmd_bench_manual "$@"
+    return 0
+  fi
+
   if [ -z "${BENCH_CMD:-}" ]; then
     warn "BENCH_CMD is empty in $CONF — attempting to auto-compose it"
-    cmd_benchprobe
+    ( cmd_benchprobe ) || warn "benchprobe failed"
     load
-    [ -n "${BENCH_CMD:-}" ] || die "BENCH_CMD is still empty after benchprobe — set it by hand: isukit benchcmd '<command>'"
+    # benchprobe may have decided there is no benchmarker to run at all and
+    # flipped us to manual. that is a successful self-repair, not a failure —
+    # follow it instead of dying on the now-irrelevant empty BENCH_CMD.
+    if [ "${BENCH_MODE:-auto}" = "manual" ]; then
+      cmd_bench_manual "$@"
+      return 0
+    fi
+    [ -n "${BENCH_CMD:-}" ] || die "BENCH_CMD is still empty after benchprobe — set it by hand: isukit benchcmd '<command>', or switch to the portal: isukit benchmode manual"
   fi
   local note="${*:-}"
   local sha ts raw
@@ -588,6 +699,56 @@ cmd_bench() {
   printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$sha" "$score" "${note:-}" "$raw" >> "$STATE/scores.tsv"
   say "score=$score  sha=$sha  rc=$rc  raw=$raw"
   [ "$score" = "?" ] && warn "could not parse a score — read $raw, then fix the line in $STATE/scores.tsv by hand"
+  return 0
+}
+
+# BENCH_MODE=manual: no bench ssh target exists (contest day — the portal
+# runs the bench). pull the score out of --score/--score=N, a --fail flag,
+# or an interactive prompt, and log it the same way as an auto run.
+cmd_bench_manual() {
+  local score="" fail_flag=0 next_is_score=0
+  local args=() a
+  for a in "$@"; do
+    if [ "$next_is_score" = 1 ]; then
+      score="$a"; next_is_score=0; continue
+    fi
+    case "$a" in
+      --score=*) score="${a#--score=}" ;;
+      --score) next_is_score=1 ;;
+      --fail) fail_flag=1 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  local note="${args[*]:-}"
+  local sha ts
+  sha=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
+  ts=$(date +%Y%m%d-%H%M%S)
+
+  if [ "$fail_flag" = 1 ]; then
+    printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$sha" "FAIL" "${note:-}" "portal" >> "$STATE/scores.tsv"
+    say "score=FAIL  sha=$sha  (recorded via --fail)"
+    return 0
+  fi
+
+  if [ -z "$score" ]; then
+    say "BENCH_MODE=manual — run the benchmark from the ISUCON portal, then either:"
+    say "  rerun:  isukit bench --score <N>"
+    say "  or paste the score below"
+    if [ -t 0 ]; then
+      printf 'portal score: ' >&2
+      read -r score || true
+    fi
+  fi
+  [ -n "$score" ] || die "no score given — rerun with: isukit bench --score <N>"
+
+  case "$score" in
+    -[0-9]*) local rest=${score#-}; case "$rest" in ''|*[!0-9]*) die "score must be an integer, got: $score" ;; esac ;;
+    [0-9]*) case "$score" in *[!0-9]*) die "score must be an integer, got: $score" ;; esac ;;
+    *) die "score must be an integer, got: $score" ;;
+  esac
+
+  printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$sha" "$score" "${note:-}" "portal" >> "$STATE/scores.tsv"
+  say "score=$score  sha=$sha  (recorded from portal)"
   return 0
 }
 
@@ -633,6 +794,48 @@ cmd_pprof() {
     || die "pprof endpoint not reachable — add: import _ \"net/http/pprof\"  +  go func(){ http.ListenAndServe(\":$port\", nil) }()"
   rpull "$APP" /tmp/isukit-cpu.pprof "$STATE/cpu.pprof"
   say "go tool pprof -http=: $STATE/cpu.pprof"
+}
+
+# ---------------------------------------------------------------- os
+OS_SCRIPT='
+set -u
+echo "== uptime =="
+uptime
+
+echo
+echo "== vmstat 1 5 =="
+command -v vmstat >/dev/null 2>&1 && vmstat 1 5 || echo "vmstat not installed (apt install sysstat)"
+
+echo
+echo "== iostat -x 1 3 =="
+command -v iostat >/dev/null 2>&1 && iostat -x 1 3 || echo "iostat not installed (apt install sysstat)"
+
+echo
+echo "== mpstat -P ALL 1 3 =="
+command -v mpstat >/dev/null 2>&1 && mpstat -P ALL 1 3 || echo "mpstat not installed (apt install sysstat)"
+
+echo
+echo "== free -h =="
+free -h
+
+echo
+echo "== df -h =="
+df -h
+
+echo
+echo "== units =="
+for u in $CHECK_UNITS; do
+  st=$(systemctl is-active "$u" 2>/dev/null || true)
+  printf "%s: %s\n" "$u" "${st:-unknown}"
+done
+'
+
+cmd_os() {
+  load
+  local units="${APP_UNIT:-} ${WEB_SERVER:-} ${DB_SERVER:-}"
+  units="$(printf '%s' "$units" | sed 's/^ *//;s/ *$//')"
+  say "os snapshot on $APP"
+  printf 'CHECK_UNITS="%s"\n%s\n' "$units" "$OS_SCRIPT" | rsh_stdin "$APP"
 }
 
 # ---------------------------------------------------------------- deploy
@@ -699,8 +902,17 @@ cmd_restart() {
   local units="${APP_UNIT:-} ${EXTRA_UNITS:-}"
   units="$(printf '%s' "$units" | sed 's/^ *//;s/ *$//')"
   [ -n "$units" ] || die "no APP_UNIT in manifest — run: isukit probe"
-  say "restarting:$units"
-  rsh "$APP" "sudo -n systemctl restart $units && sleep 2 && systemctl is-active $units"
+  local h rc bad=""
+  for h in "$APP" ${EXTRA_HOSTS:-}; do
+    say "restarting on $h:$units"
+    # never let one host abort the loop: a DB-only box legitimately has no app
+    # unit, and a silent partial restart is exactly what fails the post-contest
+    # verification. collect failures, report them all, fail at the end.
+    rc=0
+    rsh "$h" "sudo -n systemctl restart $units && sleep 2 && systemctl is-active $units" || rc=$?
+    [ "$rc" = 0 ] || { warn "restart failed on $h (rc=$rc) — that host may not run all of: $units"; bad="$bad $h"; }
+  done
+  [ -z "$bad" ] || die "restart incomplete on:$bad — fix before any scoring run"
 }
 
 # ---------------------------------------------------------------- finalize
@@ -709,20 +921,36 @@ cmd_restart() {
 # applied at runtime (SET GLOBAL, manual service starts, /tmp artefacts).
 cmd_finalize() {
   load
+  local hosts="$APP ${EXTRA_HOSTS:-}"
+  hosts="$(printf '%s' "$hosts" | sed 's/^ *//;s/ *$//')"
+  local h
+  [ -n "${EXTRA_HOSTS:-}" ] && warn "multiple hosts ($hosts) — reboot/return order across them is NOT guaranteed, never assume cross-host startup dependencies"
   say "1/4 turning measurement logging OFF (it costs real score)"
   cmd_logs off
-  say "2/4 rebooting $APP"
-  rsh "$APP" "sudo -n systemctl reboot" || true
-  say "3/4 waiting for it to come back"
-  local i=0
-  until rsh "$APP" "true" 2>/dev/null; do
-    i=$((i+1))
-    [ $i -gt 60 ] && die "host did not return after reboot — check by hand: ssh ${SSH_OPTS:-} $APP true"
-    sleep 5
+  say "2/4 rebooting: $hosts"
+  for h in $hosts; do
+    rsh "$h" "sudo -n systemctl reboot" || true
   done
-  rsh "$APP" "systemctl is-active ${UNITS_ACTIVE:-}" \
-    || warn "some units did not come up on their own — enable them: ssh ${SSH_OPTS:-} $APP sudo systemctl enable --now ${UNITS_ACTIVE:-}"
+  say "3/4 waiting for all hosts to come back"
+  for h in $hosts; do
+    local i=0
+    until rsh "$h" "true" 2>/dev/null; do
+      i=$((i+1))
+      [ $i -gt 60 ] && die "$h did not return after reboot — check by hand: ssh ${SSH_OPTS:-} $h true"
+      sleep 5
+    done
+  done
+  for h in $hosts; do
+    rsh "$h" "systemctl is-active ${UNITS_ACTIVE:-}" \
+      || warn "some units did not come up on their own on $h — enable them: ssh ${SSH_OPTS:-} $h sudo systemctl enable --now ${UNITS_ACTIVE:-}"
+  done
   say "4/4 scoring run"
+  if [ "${BENCH_MODE:-auto}" = "manual" ]; then
+    say "BENCH_MODE=manual — enqueue a run in the contest portal NOW, then record it:"
+    say "    isukit bench --score <N> \"post-reboot verification\""
+    warn "finalize is NOT complete until that run is recorded and passes"
+    return 0
+  fi
   cmd_bench "post-reboot verification"
 }
 
@@ -858,14 +1086,209 @@ cmd_go() {
   cmd_setup
   cmd_logs on
 
-  local final_bench_cmd
+  local final_bench_cmd final_bench_mode
   final_bench_cmd=$(. "$CONF" 2>/dev/null; printf '%s' "${BENCH_CMD:-}")
-  if [ -n "$final_bench_cmd" ]; then
+  final_bench_mode=$(. "$CONF" 2>/dev/null; printf '%s' "${BENCH_MODE:-auto}")
+  if [ "$final_bench_mode" = "manual" ]; then
+    say "ready. BENCH_MODE = manual — start a run in the contest portal, then record it:"
+    say "    isukit bench --score <N> \"baseline\""
+  elif [ -n "$final_bench_cmd" ]; then
     say "ready. BENCH_CMD = $final_bench_cmd"
-    say "next: isukit bench"
+    say "next: isukit bench baseline"
   else
-    warn "ready, but BENCH_CMD is still empty — set it: isukit benchcmd '<command>'"
+    warn "ready, but BENCH_CMD is empty and BENCH_MODE is auto — pick one:"
+    warn "    isukit benchcmd '<command>'   (a benchmarker you can run yourself)"
+    warn "    isukit benchmode manual       (the portal runs it; you type the score)"
   fi
+}
+
+# ---------------------------------------------------------------- ship
+slugify() { # slugify <text> -- lowercase, non-alnum -> '-', squeeze/trim, cap 40 chars
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40
+}
+
+cmd_ship() {
+  local msg="${1:-}"
+  [ -n "$msg" ] || die "usage: isukit ship \"<message>\""
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo"
+  [ -n "$(git status --porcelain 2>/dev/null)" ] || die "nothing to ship — working tree is clean"
+
+  local slug branch n=1
+  slug=$(slugify "$msg")
+  [ -n "$slug" ] || slug="change"
+  branch="isukit/$slug"
+  while git show-ref --verify --quiet "refs/heads/$branch"; do
+    n=$((n+1))
+    branch="isukit/$slug-$n"
+  done
+
+  git switch -c "$branch" || die "could not create branch $branch"
+  git add -A
+  git commit -m "$msg" || die "commit failed"
+  local sha
+  sha=$(git rev-parse --short HEAD)
+
+  if git push -u origin "$branch"; then
+    if command -v gh >/dev/null 2>&1; then
+      gh pr create --draft --fill || warn "gh pr create failed — push succeeded, open the PR by hand"
+    fi
+  else
+    warn "push failed — committed locally on $branch ($sha) — push by hand when ready"
+  fi
+
+  say "shipped $sha on $branch — the next 'isukit bench' will record this sha"
+}
+
+cmd_revert() {
+  local sha="${1:-}"
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo"
+
+  if [ -z "$sha" ]; then
+    local cur
+    cur=$(git branch --show-current 2>/dev/null || true)
+    case "$cur" in
+      isukit/*) sha=$(git rev-parse --short HEAD) ;;
+    esac
+    if [ -z "$sha" ]; then
+      local b
+      for b in $(git for-each-ref --sort=-committerdate --format='%(refname:short)' 'refs/heads/isukit/*'); do
+        if git merge-base --is-ancestor "$b" HEAD 2>/dev/null; then
+          sha=$(git rev-parse --short "$b")
+          break
+        fi
+      done
+    fi
+    [ -n "$sha" ] || die "no isukit/* branch reachable from HEAD — pass one by hand: isukit revert <sha>"
+  fi
+
+  say "reverting $sha"
+  git revert --no-edit "$sha" || die "revert failed — resolve conflicts by hand, then: git revert --continue"
+  say "reverted $sha — next: isukit deploy, then isukit bench"
+}
+
+# ---------------------------------------------------------------- attribute
+cmd_attribute() {
+  need_state
+  [ -f "$STATE/scores.tsv" ] || die "no runs yet — run: isukit bench"
+  local noise="${1:-10}"
+
+  local rows n
+  rows=$(awk -F'\t' '$3 ~ /^-?[0-9]+$/' "$STATE/scores.tsv" | tail -2)
+  n=$(printf '%s\n' "$rows" | grep -c . || true)
+  [ "$n" -ge 2 ] || die "need at least two numeric-score runs to compare (have $n) — run: isukit bench again. rows scored ? or FAIL don't count"
+
+  printf '%s\n' "$rows" | awk -F'\t' -v noise="$noise" '
+    NR==1 { pts=$1; psha=$2; pscore=$3; pnote=$4 }
+    NR==2 { cts=$1; csha=$2; cscore=$3; cnote=$4 }
+    END {
+      printf "prev  %s  sha=%s  score=%s  note=%s\n", pts, psha, pscore, pnote
+      printf "cur   %s  sha=%s  score=%s  note=%s\n", cts, csha, cscore, cnote
+      if (pscore == 0) { print "prev score is 0 — cannot compute a percent delta"; exit 0 }
+      denom = pscore < 0 ? -pscore : pscore
+      delta = (cscore - pscore) / denom * 100
+      printf "delta %.1f%%  (noise threshold +/-%s%%)\n", delta, noise
+      if (delta > noise)       print "\033[32mKEEP\033[0m — improvement clears the noise floor"
+      else if (delta < -noise) print "\033[31mREVERT\033[0m — regression clears the noise floor: isukit revert " csha
+      else                     print "\033[33mINCONCLUSIVE\033[0m — inside noise; repeat this run 2-3x before deciding. stacking another change now makes BOTH runs unattributable"
+    }'
+}
+
+# ---------------------------------------------------------------- doctor
+doctor_ok()   { printf '\033[32mOK\033[0m    %s\n' "$*"; }
+doctor_warn() { printf '\033[33mWARN\033[0m  %s\n' "$*"; }
+doctor_fail() { printf '\033[31mFAIL\033[0m  %s\n' "$*"; }
+
+cmd_doctor() {
+  need_state
+  say "doctor"
+
+  if [ -f "$CONF" ] && ( . "$CONF" ) 2>/dev/null; then
+    doctor_ok "config parses ($CONF)"
+  else
+    doctor_fail "config missing or does not parse ($CONF)"
+    return 1
+  fi
+  load
+
+  if rsh "$APP" "true" 2>/dev/null; then
+    doctor_ok "reachable: $APP"
+  else
+    doctor_fail "cannot reach $APP — check: ssh ${SSH_OPTS:-} $APP true"
+    return 1
+  fi
+  if [ "${BENCH_MODE:-auto}" = "auto" ]; then
+    if rsh "$BENCH" "true" 2>/dev/null; then
+      doctor_ok "reachable: $BENCH"
+    else
+      doctor_warn "cannot reach bench host $BENCH — check: ssh ${SSH_OPTS:-} $BENCH true"
+    fi
+  fi
+
+  if [ -f "$STATE/manifest" ]; then
+    doctor_ok "manifest exists"
+  else
+    doctor_warn "no manifest — running: isukit probe"
+    cmd_probe || doctor_warn "isukit probe failed — run it by hand"
+  fi
+  load
+
+  if [ -z "${APP_UNIT:-}" ]; then
+    doctor_warn "no APP_UNIT in manifest — fix: isukit unit <systemd-unit-name>"
+  else
+    local ustate
+    ustate=$(rsh "$APP" "systemctl is-active '$APP_UNIT'" 2>/dev/null || true)
+    if [ "$ustate" = "active" ]; then
+      doctor_ok "APP_UNIT $APP_UNIT is active"
+    else
+      doctor_fail "APP_UNIT $APP_UNIT is ${ustate:-unknown} — recent log:"
+      rsh "$APP" "sudo -n journalctl -u '$APP_UNIT' -n 30 --no-pager" 2>/dev/null || true
+    fi
+  fi
+
+  if [ -n "${APP_UNIT:-}" ] && [ "${APP_UNIT_CONFIDENCE:-}" != "high" ] && [ "${APP_UNIT_CONFIDENCE:-}" != "override" ]; then
+    doctor_warn "APP_UNIT_CONFIDENCE=${APP_UNIT_CONFIDENCE:-unknown} — candidates: ${APP_CANDIDATES:-none} — fix: isukit unit <name>"
+  else
+    doctor_ok "APP_UNIT_CONFIDENCE=${APP_UNIT_CONFIDENCE:-n/a}"
+  fi
+
+  if rsh "$APP" "command -v alp >/dev/null && command -v pt-query-digest >/dev/null" 2>/dev/null; then
+    doctor_ok "alp + pt-query-digest installed"
+  else
+    doctor_warn "alp and/or pt-query-digest missing — running: isukit setup"
+    cmd_setup || doctor_warn "isukit setup failed — install by hand"
+  fi
+
+  if rsh "$APP" "test -f /etc/nginx/conf.d/00-isukit.conf" 2>/dev/null; then
+    doctor_warn "measurement logging is ON — must be OFF for a scoring run: isukit logs off"
+  else
+    doctor_ok "measurement logging is off"
+  fi
+
+  local pct
+  pct=$(rsh "$APP" "df -P / | tail -1 | tr -s ' ' | cut -d' ' -f5 | tr -d '%'" 2>/dev/null || true)
+  if [ -n "$pct" ]; then
+    local free=$((100 - pct))
+    if [ "$free" -lt 10 ]; then
+      doctor_fail "disk on $APP: only ${free}% free"
+    elif [ "$free" -lt 20 ]; then
+      doctor_warn "disk on $APP: only ${free}% free"
+    else
+      doctor_ok "disk on $APP: ${free}% free"
+    fi
+  else
+    doctor_warn "could not read disk usage on $APP"
+  fi
+
+  local mode="${BENCH_MODE:-auto}"
+  if [ "$mode" = "manual" ]; then
+    doctor_ok "BENCH_MODE=manual — 'isukit bench' will prompt for a portal score"
+  elif [ -n "${BENCH_CMD:-}" ]; then
+    doctor_ok "BENCH_MODE=auto, BENCH_CMD is set"
+  else
+    doctor_warn "BENCH_MODE=auto but BENCH_CMD is empty — run: isukit benchprobe"
+  fi
+
+  return 0
 }
 
 usage() { cat >&2 <<'EOF'
@@ -890,38 +1313,68 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          '-F ./ssh_config' or '-i ~/key.pem -p 2222'
                                          note: scp needs -P for port, not -p — if you
                                          hand-edit SSH_OPTS for a custom port, check both
+    isukit host add <target>            add another app instance to EXTRA_HOSTS
+                                         (restart/finalize hit these too)
     isukit probe                        interrogate the server, write .isukit/manifest,
                                          then auto-probe + compose BENCH_CMD (see below)
     isukit benchprobe                   (re-)probe the benchmarker binary on $BENCH and
                                          compose BENCH_CMD from its own --help output
     isukit benchcmd ['<command>']       set BENCH_CMD by hand; no arg prints current value
+    isukit benchmode [auto|manual]      auto = ssh BENCH_CMD on $BENCH; manual = the
+                                         portal runs the bench, you paste the score;
+                                         no arg prints the current mode
     isukit unit <systemd-unit-name>     override the auto-detected app unit, re-probe
     isukit setup                        install alp + pt-query-digest on the app host
 
   LOOP
     isukit logs {on|off}                nginx LTSV + mysql slow log (off for scoring runs)
-    isukit bench [note]                 run BENCH_CMD, record score+sha to scores.tsv
+    isukit bench [note] [--score N] [--fail]
+                                         auto mode: run BENCH_CMD, record score+sha
+                                         manual mode: no ssh — prints portal instructions;
+                                         --score N (or a paste prompt) supplies the score,
+                                         --fail records FAIL for an errored run
     isukit alp                          top endpoints by SUMMED response time
     isukit slow                         top queries by total time
     isukit pprof [sec] [port]           pull a Go CPU profile
     isukit deploy [--force]             rsync source up, build/compose, restart
                                          --force skips the "does this look like a
                                          built binary under /home/isucon" safety check
-    isukit restart                      restart APP_UNIT (+ EXTRA_UNITS, if set)
+    isukit restart                      restart APP_UNIT (+ EXTRA_UNITS) on $APP and
+                                         every EXTRA_HOSTS entry
     isukit score                        run history
 
+  DIAGNOSE
+    isukit os                           uptime, vmstat/iostat/mpstat, free, df, unit
+                                         status on $APP — tolerates missing tools
+    isukit doctor                       non-destructive check + auto-repair of config,
+                                         connectivity, manifest, unit health, tools,
+                                         logging state, disk headroom, bench mode
+    isukit attribute [noise_pct]        compare the last two numeric bench runs; verdict
+                                         is KEEP / REVERT / INCONCLUSIVE vs noise_pct
+                                         (default 10) — one change at a time, or this
+                                         can't tell which change moved the score
+
+  SHIP
+    isukit ship "<message>"             commit everything on a new isukit/<slug> branch,
+                                         push, open a draft PR (gh, if on PATH)
+    isukit revert [<sha>]                git revert; no arg reverts the most recent
+                                         commit on an isukit/* branch reachable from HEAD
+
   ENDGAME
-    isukit finalize                     logs off -> reboot -> verify -> score
+    isukit finalize                     logs off -> reboot ALL hosts -> verify -> score
+                                         (restart order across hosts is not guaranteed)
 
   CONFIG (.isukit/config)
     SSH_OPTS       extra ssh/scp flags applied to every remote call
     EXTRA_UNITS    space-separated extra units 'restart'/'finalize' also restart
+    EXTRA_HOSTS    space-separated extra ssh targets; 'restart'/'finalize' hit these too
+    BENCH_MODE     auto (ssh + BENCH_CMD) or manual (portal, paste the score)
 
   App-unit auto-detection is a scored heuristic, not certain — it can pick wrong
   on unusual layouts. 'isukit probe' prints APP_CANDIDATES and warns on low
   confidence; sanity-check it there, and fix it with 'isukit unit <name>'.
 EOF
-exit 1; }
+exit "${1:-1}"; }
 
 main() {
   local __a __norm __t __changed=0
@@ -929,8 +1382,12 @@ main() {
   set -f
   for __a in "$@"; do
     __norm=$(normalize_ws_arg "$__a")
-    [ "$__norm" = "$__a" ] || __changed=1
-    for __t in $__norm; do __new+=("$__t"); done
+    if [ "$__norm" = "$__a" ]; then
+      __new+=("$__norm")
+    else
+      __changed=1
+      for __t in $__norm; do __new+=("$__t"); done
+    fi
   done
   set +f
   [ "$__changed" = "1" ] && warn "cleaned invisible whitespace (non-breaking / full-width / zero-width space, or a BOM) out of the arguments — your paste was mangled"
@@ -944,6 +1401,7 @@ main() {
     probe)    cmd_probe ;;
     benchprobe) cmd_benchprobe ;;
     benchcmd) cmd_benchcmd "$@" ;;
+    benchmode) cmd_benchmode "$@" ;;
     unit)     cmd_unit "$@" ;;
     setup)    cmd_setup ;;
     logs)     cmd_logs "$@" ;;
@@ -952,9 +1410,15 @@ main() {
     alp)      cmd_alp ;;
     slow)     cmd_slow ;;
     pprof)    cmd_pprof "$@" ;;
+    os)       cmd_os ;;
+    doctor)   cmd_doctor ;;
+    attribute) cmd_attribute "$@" ;;
+    ship)     cmd_ship "$@" ;;
+    revert)   cmd_revert "$@" ;;
     deploy)   cmd_deploy "$@" ;;
     restart)  cmd_restart ;;
     finalize) cmd_finalize ;;
+    help|--help|-h) usage 0 ;;
     *)        usage ;;
   esac
 }

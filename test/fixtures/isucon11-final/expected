@@ -1,0 +1,5 @@
+APP_UNIT=isucholar.go.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=nginx
+DB_SERVER=mysql
+SRC_LANGS="go nodejs php ruby rust "

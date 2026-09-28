@@ -1,0 +1,21 @@
+Usage of ./bench:
+  -appep string
+    	app endpoint (default "https://localhost.isucon8.flying-chair.net")
+  -bankep string
+    	isubank endpoint (default "https://compose.isucon8.flying-chair.net:5515")
+  -internalbank string
+    	isubank endpoint (for internal) (default "https://localhost.isucon8.flying-chair.net:5515")
+  -internallog string
+    	isulog endpoint (for internal) (default "https://localhost.isucon8.flying-chair.net:5516")
+  -jobid string
+    	portal jobid
+  -log string
+    	output log path (default stderr)
+  -logep string
+    	isulog endpoint (default "https://compose.isucon8.flying-chair.net:5516")
+  -result string
+    	result json path (default stdout)
+  -stateout string
+    	save state filename
+  -teestdout string
+    	tee stdout

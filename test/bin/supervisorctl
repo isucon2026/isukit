@@ -1,0 +1,9 @@
+#!/bin/bash
+# supervisorctl stub for isukit's offline probe harness.
+# Answers `status` from $ISUKIT_FIXTURE/supervisorctl-status.txt; a fixture without
+# that file models a host with no supervisord, which is every year but isucon5-final.
+set -u
+[ "${1:-}" = "status" ] || exit 0
+f="${ISUKIT_FIXTURE:-}/supervisorctl-status.txt"
+[ -f "$f" ] && cat "$f"
+exit 0

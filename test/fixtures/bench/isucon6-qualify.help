@@ -1,0 +1,9 @@
+Usage of benchmarker:
+  -datadir string
+    	userdata directory (default "data")
+  -debug
+    	Debug mode
+  -target string
+    	 (default "http://localhost")
+  -version
+    	Print version information and quit.

@@ -1,0 +1,25 @@
+Usage of ./bench:
+  -all-addresses string
+    	ex: "192.168.0.1,192.168.0.2,192.168.0.3" (comma separated, limit 3)
+  -exit-status
+    	set exit status non-zero when a benchmark result is failing
+  -initialize-timeout string
+    	request timeout duration of POST /initialize (default "20s")
+  -jia-service-url string
+    	jia service url (default "http://apitest:5000")
+  -mem-profile string
+    	path of output heap profile at max memStats.sys allocated. ex: memprof
+  -no-load
+    	exit on finished prepare
+  -profile string
+    	ex: cpu.out
+  -prom-out string
+    	Prometheus textfile output path
+  -target string
+    	ex: localhost:9292 (default "")
+  -timeout string
+    	request timeout duration (default "1s")
+  -tls
+    	true if target server is a tls
+  -version
+    	show version and exit 1

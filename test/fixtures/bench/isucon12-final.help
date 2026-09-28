@@ -1,0 +1,9 @@
+Usage of ./benchmarker:
+  -exit-error-on-fail
+    	Exit with error if benchmark fails (default true)
+  -prepare-only
+    	Run the benchmarker on preparation mode
+  -stage string
+    	Set stage which affects the amount of request (default "test")
+  -target-host string
+    	Benchmark target host with port (default "localhost:8080")

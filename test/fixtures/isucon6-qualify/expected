@@ -1,0 +1,5 @@
+APP_UNIT=isuda.perl.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=nginx
+DB_SERVER=mysql
+SRC_LANGS="bin go js perl php public python ruby scala "

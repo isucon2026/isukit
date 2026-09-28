@@ -1,0 +1,5 @@
+APP_UNIT=isupipe-go.service
+APP_UNIT_CONFIDENCE=high
+WEB_SERVER=nginx
+DB_SERVER=mysql
+SRC_LANGS="go node perl php python ruby rust "

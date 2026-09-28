@@ -1,0 +1,33 @@
+Usage of ./bench:
+  -data string
+    	path to data directory (default "./data")
+  -debugname
+    	use benchN as room name
+  -dumpgamelog int
+    	save gamelog into tmp direcotry (1:if postTest failed 2:always)
+  -jobid string
+    	job id
+  -memprof
+    	save mem profile into tmp direcotry
+  -nolevelup
+    	dont increase load level
+  -nostaticfile
+    	dont check static file
+  -output string
+    	path to write result json
+  -portal string
+    	portal site url (only used on workermode) (default "http://localhost:8888")
+  -profile
+    	save cpu profile into tmp direcotry
+  -remotes string
+    	remote addrs to benchmark (default "localhost:5000")
+  -strictcache
+    	compare cached json strictly
+  -tempdir string
+    	path to temp dir
+  -test
+    	run pretest only
+  -validatelog string
+    	path to gzipped gamelog to debug validation
+  -workermode
+    	workermode
