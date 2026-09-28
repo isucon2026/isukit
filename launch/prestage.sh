@@ -19,6 +19,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 envfile="$here/prestage.env"
 
 key_name="" key_file="" region="" vpc_id="" subnet_id="" sg_name="isukit-ssh"
+allow_ips=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,12 +29,32 @@ while [ $# -gt 0 ]; do
     --vpc-id)    vpc_id="$2"; shift 2 ;;
     --subnet-id) subnet_id="$2"; shift 2 ;;
     --sg-name)   sg_name="$2"; shift 2 ;;
+    --allow-ip)  allow_ips+=("$2"); shift 2 ;;
     *) die "unknown arg: $1" ;;
   esac
 done
 
-[ -n "$key_name" ] || die "usage: prestage.sh --key-name <name> --key-file <path/to/save.pem> [--region r] [--vpc-id id] [--subnet-id id] [--sg-name name]"
-[ -n "$key_file" ] || die "usage: prestage.sh --key-name <name> --key-file <path/to/save.pem> [--region r] [--vpc-id id] [--subnet-id id] [--sg-name name]"
+usage="usage: prestage.sh --key-name <name> --key-file <path/to/save.pem> [--region r] [--vpc-id id] [--subnet-id id] [--sg-name name] [--allow-ip cidr-or-ip]..."
+[ -n "$key_name" ] || die "$usage"
+[ -n "$key_file" ] || die "$usage"
+
+# a plausible dotted-quad, bare or with a /0-32 mask — bare IPs get /32 below.
+# not full RFC validation, just enough to catch a fat-fingered teammate IP
+# before it reaches authorize-security-group-ingress as a confusing API error.
+validate_cidr() {
+  local mask="" ip="$1" octet
+  case "$1" in */*) ip="${1%/*}"; mask="${1#*/}" ;; esac
+  case "$mask" in ''|[0-9]|[12][0-9]|3[0-2]) ;; *) return 1 ;; esac
+  local IFS=.
+  set -- $ip
+  [ $# -eq 4 ] || return 1
+  for octet in "$@"; do
+    case "$octet" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$octet" -le 255 ] || return 1
+  done
+}
+normalize_cidr() { case "$1" in */*) printf '%s' "$1" ;; *) printf '%s/32' "$1" ;; esac; }
+list_has() { local n="$1"; shift; local h; for h in "$@"; do [ "$h" = "$n" ] && return 0; done; return 1; }
 
 command -v aws >/dev/null 2>&1 || die "aws CLI not found — install it before contest day"
 
@@ -106,6 +127,13 @@ my_ip=$(curl -fsS --max-time 5 https://checkip.amazonaws.com | tr -d '[:space:]'
   || die "couldn't determine this machine's public IP (checkip.amazonaws.com unreachable) — pass it in by hand if this keeps failing"
 my_cidr="${my_ip}/32"
 
+targets=("$my_cidr")
+for raw in "${allow_ips[@]+"${allow_ips[@]}"}"; do
+  validate_cidr "$raw" || die "--allow-ip $raw doesn't look like an IPv4 address or CIDR (e.g. 203.0.113.7 or 203.0.113.0/24)"
+  norm=$(normalize_cidr "$raw")
+  list_has "$norm" "${targets[@]}" || targets+=("$norm")
+done
+
 sg_id=$(aws ec2 describe-security-groups --region "$region" \
   --filters "Name=vpc-id,Values=$vpc_id" "Name=group-name,Values=$sg_name" \
   --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || true)
@@ -118,22 +146,32 @@ if [ -z "$sg_id" ] || [ "$sg_id" = "None" ]; then
 fi
 say "security group: $sg_id"
 
-has_rule=$(aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
-  --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[?CidrIp=='${my_cidr}'].CidrIp" \
-  --output text 2>/dev/null || true)
+for cidr in "${targets[@]}"; do
+  has_rule=$(aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
+    --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[?CidrIp=='${cidr}'].CidrIp" \
+    --output text 2>/dev/null || true)
 
-if [ -z "$has_rule" ]; then
-  say "authorizing SSH (22) from $my_cidr..."
-  aws ec2 authorize-security-group-ingress --region "$region" --group-id "$sg_id" \
-    --protocol tcp --port 22 --cidr "$my_cidr" >/dev/null \
-    || die "authorize-security-group-ingress failed"
-else
-  say "SSH from $my_cidr already authorized"
-fi
+  if [ -z "$has_rule" ]; then
+    say "authorizing SSH (22) from $cidr..."
+    aws ec2 authorize-security-group-ingress --region "$region" --group-id "$sg_id" \
+      --protocol tcp --port 22 --cidr "$cidr" >/dev/null \
+      || die "authorize-security-group-ingress failed for $cidr"
+  else
+    say "SSH from $cidr already authorized"
+  fi
+done
 
-warn "SG allows SSH only from $my_cidr, captured NOW. If your IP changes before contest day, re-run this script."
+# query back what's actually in the SG rather than echoing input — the point
+# is to show ground truth before launch, since the rules forbid changing it after.
+authorized=$(aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
+  --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[].CidrIp" --output text \
+  | tr '\t' '\n' | sort -u)
+
+say "SSH (22) currently authorized from:"
+printf '%s\n' "$authorized" | while read -r c; do printf '     %s\n' "$c" >&2; done
+
+warn "changing a security group AFTER instances are launched is prohibited by the rules — every teammate's IP must be in the list above before launch.sh runs. missing one? re-run with: --allow-ip <their-ip>"
 warn "the day-of manual may require opening OTHER ports (e.g. the app port, envcheck) — add those rules HERE, before launch."
-warn "changing a security group AFTER instances are launched is prohibited by the rules — get every port right in this pass."
 
 # ---------------------------------------------------------------- write env
 cat > "$envfile" <<EOF
@@ -145,6 +183,7 @@ VPC_ID=$vpc_id
 SUBNET_ID=$subnet_id
 SUBNET_PUBLIC_IP=true
 SG_ID=$sg_id
+SG_ALLOWED_CIDRS="$(printf '%s' "$authorized" | tr '\n' ' ' | sed 's/ *$//')"
 EOF
 
 say "wrote $envfile"

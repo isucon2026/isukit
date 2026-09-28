@@ -11,7 +11,7 @@ says "launch N of instance type T from AMI X" and leaves the how to you.
 
 | When | Script | What |
 |---|---|---|
-| T-7d (any day before) | `prestage.sh` | verify AWS auth, key pair, VPC/subnet, security group (SSH from your IP only) |
+| T-7d (any day before) | `prestage.sh` | verify AWS auth, key pair, VPC/subnet, security group (SSH from your IP, plus any `--allow-ip`) |
 | T+0:00 | — | contest starts, read the manual, get AMI id / instance type / instance count |
 | T+0:10 | `launch.sh --ami … --type … --count …` | launch exactly what the manual specifies |
 | T+0:15 | `isukit go …` | printed by launch.sh — hand off to the main isukit loop |
@@ -33,6 +33,14 @@ says "launch N of instance type T from AMI X" and leaves the how to you.
   subnet, security group rules — is verified (and only-if-missing created) by
   `prestage.sh`, days before the contest, so there's nothing left to decide
   under time pressure at T+0.
+- **`--allow-ip <cidr-or-ip>` (repeatable) authorizes teammates' SSH access.**
+  `prestage.sh` always authorizes the operator's own auto-detected IP with no
+  flags needed; pass `--allow-ip` once per teammate to add theirs too (a bare
+  IP is normalized to `/32`, a `203.0.113.0/24`-style CIDR is passed through
+  as-is). Since security group rules can't change after `launch.sh` runs,
+  every teammate's IP has to be in the list **before** that point — re-run
+  `prestage.sh` with `--allow-ip` any time before contest day to add one, and
+  check the printed authorized-CIDR list against the roster.
 - **The benchmarker server is never touched by this tooling.** These scripts
   launch app instances only; nothing here targets or reconfigures a bench
   host.
