@@ -158,6 +158,25 @@ cmd_host() {
   need_state
   local role="${1:-}" target="${2:-}" opts=""
   [ "$#" -gt 2 ] && { shift 2; opts="$*"; }
+  # If go's per-host ssh_config is in play (SSH_OPTS carries -F) and the caller isn't
+  # replacing it wholesale (no -F in the new opts), redirect app/bench -i/-p into that
+  # ssh_config's Host block instead of clobbering the global SSH_OPTS. Skip when target
+  # is already the isukit-app/isukit-bench alias (that's cmd_go writing it originally).
+  local rewrite_ssh_config=0 orig_target="$target"
+  if { [ "$role" = "app" ] || [ "$role" = "bench" ]; } \
+     && [ "$target" != "isukit-$role" ] && [ -f "$STATE/ssh_config" ]; then
+    case " $opts " in
+      *" -F "*) : ;;
+      *)
+        local cur_ssh_opts
+        cur_ssh_opts=$( . "$CONF" 2>/dev/null; printf '%s' "${SSH_OPTS:-}" )
+        case " $cur_ssh_opts " in
+          *" -F "*) rewrite_ssh_config=1 ;;
+        esac
+        ;;
+    esac
+  fi
+  [ "$rewrite_ssh_config" = 1 ] && target="isukit-$role"
   case "$role" in
     app)   sed -i.bak "s|^APP=.*|APP=$target|"   "$CONF"; rm -f "$CONF.bak" ;;
     bench) sed -i.bak "s|^BENCH=.*|BENCH=$target|" "$CONF"; rm -f "$CONF.bak" ;;
@@ -178,7 +197,36 @@ cmd_host() {
       return 0 ;;
     *) die "usage: isukit host {app|bench|add} <ssh-target|local> [ssh opts...]" ;;
   esac
-  if [ -n "$opts" ]; then
+  if [ "$rewrite_ssh_config" = 1 ]; then
+    local w val prev="" new_key="" new_port=""
+    for w in $opts; do
+      case "$w" in
+        -i=*|--identity=*|--key=*) val=$(expand_tilde "${w#*=}"); check_keyfile "$val"; new_key="$val" ;;
+        -p=*)                      new_port="${w#*=}" ;;
+      esac
+      case "$prev" in
+        -i|--identity|--key) val=$(expand_tilde "$w"); check_keyfile "$val"; new_key="$val" ;;
+        -p)                  new_port="$w" ;;
+      esac
+      prev="$w"
+    done
+    [ -n "$new_key" ] && new_key=$(abspath "$new_key")
+    local existing_key existing_port
+    existing_key=$(awk '/^Host isukit-'"$role"'$/{f=1;next} f&&/^Host /{exit} f&&/^  IdentityFile /{print $2; exit}' "$STATE/ssh_config")
+    existing_port=$(awk '/^Host isukit-'"$role"'$/{f=1;next} f&&/^Host /{exit} f&&/^  Port /{print $2; exit}' "$STATE/ssh_config")
+    local block_file="$STATE/.ssh_block.$$"
+    go_ssh_host_block "isukit-$role" "$orig_target" "${new_key:-$existing_key}" "${new_port:-$existing_port}" > "$block_file"
+    awk -v role="isukit-$role" -v blockfile="$block_file" '
+      $0 == "Host " role {while ((getline line < blockfile) > 0) print line; close(blockfile); skip=1; next}
+      skip && /^Host /{skip=0}
+      skip && $0==""{skip=0; print; next}
+      skip {next}
+      {print}
+    ' "$STATE/ssh_config" > "$STATE/ssh_config.new" && mv "$STATE/ssh_config.new" "$STATE/ssh_config"
+    rm -f "$block_file"
+    chmod 600 "$STATE/ssh_config" 2>/dev/null || true
+    say "updated isukit-$role in $STATE/ssh_config (SSH_OPTS keeps -F)"
+  elif [ -n "$opts" ]; then
     local w val prev="" expanded=""
     for w in $opts; do
       case "$w" in
