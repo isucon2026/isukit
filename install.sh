@@ -16,6 +16,11 @@ die()  { printf '\033[31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 command -v git >/dev/null 2>&1 || die "git is required"
 
 if [ -d "$SRC/.git" ]; then
+  CURRENT_ORIGIN="$(git -C "$SRC" remote get-url origin 2>/dev/null || true)"
+  if [ "$CURRENT_ORIGIN" != "$REPO_URL" ]; then
+    say "repointing origin: $CURRENT_ORIGIN -> $REPO_URL"
+    git -C "$SRC" remote set-url origin "$REPO_URL"
+  fi
   say "updating $SRC"
   git -C "$SRC" pull --ff-only
 else
