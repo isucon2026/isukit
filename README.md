@@ -30,6 +30,15 @@
     isukit ship "added idx X"    # 全部commit + push + draft PR、1変更1コミット
     isukit score                 # 全履歴
 
+## ミドルウェア設定を git で管理
+
+    isukit etc adopt            # /etc の設定を <サーバーの repo>/etc/<同じパス> に移し、/etc からリンク
+    isukit etc status           # repo の各ファイルを /etc が本当に読んでいるか
+    isukit etc push             # 手元の etc/ → サーバー。変わった層だけ reload / restart
+    isukit etc pull             # サーバーの etc/ → 手元の etc/
+
+`adopt` は `nginx.conf`・有効なサイト設定・`[mysqld]` を含む `.cnf`・アプリの unit ファイルを自動で探し、それぞれ `<サーバーの repo>/etc/`（例：`etc/nginx/sites-available/isucon.conf`）に移して `/etc` からシンボリックリンクを張る。置き換えたファイルは `/etc/isukit-orig/<同じパス>` にバックアップする（`sites-enabled/*` などの include で読み込まれないよう、元の場所には置かない）。そのあと層ごとに確認し（`nginx -t` + reload、`daemon-reload`、mysql 再起動 + mysql ユーザーがリンク先を読めるか + 設定値が実際に反映されているか）、失敗した層だけ元に戻す。Ubuntu では、mysqld がリンク先を読めるように AppArmor の許可も追加する。repo にすでに同じファイルがあれば（repo からサーバーを作り直す場合）、repo 側が優先される。`/etc` がリンク済みなら、`deploy` が先に `etc push` を行う。サーバー側の repo は、probe で見つけた `SRC_DIR` の git ルート（`.isukit/config` の `ETC_REPO` で上書き可）。サーバー側で動くスクリプトは `remote/` にある。
+
 `isukit probe` はスコア付きヒューリスティックでアプリのsystemd unitを選ぶ。保証ではない — 理由は下の「なぜリポジトリを読まずにサーバーに聞くのか」を参照。選択が外れていたら：
 
     isukit unit <systemd-unit-name>   # 上書き + 再probe
@@ -97,7 +106,7 @@ ISUCONのリポジトリ構成は何ひとつ安定していない。isucon9, 10
 ## 注意点
 
 - **`BENCH_CMD` は自動生成される、確認すること。** `isukit benchprobe` は `/home/isucon` 配下で最大サイズのELFバイナリのうちベンチマーカーらしい名前のものを選び、その `--help` を読んで、見つかったtarget/nameserver系フラグから `sudo -iu <owner> sh -c '...'` を組み立てる — ここが一番人間の手直しが必要になりやすい行。読み取り元のフラグ一覧全部は `.isukit/bench-help.txt` に残る。修正は `isukit benchcmd '<command>'`（引数無しだと現在値を表示）。`isukit benchprobe` は一度手で設定した `BENCH_CMD` を上書きしない。
-- `logs on` は `/etc/nginx` を `/etc/nginx.isukit.bak` にバックアップしてから書き換える。`logs off` はそのバックアップをまるごと復元する。webサーバーがnginxでない場合、`probe` が警告してwebサイドの `logs` は何もしない。
+- `logs on` は `/etc/nginx` を `/etc/nginx.isukit.bak` にバックアップしたうえで、`conf.d/00-isukit.conf` を追加し、既存の `access_log` 行を `#isukit# access_log` としてコメントアウトする（シンボリックリンクの場合はリンク先の実ファイルを編集する）。`logs off` はその目印の付いた変更だけを元に戻す（バックアップは手動復旧用に残すだけ）ので、repo にリンクした設定はリンクのまま、その後のチューニングも消えない。logs が on の間はサーバー側の repo のファイルにこの目印が入るが、`etc pull` で取り除かれる。webサーバーがnginxでない場合、`probe` が警告してwebサイドの `logs` は何もしない。
 - MySQLの自動化にはソケット越しのパスワード無し `sudo mysql` が必要。使えない場合 `probe` は `MYSQL_OK=0` と報告する。
 - `pprof` には `import _ "net/http/pprof"` とリスナーがアプリ側に必要。エンドポイントが無ければ、コマンド自身が追加すべきスニペットを教えてくれる。
 - `deploy` はGoアプリを前提としており、systemdが既にexecしている正確なパスへビルドする。他言語実装は手でデプロイする。

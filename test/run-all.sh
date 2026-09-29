@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs both suites and prints one combined summary line.
+# Runs every suite and prints one combined summary line.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +32,14 @@ BENCH_OUT="$(run_suite run-bench-tests.sh "$BENCH_HAS" bench)"
 BENCH_RC=$?
 echo "$BENCH_OUT"
 
+# etc cases are scenarios, not per-year fixtures: they only run on a full run.
+ETC_OUT=""; ETC_RC=0
+if [ -z "$ONLY" ]; then
+  ETC_OUT="$("$HERE/run-etc-tests.sh" ${FLAGS+"${FLAGS[@]}"})"
+  ETC_RC=$?
+  echo "$ETC_OUT"
+fi
+
 parse_summary() {
   echo "$1" | grep -oE '[0-9]+ fixtures, [0-9]+ passed, [0-9]+ failed' | tail -1 \
     | sed -E 's/([0-9]+) fixtures, ([0-9]+) passed, ([0-9]+) failed/\1 \2 \3/'
@@ -39,12 +47,13 @@ parse_summary() {
 
 read -r P_TOTAL P_PASS P_FAIL <<< "$(parse_summary "$PROBE_OUT")"
 read -r B_TOTAL B_PASS B_FAIL <<< "$(parse_summary "$BENCH_OUT")"
+read -r E_TOTAL E_PASS E_FAIL <<< "$(parse_summary "$ETC_OUT")"
 
 # A skipped suite prints no summary line, so parse_summary yields empty fields.
-TOTAL=$((${P_TOTAL:-0} + ${B_TOTAL:-0}))
-PASS=$((${P_PASS:-0} + ${B_PASS:-0}))
-FAIL=$((${P_FAIL:-0} + ${B_FAIL:-0}))
+TOTAL=$((${P_TOTAL:-0} + ${B_TOTAL:-0} + ${E_TOTAL:-0}))
+PASS=$((${P_PASS:-0} + ${B_PASS:-0} + ${E_PASS:-0}))
+FAIL=$((${P_FAIL:-0} + ${B_FAIL:-0} + ${E_FAIL:-0}))
 
 echo "$TOTAL fixtures, $PASS passed, $FAIL failed"
 
-[ "$PROBE_RC" -eq 0 ] && [ "$BENCH_RC" -eq 0 ]
+[ "$PROBE_RC" -eq 0 ] && [ "$BENCH_RC" -eq 0 ] && [ "$ETC_RC" -eq 0 ]
