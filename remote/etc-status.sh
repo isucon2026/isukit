@@ -16,7 +16,7 @@ BAD=0; N=0
 [ -d "$DEST" ] || { echo "etc: $DEST does not exist — nothing is managed yet (isukit etc adopt)"; exit 3; }
 LIST=$(mktemp)
 trap 'rm -f "$LIST"' EXIT
-find "$DEST" -type f ! -name "*.orig" ! -path "$DEST/apparmor.d/*" | sort > "$LIST"
+find "$DEST" -type f ! -path "$DEST/apparmor.d/*" | sort > "$LIST"
 while read -r p; do
   rel="${p#"$DEST"/}"; f="$E/$rel"; N=$((N+1))
   if [ -L "$f" ] && [ "$(readlink "$f")" = "$p" ]; then

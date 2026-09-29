@@ -35,7 +35,14 @@ cat > "$BIN/nginx" <<'EOF'
 #!/bin/bash
 exit "${NGINX_RC:-0}"
 EOF
-for c in systemctl mysql apparmor_parser; do printf '#!/bin/bash\nexit 0\n' > "$BIN/$c"; done
+for c in systemctl apparmor_parser; do printf '#!/bin/bash\nexit 0\n' > "$BIN/$c"; done
+# mysql answers SELECT @@GLOBAL.x with $MYSQL_LIVE (default 1000 = the fixture's
+# max_connections), so the "file values are live" check runs for real.
+cat > "$BIN/mysql" <<'EOF'
+#!/bin/bash
+case "$*" in *@@GLOBAL*) echo "${MYSQL_LIVE:-1000}" ;; esac
+exit 0
+EOF
 chmod +x "$BIN"/*
 
 NGINX_CONF='user www-data;
@@ -104,7 +111,7 @@ t_adopt() {
   check -f "$E/mysql/mysql.conf.d/mysql.cnf" -a ! -L "$E/mysql/mysql.conf.d/mysql.cnf"
   check "$(readlink "$E/mysql/my.cnf")" = "/etc/alternatives/my.cnf"
   check "$(cat "$R/etc/nginx/nginx.conf")" = "$NGINX_CONF"
-  check "$(cat "$E/nginx/nginx.conf.orig")" = "$NGINX_CONF"
+  check "$(cat "$E/isukit-orig/nginx/nginx.conf")" = "$NGINX_CONF"
   check -n "$(grep -F "$R/etc/mysql/** r," "$E/apparmor.d/local/usr.sbin.mysqld")"
   check -f "$R/etc/apparmor.d/local/usr.sbin.mysqld"
 }
@@ -174,8 +181,67 @@ t_repo_wins() {
   check "$rc" = 0
   check -n "$(linked_to "$E/nginx/nginx.conf" "$R/etc/nginx/nginx.conf" && echo y)"
   check "$(cat "$E/nginx/nginx.conf")" = "tuned"
-  check "$(cat "$E/nginx/nginx.conf.orig")" = "$NGINX_CONF"
+  check "$(cat "$E/isukit-orig/nginx/nginx.conf")" = "$NGINX_CONF"
   check -n "$(printf '%s\n' "$OUT" | grep 'REPO COPY WINS')"
+}
+
+t_backup_outside_include_dirs() {
+  new_tree
+  # some images ship a plain file in sites-enabled/ rather than a link
+  rm "$E/nginx/sites-enabled/isucon.conf"
+  printf '%s\n' "$SITE_CONF" > "$E/nginx/sites-enabled/plain.conf"
+  run_adopt; check "$?" = 0
+  check -n "$(linked_to "$E/nginx/sites-enabled/plain.conf" "$R/etc/nginx/sites-enabled/plain.conf" && echo y)"
+  # nothing but the link may sit in an include dir, or nginx loads it as config
+  check "$(ls "$E/nginx/sites-enabled")" = "plain.conf"
+  check -z "$(find "$E" -name '*.orig')"
+  check -f "$E/isukit-orig/nginx/sites-enabled/plain.conf"
+}
+
+t_readopt_keeps_current() {
+  new_tree
+  run_adopt
+  # a package upgrade replaced the link with a fresh plain file
+  rm "$E/nginx/nginx.conf"; printf 'from-upgrade\n' > "$E/nginx/nginx.conf"
+  run_adopt; check "$?" = 0
+  local newest
+  newest=$(ls "$E"/isukit-orig/nginx/nginx.conf.* 2>/dev/null | tail -1)
+  check -n "$newest"
+  check "$(cat "$newest")" = "from-upgrade"
+  check "$(cat "$E/isukit-orig/nginx/nginx.conf")" = "$NGINX_CONF"
+  check -n "$(printf '%s\n' "$OUT" | grep -F "kept as $newest")"
+}
+
+t_rollback_uses_this_runs_backup() {
+  new_tree
+  run_adopt
+  rm "$E/nginx/nginx.conf"; printf 'from-upgrade\n' > "$E/nginx/nginx.conf"
+  NGINX_RC=1 run_adopt; check "$?" = 1
+  check -f "$E/nginx/nginx.conf" -a ! -L "$E/nginx/nginx.conf"
+  check "$(cat "$E/nginx/nginx.conf")" = "from-upgrade"
+}
+
+t_mysql_value_not_live() {
+  new_tree
+  MYSQL_LIVE=151 run_adopt; check "$?" = 1
+  check -n "$(printf '%s\n' "$OUT" | grep 'max_connections is 1000 in the linked file but 151 live')"
+  check -f "$E/mysql/mysql.conf.d/mysqld.cnf" -a ! -L "$E/mysql/mysql.conf.d/mysqld.cnf"
+  check "$(cat "$E/mysql/mysql.conf.d/mysqld.cnf")" = "$MYSQLD_CNF"
+  # nginx is an independent tier and stays adopted
+  check -n "$(linked_to "$E/nginx/nginx.conf" "$R/etc/nginx/nginx.conf" && echo y)"
+}
+
+t_mysql_unreadable() {
+  new_tree
+  if [ "$(id -u)" = 0 ]; then return 0; fi   # root reads through chmod 000
+  mkdir -p "$R/etc/mysql/mysql.conf.d"
+  printf '%s\n' "$MYSQLD_CNF" > "$R/etc/mysql/mysql.conf.d/mysqld.cnf"
+  chmod 000 "$R/etc/mysql/mysql.conf.d/mysqld.cnf"
+  run_adopt; local rc=$?
+  chmod 644 "$R/etc/mysql/mysql.conf.d/mysqld.cnf"
+  check "$rc" = 1
+  check -n "$(printf '%s\n' "$OUT" | grep 'cannot read')"
+  check -f "$E/mysql/mysql.conf.d/mysqld.cnf" -a ! -L "$E/mysql/mysql.conf.d/mysqld.cnf"
 }
 
 case_ adopt-links-discovered-configs t_adopt
@@ -184,6 +250,11 @@ case_ status-reports-link-state      t_status
 case_ logs-on-off-keeps-links        t_logs_roundtrip
 case_ nginx-failure-rolls-back-tier  t_nginx_rollback
 case_ repo-copy-wins-on-fresh-box    t_repo_wins
+case_ backup-outside-include-dirs    t_backup_outside_include_dirs
+case_ readopt-keeps-current-version  t_readopt_keeps_current
+case_ rollback-uses-this-runs-backup t_rollback_uses_this_runs_backup
+case_ mysql-value-not-live-rollback  t_mysql_value_not_live
+case_ mysql-unreadable-rollback      t_mysql_unreadable
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]

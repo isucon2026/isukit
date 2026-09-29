@@ -275,7 +275,7 @@ git add -A && git commit -m "baseline: 手を入れる前の状態"
 git push -u origin main
 ```
 
-nginx と MySQL の設定ファイル（`/etc/nginx`、`/etc/mysql`）も一緒に git に入れておくと、あとで「誰がいつ何を変えたか」が追える。`isukit etc adopt` がそれをやる：設定の実体をこのリポジトリの `etc/` に移し、`/etc` からシンボリックリンクを張る（元ファイルは `<path>.orig`、MySQL の AppArmor 許可も追加）。以後は手元の `etc/` を編集して `isukit deploy`（または `isukit etc push`）で反映する。
+nginx と MySQL の設定ファイル（`/etc/nginx`、`/etc/mysql`）も一緒に git に入れておくと、あとで「誰がいつ何を変えたか」が追える。`isukit etc adopt` がそれをやる：設定の実体をこのリポジトリの `etc/` に移し、`/etc` からシンボリックリンクを張る（置き換えたファイルは `/etc/isukit-orig/` にバックアップ、MySQL の AppArmor 許可も追加）。以後は手元の `etc/` を編集して `isukit deploy`（または `isukit etc push`）で反映する。
 
 **リポジトリは private。作ったら残り2人を Collaborator に招待する**（招待しないと push できない）：
 

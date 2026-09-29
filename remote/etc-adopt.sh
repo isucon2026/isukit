@@ -3,10 +3,13 @@
 #
 # Moves the real nginx / mysql / app-unit config files into <REPO>/etc/<same
 # path minus /etc/> and leaves a symlink in /etc pointing at each, so the repo is
-# the only copy and every tuning change is a git diff. Each adopted file keeps
-# its pre-link original next to it as <path>.orig. After linking, each tier is
-# checked (nginx -t + reload, daemon-reload, mysql restart + SELECT 1) and a tier
-# that fails is rolled back on its own.
+# the only copy and every tuning change is a git diff. The file each run replaces
+# is backed up under /etc/isukit-orig/<same path> — never next to it, where an
+# include glob (sites-enabled/*) would load the backup as live config. The first
+# backup keeps the plain name; later runs add a timestamp, so nothing is lost.
+# After linking, each tier is checked (nginx -t + reload, daemon-reload, mysql
+# restart + the mysql user can read the files + their values are live) and a tier
+# that fails is rolled back to what was there before this run.
 #
 # Inputs (isukit prepends them as VAR=value lines):
 #   REPO       server dir whose etc/ receives the files (required)
@@ -20,11 +23,19 @@ set -u
 SUDO="${SUDO-sudo -n}"
 E=$(cd "${ETC_ROOT:-/etc}" && pwd -P)
 DEST="$REPO/etc"
+BAK="$E/isukit-orig"
+STAMP=$(date +%Y%m%d-%H%M%S)
 RC=0
 [ -d "$REPO" ] || { echo "etc: repo dir $REPO does not exist on this host" >&2; exit 1; }
 OWNER=$(stat -c %U "$REPO" 2>/dev/null || stat -f %Su "$REPO" 2>/dev/null || echo root)
 JOURNAL=$(mktemp); LIST=$(mktemp)
 trap 'rm -f "$JOURNAL" "$LIST"' EXIT
+
+backup() { # backup <file> <rel> -- copy it under $BAK, print where it went
+  local b="$BAK/$2"
+  [ -e "$b" ] && b="$b.$STAMP"
+  $SUDO mkdir -p "$(dirname "$b")" && $SUDO cp -p "$1" "$b" && printf "%s\n" "$b"
+}
 
 resolve_link() { # one hop, made absolute: sites-enabled/x -> /etc/nginx/sites-available/x
   local t
@@ -66,7 +77,7 @@ discover() {
 }
 
 adopt_one() {
-  local f="$1" rel dst g mode
+  local f="$1" rel dst g mode bak
   case "$f" in "$E"/*) ;; *) echo "skip:    $f is not under $E"; return 0 ;; esac
   rel="${f#"$E"/}"; dst="$DEST/$rel"
   case "$rel" in nginx/*) g=nginx ;; mysql/*) g=mysql ;; systemd/*) g=systemd ;; *) g=other ;; esac
@@ -88,33 +99,58 @@ adopt_one() {
   fi
   [ -f "$f" ] || { echo "skip:    $f is not a regular file"; return 0; }
   $SUDO mkdir -p "$(dirname "$dst")" || { echo "FAILED:  mkdir $(dirname "$dst")" >&2; RC=1; return 0; }
-  [ -e "$f.orig" ] || $SUDO cp -p "$f" "$f.orig" || { echo "FAILED:  could not back up $f" >&2; RC=1; return 0; }
+  bak=$(backup "$f" "$rel") || { echo "FAILED:  could not back up $f" >&2; RC=1; return 0; }
   if [ -e "$dst" ]; then
     # the repo already has it (re-creating a box from the repo): the repo wins.
     if cmp -s "$f" "$dst"; then
-      echo "linked:  $f -> $dst (repo copy identical)"
+      echo "linked:  $f -> $dst (repo copy identical; backup $bak)"
     else
-      echo "linked:  $f -> $dst (REPO COPY WINS — the $E version differed, kept as $f.orig)"
+      echo "linked:  $f -> $dst (REPO COPY WINS — the $E version differed, kept as $bak)"
     fi
     $SUDO rm -f "$f"; mode=existing
   else
     $SUDO mv "$f" "$dst" || { echo "FAILED:  could not move $f into the repo" >&2; RC=1; return 0; }
-    echo "linked:  $f -> $dst (moved into repo)"
+    echo "linked:  $f -> $dst (moved into repo; backup $bak)"
     mode=moved
   fi
   $SUDO ln -s "$dst" "$f"
-  echo "$g $mode $f" >> "$JOURNAL"
+  echo "$g $mode $f $bak" >> "$JOURNAL"
 }
 
 has() { grep -q "^$1 " "$JOURNAL"; }
+as_user() { # as_user <user> <cmd...> -- tests run with SUDO empty and no second user
+  local u="$1"; shift
+  if [ -n "$SUDO" ]; then sudo -n -u "$u" "$@"; else "$@"; fi
+}
+mysql_files() { awk '$1 == "mysql" { print $3 }' "$JOURNAL"; }
+live_mismatch() { # print why, for the first integer [mysqld] setting in the linked files that is not live
+  local k v live
+  # shellcheck disable=SC2046  # one path per word is intended
+  awk '
+    /^[[:space:]]*\[/ { sec = $0; gsub(/[[:space:]]/, "", sec); gsub(/\[/, "", sec); gsub(/\]/, "", sec); next }
+    (sec == "mysqld" || sec == "server" || sec == "mariadb") &&
+    /^[[:space:]]*[A-Za-z_-]+[[:space:]]*=[[:space:]]*[0-9]+[[:space:]]*(#.*)?$/ {
+      line = $0; sub(/#.*/, "", line); split(line, kv, "=")
+      k = kv[1]; v = kv[2]
+      gsub(/[[:space:]]/, "", k); gsub(/[[:space:]]/, "", v); gsub(/-/, "_", k)
+      print k, v
+    }' $(mysql_files) 2>/dev/null | while read -r k v; do
+    live=$($SUDO mysql -N -B -e "SELECT @@GLOBAL.$k" 2>/dev/null) || continue
+    [ -n "$live" ] || continue
+    if ! awk -v a="$live" -v b="$v" 'BEGIN { exit !(a + 0 == b + 0) }'; then
+      echo "$k is $v in the linked file but $live live (AppArmor still blocking, or a later file overrides it)"
+      break
+    fi
+  done
+}
 rollback() { # rollback <group> -- put every link made in that group back the way it was
-  local g m f
-  while read -r g m f; do
+  local g m f b
+  while read -r g m f b; do
     [ "$g" = "$1" ] || continue
     $SUDO rm -f "$f"
     case "$m" in
       moved)    $SUDO mv "$DEST/${f#"$E"/}" "$f" ;;
-      existing) $SUDO cp -p "$f.orig" "$f" ;;
+      existing) $SUDO cp -p "$b" "$f" ;;   # this run's backup, not an older one
     esac
     echo "rolled back: $f"
   done < "$JOURNAL"
@@ -126,6 +162,7 @@ else
   discover | sort -u > "$LIST"
 fi
 while read -r f; do adopt_one "$f"; done < "$LIST"
+$SUDO chown -R "$OWNER" "$DEST" 2>/dev/null || true
 
 # verify each tier actually starts from the linked files; undo that tier if not.
 if has nginx; then
@@ -163,10 +200,29 @@ if has mysql; then
   DBU=""
   for s in mysql mariadb; do systemctl is-active --quiet "$s" 2>/dev/null && DBU="$s" && break; done
   if [ -n "$DBU" ]; then
-    if $SUDO systemctl restart "$DBU" && $SUDO mysql -e "SELECT 1" >/dev/null 2>&1; then
-      echo "mysql: restarted $DBU, it reads its config through the links"
+    # mysqld skips an unreadable !includedir file without failing to start, so
+    # "it came back" proves nothing. Check the two ways that happens: the mysqld
+    # user cannot reach the file (/home is 0750 on Ubuntu 21.04+), or AppArmor
+    # still blocks it (then the file's values are not the live ones).
+    why=""
+    DBUSER=$(systemctl show -p User --value "$DBU" 2>/dev/null); DBUSER="${DBUSER:-mysql}"
+    for f in $(mysql_files); do
+      if ! as_user "$DBUSER" cat "$f" >/dev/null 2>&1; then
+        why="user $DBUSER cannot read $f through the link (check the dirs above $DEST: chmod o+x, or g+x with $DBUSER in the group)"
+        break
+      fi
+    done
+    if [ -z "$why" ]; then
+      if $SUDO systemctl restart "$DBU" && $SUDO mysql -e "SELECT 1" >/dev/null 2>&1; then
+        why=$(live_mismatch)
+      else
+        why="$DBU did not come back up"
+      fi
+    fi
+    if [ -z "$why" ]; then
+      echo "mysql: restarted $DBU; it reads the linked files and their values are live"
     else
-      echo "mysql: FAILED to come back with the linked config — rolling back mysql" >&2
+      echo "mysql: FAILED — $why — rolling back mysql" >&2
       rollback mysql
       $SUDO systemctl restart "$DBU" || true
       RC=1
@@ -175,5 +231,4 @@ if has mysql; then
     echo "mysql: no active mysql/mariadb unit — linked, but not restarted or verified"
   fi
 fi
-$SUDO chown -R "$OWNER" "$DEST" 2>/dev/null || true
 exit $RC

@@ -45,8 +45,10 @@ the loop.
 `adopt` discovers `nginx.conf`, the enabled site confs, every `.cnf` with a
 `[mysqld]` section and the app's unit file, moves each into
 `<server repo>/etc/` (e.g. `etc/nginx/sites-available/isucon.conf`), symlinks
-`/etc` to it and keeps the original as `<path>.orig`. It then checks each tier
-(`nginx -t` + reload, `daemon-reload`, mysql restart + `SELECT 1`) and rolls
+`/etc` to it and backs the replaced file up under `/etc/isukit-orig/<same path>`
+(never next to it, where an include glob like `sites-enabled/*` would load it). It then checks each tier
+(`nginx -t` + reload, `daemon-reload`, mysql restart + the
+mysql user can read the files + their values are live) and rolls
 back only the tier that fails. On Ubuntu it also adds the AppArmor rule mysqld
 needs to read through the link. If the repo already has a file (rebuilding a
 box from the repo), the repo copy wins. Once `/etc` is linked, `deploy` runs

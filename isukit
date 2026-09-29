@@ -621,8 +621,8 @@ RC=0
 # confs are symlinks into the repo. grep -r skips them, and sed -i on the link
 # would replace it with a plain file and silently cut the repo out. Edit the real
 # file behind every link instead (sites-enabled and sites-available resolve to
-# the same file, hence sort -u). The adopt backups (*.orig) are left untouched.
-ngx_files() { find -L /etc/nginx -type f ! -name "*.orig" ! -name "*.isukit-tmp" 2>/dev/null | xargs -r grep -lE "$1" 2>/dev/null | xargs -r readlink -f | sort -u; }
+# the same file, hence sort -u).
+ngx_files() { find -L /etc/nginx -type f ! -name "*.isukit-tmp" 2>/dev/null | xargs -r grep -lE "$1" 2>/dev/null | xargs -r readlink -f | sort -u; }
 # --- nginx: LTSV carrying request_time, which the stock "combined" format lacks.
 if systemctl is-active --quiet nginx 2>/dev/null; then
   if [ "$MODE" = on ]; then
@@ -715,8 +715,8 @@ cmd_logs() {
 # the repo is the only copy and every tuning change is a diff. Mirroring the path
 # (etc/nginx/sites-available/isucon.conf, etc/mysql/mysql.conf.d/mysqld.cnf) is
 # what lets status/push/re-link work from the repo alone, with no mapping file.
-# Each adopted file keeps its pre-link original next to it as <path>.orig.
-# The host side lives in remote/etc-adopt.sh and remote/etc-status.sh.
+# The file each adopt replaces is backed up under /etc/isukit-orig/<same path>.
+# The host side lives in remote/etc-adopt.sh, etc-status.sh and etc-sums.sh.
 
 local_repo_root() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
 
@@ -734,12 +734,13 @@ etc_managed() { # etc_managed <repo> -- true if /etc on $APP already links into 
 
 logs_are_on() { rsh "$APP" "test -f /etc/nginx/conf.d/00-isukit.conf" 2>/dev/null; }
 
-etc_rsync() { # etc_rsync <src> <dst> -- one side is $APP:..., the other local
-  local rp="--rsync-path=sudo -n rsync"
+etc_rsync() { # etc_rsync <src> <dst> [rsync opts...] -- one side is $APP:..., the other local
+  local src="$1" dst="$2" rp="--rsync-path=sudo -n rsync"
+  shift 2
   if [ "$APP" = "local" ]; then
-    sudo -n rsync -rlt --exclude '*.orig' "${1#local:}" "${2#local:}"
+    sudo -n rsync -rlt "$@" "${src#local:}" "${dst#local:}"
   else
-    rsync -rlt --exclude '*.orig' "$rp" -e "ssh ${SSH_OPTS:-}" "$1" "$2"
+    rsync -rlt "$@" "$rp" -e "ssh ${SSH_OPTS:-}" "$src" "$dst"
   fi
 }
 
@@ -748,7 +749,7 @@ cmd_etc() {
   case "$sub" in
     adopt)  cmd_etc_adopt "$@" ;;
     status) cmd_etc_status ;;
-    push)   cmd_etc_push ;;
+    push)   cmd_etc_push "$@" ;;
     pull)   cmd_etc_pull ;;
     *) die "usage: isukit etc {adopt [/etc/path...]|status|push|pull}" ;;
   esac
@@ -759,7 +760,7 @@ cmd_etc_adopt() {
   local repo targets="$*" was_on=0 rc=0
   repo=$(etc_repo)
   logs_are_on && was_on=1
-  say "etc adopt on $APP: /etc -> $repo/etc/ (symlinks; originals kept as <path>.orig)"
+  say "etc adopt on $APP: /etc -> $repo/etc/ (symlinks; replaced files backed up under /etc/isukit-orig/)"
   { printf 'REPO=%q\nAPP_UNIT=%q\nTARGETS=%q\n' "$repo" "${APP_UNIT:-}" "$targets"; remote_script etc-adopt.sh; } \
     | rsh_stdin "$APP" || rc=$?
   # restarting mysqld drops the SET GLOBAL slow-log settings; put them back.
@@ -768,7 +769,7 @@ cmd_etc_adopt() {
     cmd_logs on || warn "could not re-apply logging — run: isukit logs on"
   fi
   [ "$rc" = 0 ] || warn "some files were not adopted (see above) — the rest are linked"
-  cmd_etc_pull
+  cmd_etc_pull || warn "adopt is done on $APP, but etc/ was not pulled down — resolve the files above, then: isukit etc pull"
   say "next: review $(local_repo_root)/etc/, then: isukit ship \"etc: put middleware config under git\""
   return "$rc"
 }
@@ -780,14 +781,41 @@ cmd_etc_status() {
   { printf 'REPO=%q\n' "$repo"; remote_script etc-status.sh; } | rsh_stdin "$APP"
 }
 
+etc_sums() { # etc_sums <local|remote> <repo-dir> -- see remote/etc-sums.sh
+  if [ "$1" = local ]; then
+    { printf 'DIR=%q\nSUDO=\n' "$2"; remote_script etc-sums.sh; } | bash -s
+  else
+    { printf 'DIR=%q\n' "$2"; remote_script etc-sums.sh; } | rsh_stdin "$APP"
+  fi
+}
+
+etc_unsaved_overwrites() { # etc_unsaved_overwrites <lsum> <rsum> <root> -- files a pull would clobber for good
+  local f st
+  for f in $(LC_ALL=C join -j 3 -o 1.1,2.1,0 <(printf '%s\n' "$1" | LC_ALL=C sort -k3) <(printf '%s\n' "$2" | LC_ALL=C sort -k3) \
+               | awk '$1 != $2 { sub(/^\.\//, "", $3); print $3 }'); do
+    # differs from the server: fine only if git can give the local version back
+    if ! git -C "$3" rev-parse --git-dir >/dev/null 2>&1; then
+      printf '%s\n' "$f"; continue
+    fi
+    st=$(git -C "$3" status --porcelain -- "etc/$f" 2>/dev/null)
+    [ -z "$st" ] || printf '%s\n' "$f"
+  done
+}
+
 cmd_etc_pull() { # server repo etc/ -> local repo etc/, minus isukit's own logging edits
   load
-  local repo root f
+  local repo root f lost
   repo=$(etc_repo)
   root=$(local_repo_root)
-  # never overwrite local edits that have not been pushed yet
-  git -C "$root" diff --quiet -- etc 2>/dev/null \
-    || die "local etc/ has uncommitted edits — push them (isukit etc push) and commit, or discard them, before pulling"
+  # never overwrite a local edit git could not give back (untracked counts:
+  # right after adopt every pulled file is untracked until it is shipped)
+  lost=$(etc_unsaved_overwrites "$(etc_sums local "$root")" "$(etc_sums remote "$repo")" "$root")
+  if [ -n "$lost" ]; then
+    warn "etc pull: not pulling — these local files differ from $APP and are not committed:"
+    printf '    etc/%s\n' $lost >&2
+    warn "push them first (isukit etc push), or commit / discard them, then pull again"
+    return 1
+  fi
   mkdir -p "$root/etc"
   say "etc pull: $APP:$repo/etc/ -> $root/etc/"
   etc_rsync "$APP:$repo/etc/" "$root/etc/" || die "rsync from $APP failed"
@@ -801,15 +829,16 @@ cmd_etc_pull() { # server repo etc/ -> local repo etc/, minus isukit's own loggi
 
 cmd_etc_push() { # local repo etc/ -> server repo etc/ (i.e. live /etc), then reload what changed
   load
+  local from_deploy=0
+  [ "${1:-}" = "--from-deploy" ] && from_deploy=1
   local repo root changed was_on=0 rc=0
   repo=$(etc_repo)
   root=$(local_repo_root)
   [ -d "$root/etc" ] || die "no $root/etc — nothing to push (start with: isukit etc adopt)"
-  # diff by checksum before copying: the changed paths decide what gets reloaded.
-  local lsum rsum
-  lsum=$(cd "$root/etc" && find . -type f ! -name '*.orig' -exec cksum {} + | LC_ALL=C sort)
-  rsum=$(rsh "$APP" "cd '$repo/etc' 2>/dev/null && find . -type f ! -name '*.orig' -exec cksum {} + | LC_ALL=C sort" 2>/dev/null || true)
-  changed=$(LC_ALL=C comm -23 <(printf '%s\n' "$lsum") <(printf '%s\n' "$rsum") | awk 'NF{print $3}' | sed 's|^\./||')
+  # diff by checksum before copying (logging markers ignored on both sides): the
+  # changed paths decide what is copied and what gets reloaded.
+  changed=$(LC_ALL=C comm -23 <(etc_sums local "$root" | LC_ALL=C sort) <(etc_sums remote "$repo" | LC_ALL=C sort) \
+    | awk 'NF{print $3}' | sed 's|^\./||')
   if [ -z "$changed" ]; then
     say "etc push: $APP:$repo/etc/ already matches — nothing to reload"
     return 0
@@ -817,7 +846,12 @@ cmd_etc_push() { # local repo etc/ -> server repo etc/ (i.e. live /etc), then re
   logs_are_on && was_on=1
   say "etc push: $root/etc/ -> $APP:$repo/etc/"
   printf '    %s\n' $changed >&2
-  etc_rsync "$root/etc/" "$APP:$repo/etc/" || die "rsync to $APP failed"
+  # only the changed files: an untouched server copy keeps its logging edits
+  local list
+  list=$(mktemp)
+  printf '%s\n' $changed > "$list"
+  etc_rsync "$root/etc/" "$APP:$repo/etc/" "--files-from=$list" || { rm -f "$list"; die "rsync to $APP failed"; }
+  rm -f "$list"
   rsh "$APP" "sudo -n chown -R \"\$(stat -c %U '$repo')\" '$repo/etc'" 2>/dev/null || true
 
   local restart_db=0 reload_nginx=0 units=""
@@ -833,7 +867,13 @@ cmd_etc_push() { # local repo etc/ -> server repo etc/ (i.e. live /etc), then re
     rsh "$APP" "sudo -n systemctl daemon-reload" && say "systemd: daemon-reload ($units)"
     local u
     for u in $units; do
-      [ "$u" = "${APP_UNIT:-}" ] && continue
+      if [ "$u" = "${APP_UNIT:-}" ]; then
+        # deploy restarts the app right after this; on its own, push must do it
+        [ "$from_deploy" = 1 ] && continue
+        say "app unit $u changed — restarting it"
+        cmd_restart || rc=1
+        continue
+      fi
       warn "unit $u changed — restart it when ready: ssh $APP sudo systemctl restart $u"
     done
   fi
@@ -842,8 +882,8 @@ cmd_etc_push() { # local repo etc/ -> server repo etc/ (i.e. live /etc), then re
     rsh "$APP" "for s in mysql mariadb; do systemctl is-active --quiet \$s && { sudo -n systemctl restart \$s; break; }; done; sudo -n mysql -e 'SELECT 1' >/dev/null" \
       || { warn "mysql did not come back — check: ssh $APP sudo journalctl -u mysql -n 50"; rc=1; }
   fi
-  # the push overwrote the server copies that 'logs on' had edited, and a DB
-  # restart drops SET GLOBAL — either way logging has to be put back.
+  # a pushed nginx file replaced the copy 'logs on' had edited, and a DB restart
+  # drops SET GLOBAL — either way logging has to be put back.
   if [ "$was_on" = 1 ] && { [ "$reload_nginx" = 1 ] || [ "$restart_db" = 1 ]; }; then
     cmd_logs on || warn "could not re-apply logging — run: isukit logs on"
   fi
@@ -1040,7 +1080,7 @@ cmd_deploy() {
     local erepo
     erepo=$(etc_repo)
     if etc_managed "$erepo"; then
-      cmd_etc_push || warn "etc push reported errors (above) — continuing with the app deploy"
+      cmd_etc_push --from-deploy || warn "etc push reported errors (above) — continuing with the app deploy"
     fi
   fi
   local local_src
@@ -1543,7 +1583,7 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     isukit logs {on|off}                nginx LTSV + mysql slow log (off for scoring runs)
     isukit etc adopt [/etc/path...]     put nginx/mysql/app-unit config under git: move
                                          each file to <server repo>/etc/<same path>,
-                                         symlink /etc to it (original kept as .orig),
+                                         symlink /etc to it (backup: /etc/isukit-orig/),
                                          verify nginx -t / mysql restart, roll back a
                                          tier that fails, then pull etc/ down locally.
                                          no args = discover; handles AppArmor for mysqld
