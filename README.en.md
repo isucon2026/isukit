@@ -54,7 +54,9 @@ needs to read through the link. If the repo already has a file (rebuilding a
 box from the repo), the repo copy wins. Once `/etc` is linked, `deploy` runs
 `etc push` first. The server repo is the git root of the probed `SRC_DIR`;
 override with `ETC_REPO` in `.isukit/config`. The host-side scripts live in
-`remote/`.
+`remote/`. With several hosts `etc pull` pulls from all of them, and a file the
+hosts hold different versions of (a mysqld.cnf tuned only on the db host) is
+left out and reported, so no push can silently overwrite one host with another.
 
 `isukit probe` picks the app's systemd unit with a scored heuristic, not a
 guarantee — see "Why it probes instead of assuming" below. If it picked wrong:

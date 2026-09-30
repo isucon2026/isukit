@@ -22,6 +22,7 @@ set +e +u +o pipefail   # isukit's own strict mode; the harness checks by hand
 CALLS="$WORK/calls"
 rsh() { # record "<host> <command>"; everything "succeeds"
   printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"
+  case "$*" in *"df -P /tmp"*) echo "${DF_KB:-99999999}" ;; esac
   return 0
 }
 rsh_stdin() { # record "<host> stdin:" + the VAR= lines the caller prepended
@@ -49,6 +50,7 @@ APP_UNIT=isu-go.service
 WEB_SERVER=nginx
 DB_SERVER=mysql
 APP_EXEC_RAW=''
+SRC_DIR=/home/isucon/webapp
 EOF
   [ -n "${3:-}" ] && printf '%s\n' "$3" > .isukit/hosts
   : > "$CALLS"
@@ -181,6 +183,56 @@ t_etc_push_fleet_followups_once() {
   check -z "$(grep 'systemctl restart' "$CALLS")"      # deploy restarts right after
 }
 
+t_logs_space_guard_on_db_hosts() {
+  setup_state isu1 "" "$ROLES"
+  load
+  DF_KB=1000 cmd_logs on
+  check "$(hosts_called 'df -P /tmp')" = "isu3"          # only where the slow log is written
+  check -n "$(grep 'warn: only 0MB free on /tmp on isu3' "$CALLS")"
+}
+
+t_etc_pull_leaves_out_disagreeing_files() {
+  setup_state isu1 "" "$ROLES"
+  load
+  etc_sums() { # local: nothing yet; hosts: the db host tuned mysqld.cnf
+    [ "$1" = local ] && return 0
+    printf '111 10 ./nginx/nginx.conf\n'
+    if [ "$APP" = isu3 ]; then printf '999 5 ./mysql/mysqld.cnf\n'; else printf '222 5 ./mysql/mysqld.cnf\n'; fi
+  }
+  etc_rsync() { printf '%s rsync %s\n' "$APP" "${*:3}" >> "$CALLS"; }
+  cmd_etc_pull; local rc=$?
+  check "$rc" = 1
+  check "$(hosts_called ' rsync ')" = "isu1 isu2 isu3"
+  check "$(grep -c 'rsync --exclude=/mysql/mysqld.cnf' "$CALLS")" = 3
+  check -z "$(grep 'exclude=/nginx' "$CALLS")"           # agreed files still come down
+  check -n "$(grep 'warn: etc pull: hosts disagree' "$CALLS")"
+  : > "$CALLS"
+  etc_sums() { [ "$1" = local ] && return 0; printf '111 10 ./nginx/nginx.conf\n'; }
+  cmd_etc_pull; rc=$?
+  check "$rc" = 0
+  check -z "$(grep exclude "$CALLS")"
+}
+
+t_host_app_moves_hosts_line() {
+  setup_state isu1 "" "$ROLES"
+  cmd_host app isu9 >/dev/null 2>&1
+  check "$(awk '$1=="isu9"{print $2}' .isukit/hosts)" = "web,app"
+  check -z "$(awk '$1=="isu1"' .isukit/hosts)"
+}
+
+t_catchall_follows_app_key() {
+  setup_state isukit-app "" "$ROLES"
+  sed -i.bak "s|^SSH_OPTS=''|SSH_OPTS='-F .isukit/ssh_config'|" .isukit/config && rm -f .isukit/config.bak
+  printf 'Host isukit-app\n  HostName 10.0.0.1\n  User ubuntu\n  IdentityFile /old.pem\n\nHost *\n  User ubuntu\n  IdentityFile /old.pem\n  StrictHostKeyChecking accept-new\n' > .isukit/ssh_config
+  : > new.pem; chmod 600 new.pem
+  cmd_host app ubuntu@10.0.0.1 -i new.pem >/dev/null 2>&1
+  local star
+  star=$(awk '/^Host \*$/{f=1;next} f&&/^Host /{exit} f' .isukit/ssh_config)
+  check -n "$(printf '%s\n' "$star" | grep "IdentityFile /.*/new.pem$")"
+  check -n "$(printf '%s\n' "$star" | grep 'User ubuntu')"
+  check "$(grep -c '^Host \*$' .isukit/ssh_config)" = 1
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -190,6 +242,10 @@ case_ host-role-seeds-hosts-file      t_host_role_seeds_file
 case_ on-hosts-isolates-and-continues t_on_hosts_isolates_and_continues
 case_ deploy-each-app-host-restart-once t_deploy_builds_each_app_host_restarts_once
 case_ etc-push-followups-run-once     t_etc_push_fleet_followups_once
+case_ logs-space-guard-on-db-hosts    t_logs_space_guard_on_db_hosts
+case_ etc-pull-leaves-out-disagreeing t_etc_pull_leaves_out_disagreeing_files
+case_ host-app-moves-hosts-line       t_host_app_moves_hosts_line
+case_ catchall-follows-app-key        t_catchall_follows_app_key
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]

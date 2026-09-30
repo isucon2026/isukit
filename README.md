@@ -37,7 +37,7 @@
     isukit etc push             # 手元の etc/ → サーバー。変わった層だけ reload / restart
     isukit etc pull             # サーバーの etc/ → 手元の etc/
 
-`adopt` は `nginx.conf`・有効なサイト設定・`[mysqld]` を含む `.cnf`・アプリの unit ファイルを自動で探し、それぞれ `<サーバーの repo>/etc/`（例：`etc/nginx/sites-available/isucon.conf`）に移して `/etc` からシンボリックリンクを張る。置き換えたファイルは `/etc/isukit-orig/<同じパス>` にバックアップする（`sites-enabled/*` などの include で読み込まれないよう、元の場所には置かない）。そのあと層ごとに確認し（`nginx -t` + reload、`daemon-reload`、mysql 再起動 + mysql ユーザーがリンク先を読めるか + 設定値が実際に反映されているか）、失敗した層だけ元に戻す。Ubuntu では、mysqld がリンク先を読めるように AppArmor の許可も追加する。repo にすでに同じファイルがあれば（repo からサーバーを作り直す場合）、repo 側が優先される。`/etc` がリンク済みなら、`deploy` が先に `etc push` を行う。サーバー側の repo は、probe で見つけた `SRC_DIR` の git ルート（`.isukit/config` の `ETC_REPO` で上書き可）。サーバー側で動くスクリプトは `remote/` にある。
+`adopt` は `nginx.conf`・有効なサイト設定・`[mysqld]` を含む `.cnf`・アプリの unit ファイルを自動で探し、それぞれ `<サーバーの repo>/etc/`（例：`etc/nginx/sites-available/isucon.conf`）に移して `/etc` からシンボリックリンクを張る。置き換えたファイルは `/etc/isukit-orig/<同じパス>` にバックアップする（`sites-enabled/*` などの include で読み込まれないよう、元の場所には置かない）。そのあと層ごとに確認し（`nginx -t` + reload、`daemon-reload`、mysql 再起動 + mysql ユーザーがリンク先を読めるか + 設定値が実際に反映されているか）、失敗した層だけ元に戻す。Ubuntu では、mysqld がリンク先を読めるように AppArmor の許可も追加する。repo にすでに同じファイルがあれば（repo からサーバーを作り直す場合）、repo 側が優先される。`/etc` がリンク済みなら、`deploy` が先に `etc push` を行う。サーバー側の repo は、probe で見つけた `SRC_DIR` の git ルート（`.isukit/config` の `ETC_REPO` で上書き可）。サーバー側で動くスクリプトは `remote/` にある。複数台では `etc pull` が全台から取り込み、台ごとに中身が違うファイル（db の台だけ調整した `mysqld.cnf` など）は、どちらかで黙って上書きしないよう取り込まずに知らせる。
 
 `isukit probe` はスコア付きヒューリスティックでアプリのsystemd unitを選ぶ。保証ではない — 理由は下の「なぜリポジトリを読まずにサーバーに聞くのか」を参照。選択が外れていたら：
 
