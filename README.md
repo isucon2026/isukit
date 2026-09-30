@@ -15,6 +15,10 @@
 
     ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port]
 
+チームのリポジトリがまだ無い（競技開始直後）なら `--new` で作る。サーバーの webapp をコードのベースライン、`/etc` の設定と env ファイルを設定のベースラインとして、private リポジトリを作って push する（手順は [`RUNBOOK.md`](RUNBOOK.md) §3）：
+
+    ./isukit go --new <team>/<repo> <app-ssh-target> [bench-ssh-target] -i keyfile [--invite user1,user2]
+
 これで clone → サーバー調査 → `alp` + `pt-query-digest` のインストール → LTSV nginx ログと `long_query_time=0` の有効化 → ベンチマーカー本体の `--help` を読んでの `BENCH_CMD` 組み立て、まで一通り終わる。その行を目視で確認したら、あとはループに入るだけ。
 
 ## ループ
