@@ -253,7 +253,23 @@ cmd_host() {
   fi
   [ "$rewrite_ssh_config" = 1 ] && target="isukit-$role"
   case "$role" in
-    app)   sed -i.bak "s|^APP=.*|APP=$target|"   "$CONF"; rm -f "$CONF.bak" ;;
+    app)
+      local old_app
+      old_app=$( . "$CONF" 2>/dev/null; printf '%s' "${APP:-}" )
+      sed -i.bak "s|^APP=.*|APP=$target|"   "$CONF"; rm -f "$CONF.bak"
+      # the roles file names hosts by target: the probed host moving must move
+      # its line too, or deploy/restart/logs keep going to the old box
+      if [ -f "$HOSTS_FILE" ] && [ -n "$old_app" ] && [ "$old_app" != "$target" ]; then
+        if awk -v h="$target" '$1 == h { f = 1 } END { exit !f }' "$HOSTS_FILE"; then
+          :
+        elif awk -v h="$old_app" '$1 == h { f = 1 } END { exit !f }' "$HOSTS_FILE"; then
+          awk -v o="$old_app" -v n="$target" '$1 == o { $1 = n } { print }' "$HOSTS_FILE" > "$HOSTS_FILE.tmp" \
+            && mv "$HOSTS_FILE.tmp" "$HOSTS_FILE"
+          say "$HOSTS_FILE: $old_app -> $target (roles kept)"
+        else
+          warn "$target is not in $HOSTS_FILE — give it roles: isukit host role $target <roles>"
+        fi
+      fi ;;
     bench) sed -i.bak "s|^BENCH=.*|BENCH=$target|" "$CONF"; rm -f "$CONF.bak" ;;
     add)
       [ -n "$target" ] || die "usage: isukit host add <ssh-target>"
@@ -326,6 +342,19 @@ cmd_host() {
       {print}
     ' "$STATE/ssh_config" > "$STATE/ssh_config.new" && mv "$STATE/ssh_config.new" "$STATE/ssh_config"
     rm -f "$block_file"
+    # the catch-all mirrors the app host's credentials: a new app key or port
+    # must reach the hosts added by IP too, or they stop connecting
+    if [ "$role" = app ] && grep -q '^Host \*$' "$STATE/ssh_config" && { [ -n "$new_key" ] || [ -n "$new_port" ]; }; then
+      local c_user c_key c_port
+      c_user=$(awk '/^Host \*$/{f=1;next} f&&/^Host /{exit} f&&/^  User /{print $2; exit}' "$STATE/ssh_config")
+      c_key=$(awk '/^Host \*$/{f=1;next} f&&/^Host /{exit} f&&/^  IdentityFile /{print $2; exit}' "$STATE/ssh_config")
+      c_port=$(awk '/^Host \*$/{f=1;next} f&&/^Host /{exit} f&&/^  Port /{print $2; exit}' "$STATE/ssh_config")
+      [ "${orig_target#*@}" != "$orig_target" ] && c_user="${orig_target%%@*}"
+      awk '/^Host \*$/{skip=1; next} skip && /^Host /{skip=0} skip{next} {print}' "$STATE/ssh_config" \
+        | awk 'NF{last=NR} {line[NR]=$0} END{for(i=1;i<=last;i++) print line[i]}' > "$STATE/ssh_config.new"
+      { printf '\n'; go_ssh_catchall_block "$c_user" "${new_key:-$c_key}" "${new_port:-$c_port}"; } >> "$STATE/ssh_config.new"
+      mv "$STATE/ssh_config.new" "$STATE/ssh_config"
+    fi
     chmod 600 "$STATE/ssh_config" 2>/dev/null || true
     say "updated isukit-$role in $STATE/ssh_config (SSH_OPTS keeps -F)"
   elif [ -n "$opts" ]; then
@@ -848,6 +877,21 @@ cmd_logs() {
     case "$roles" in *,db,*)  wm=1; any_db=1 ;; esac
     [ "$wn$wm" = 00 ] && continue
     say "logs $mode on $h"
+    # ISUCON practice AMIs commonly ship an 8GB root. long_query_time=0 logs
+    # every query, and a benchmark run can produce gigabytes of slow log fast
+    # enough to fill that root and wedge the box mid-run — warn, but still
+    # enable it, since a short run under thin headroom may be exactly what's wanted.
+    if [ "$mode" = on ] && [ "$wm" = 1 ]; then
+      local avail_kb
+      avail_kb=$(rsh "$h" "df -P /tmp | tail -1 | tr -s ' ' | cut -d' ' -f4" 2>/dev/null || true)
+      if [ -n "$avail_kb" ]; then
+        if [ "$avail_kb" -lt 2097152 ] 2>/dev/null; then
+          warn "only $((avail_kb / 1024))MB free on /tmp on $h — long_query_time=0 logs EVERY query; a benchmark run can produce gigabytes and a full root wedges the box. enabling anyway."
+        fi
+      else
+        warn "could not check free space on /tmp on $h before enabling slow logging"
+      fi
+    fi
     printf 'MODE=%s\nWANT_NGINX=%s\nWANT_MYSQL=%s\n%s\n' "$mode" "$wn" "$wm" "$LOGS_SCRIPT" | rsh_stdin "$h" || rc=1
   done
   # long_query_time applies to new sessions only: make every app host reconnect,
@@ -967,29 +1011,61 @@ etc_unsaved_overwrites() { # etc_unsaved_overwrites <lsum> <rsum> <root> -- file
   done
 }
 
-cmd_etc_pull() { # server repo etc/ -> local repo etc/, minus isukit's own logging edits
+etc_conflicts() { # etc_conflicts <dir-of-<host>.sums> -- "<path> <host>=<crc> ..." for files the hosts disagree on
+  awk '
+    { sub(/^\.\//, "", $3); h = FILENAME; sub(/.*\//, "", h); sub(/\.sums$/, "", h)
+      if (!($3 in first)) first[$3] = $1; else if (first[$3] != $1) bad[$3] = 1
+      seen[$3] = seen[$3] " " h "=" $1 }
+    END { for (p in bad) print p seen[p] }' "$1"/*.sums 2>/dev/null | LC_ALL=C sort
+}
+
+cmd_etc_pull() { # every host's repo etc/ -> local repo etc/, minus isukit's own logging edits
   load
-  local repo root f lost
-  repo=$(etc_repo)
+  local root f h lost conflicts tmp excl=()
   root=$(local_repo_root)
+  tmp=$(mktemp -d)
+  for h in $(hosts_all); do
+    ( HOST_OVERRIDE="$h"; load; etc_sums remote "$(etc_repo)" ) > "$tmp/$h.sums" 2>/dev/null || : > "$tmp/$h.sums"
+  done
+  # etc/ is one tree for the fleet. If two hosts hold different versions of a
+  # file (a tuned mysqld.cnf adopted on the db host, the stock one elsewhere),
+  # neither may win silently: the next push would overwrite the other host's
+  # live config with it. Leave those out and say so.
+  conflicts=$(etc_conflicts "$tmp")
+  for f in $(printf '%s\n' "$conflicts" | awk 'NF{print $1}'); do excl+=("--exclude=/$f"); done
   # never overwrite a local edit git could not give back (untracked counts:
   # right after adopt every pulled file is untracked until it is shipped)
-  lost=$(etc_unsaved_overwrites "$(etc_sums local "$root")" "$(etc_sums remote "$repo")" "$root")
+  lost=$(for h in $(hosts_all); do
+           etc_unsaved_overwrites "$(etc_sums local "$root")" "$(cat "$tmp/$h.sums")" "$root"
+         done | LC_ALL=C sort -u | grep -vxF -f <(printf '%s\n' "$conflicts" | awk 'NF{print $1}') || true)
   if [ -n "$lost" ]; then
-    warn "etc pull: not pulling — these local files differ from $APP and are not committed:"
+    rm -rf "$tmp"
+    warn "etc pull: not pulling — these local files differ from the hosts and are not committed:"
     printf '    etc/%s\n' $lost >&2
     warn "push them first (isukit etc push), or commit / discard them, then pull again"
     return 1
   fi
   mkdir -p "$root/etc"
-  say "etc pull: $APP:$repo/etc/ -> $root/etc/"
-  etc_rsync "$APP:$repo/etc/" "$root/etc/" || die "rsync from $APP failed"
+  for h in $(hosts_all); do
+    [ -s "$tmp/$h.sums" ] || continue
+    ( HOST_OVERRIDE="$h"; load
+      repo=$(etc_repo)
+      say "etc pull: $APP:$repo/etc/ -> $root/etc/"
+      etc_rsync "$APP:$repo/etc/" "$root/etc/" ${excl+"${excl[@]}"} ) || { rm -rf "$tmp"; die "rsync from $h failed"; }
+  done
+  rm -rf "$tmp"
   # 'logs on' comments out access_log through the links, i.e. in the server's
   # repo copy. That is measurement state, not tuning — keep it out of git.
   for f in $(grep -RlsE "#isukit# |# isukit-include$" "$root/etc" || true); do
     sed -i.isukit-tmp -e "s|#isukit# access_log|access_log|" -e "/# isukit-include$/d" "$f" && rm -f "$f.isukit-tmp"
   done
   git -C "$root" status --short -- etc 2>/dev/null || true
+  if [ -n "$conflicts" ]; then
+    warn "etc pull: hosts disagree on these files — not pulled (checksums per host):"
+    printf '%s\n' "$conflicts" | sed 's/^/    etc\//' >&2
+    warn "pick the right version (ssh <host> cat <repo>/etc/<file>), put it in local etc/, then: isukit etc push"
+    return 1
+  fi
 }
 
 cmd_etc_push() { # local repo etc/ -> every host's repo etc/ (i.e. live /etc), then reload what changed
@@ -1544,6 +1620,14 @@ cmd_finalize() {
 }
 
 # ---------------------------------------------------------------- one-shot
+go_ssh_catchall_block() { # go_ssh_catchall_block <user> <keyfile> <port> -- 'Host *': hosts added by IP
+  printf 'Host *\n'
+  [ -n "$1" ] && printf '  User %s\n' "$1"
+  [ -n "$2" ] && printf '  IdentityFile %s\n' "$2"
+  [ -n "$3" ] && printf '  Port %s\n' "$3"
+  printf '  StrictHostKeyChecking accept-new\n'
+}
+
 go_ssh_host_block() { # go_ssh_host_block <alias> <user@host|host> <keyfile> <port>
   local alias="$1" target="$2" key="$3" port="$4" user=""
   local host="$target" # split: local expands all args before assigning, so $target isn't set yet on one line
@@ -1662,11 +1746,10 @@ cmd_go() {
       go_ssh_host_block isukit-bench "${benchh:-$apph}" "$abskey" "$port"
       # every other contest host (isukit host add / host role <ip>) gets the
       # same key, user and port — ssh -F reads nothing else.
-      printf '\nHost *\n'
-      [ "${apph#*@}" != "$apph" ] && printf '  User %s\n' "${apph%%@*}"
-      [ -n "$abskey" ] && printf '  IdentityFile %s\n' "$abskey"
-      [ -n "$port" ] && printf '  Port %s\n' "$port"
-      printf '  StrictHostKeyChecking accept-new\n'
+      printf '\n'
+      local cuser=""
+      [ "${apph#*@}" != "$apph" ] && cuser="${apph%%@*}"
+      go_ssh_catchall_block "$cuser" "$abskey" "$port"
     } > "$STATE/ssh_config"
     chmod 600 "$STATE/ssh_config" 2>/dev/null || true
     local ssh_opts_line="-F $STATE/ssh_config"

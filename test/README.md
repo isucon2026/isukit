@@ -9,7 +9,7 @@ bash test/run-all.sh isucon8-final    # one fixture (the other suite says "skip"
 bash test/run-all.sh -v isucon13      # ...and dump the full probe output
 ```
 
-Current state: **53 fixtures, 53 passed, 0 failed** (17 probe + 13 bench + 11 etc + 12 hosts).
+Current state: **57 fixtures, 57 passed, 0 failed** (17 probe + 13 bench + 11 etc + 16 hosts).
 
 `run-hosts-tests.sh` sources `isukit` (`ISUKIT_SOURCED=1` skips `main`), swaps the ssh
 transport for a recorder and asserts which host each command reaches, with and
