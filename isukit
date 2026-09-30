@@ -185,6 +185,11 @@ cmd_init() {
   cd "$dir"
   mkdir -p "$STATE"
   git rev-parse --verify work >/dev/null 2>&1 || git switch -c work >/dev/null 2>&1 || true
+  init_state
+}
+
+init_state() { # .isukit/{config,.gitignore,notes.md} in the current dir; an existing config is kept
+  mkdir -p "$STATE"
   if [ -f "$CONF" ]; then
     local kept
     kept=$( . "$CONF" 2>/dev/null; printf 'APP=%s BENCH=%s BENCH_CMD=%s' "${APP:-local}" "${BENCH:-local}" "${BENCH_CMD:+<already set, kept>}" )
@@ -970,7 +975,7 @@ cmd_etc_adopt() {
   etc_flags_reset
   [ "$rc" = 0 ] || warn "some files were not adopted (see above) — the rest are linked"
   cmd_etc_pull || warn "adopt is done, but etc/ was not pulled down from $APP — resolve the files above, then: isukit etc pull"
-  say "next: review $(local_repo_root)/etc/, then: isukit ship \"etc: put middleware config under git\""
+  [ "${ISUKIT_QUIET_NEXT:-0}" = 1 ] || say "next: review $(local_repo_root)/etc/, then: isukit ship \"etc: put middleware config under git\""
   return "$rc"
 }
 etc_adopt_one() {
@@ -1639,6 +1644,97 @@ cmd_finalize() {
   cmd_bench "post-reboot verification"
 }
 
+# ---------------------------------------------------------------- new team repo
+# `isukit go --new owner/repo ...`: at T+0 the code exists only on the servers.
+# Pull the probed webapp to the laptop, commit it as the code baseline and push
+# it as a private repo (GitHub credentials stay on the laptop; nothing is
+# pushed from the servers). Then put the middleware config under git the same
+# way `etc adopt` does, plus a copy of each host's env file, as a second
+# baseline commit — so "before we touched the code" and "before we touched the
+# config" are both one checkout away.
+REPO_NEW_MAXSIZE_MB=10
+
+repo_new_prepare() { # repo_new_prepare <owner/repo> -- local dir + .isukit, before any host is known
+  local slug="$1" dir="${1##*/}"
+  command -v gh >/dev/null 2>&1 || die "--new needs the GitHub CLI: install gh, then gh auth login"
+  gh auth status >/dev/null 2>&1 || die "gh is not logged in: gh auth login"
+  gh repo view "$slug" >/dev/null 2>&1 && die "$slug already exists on GitHub — use it instead: isukit go <its clone url> ..."
+  [ -e "$dir" ] && die "'$dir' already exists here — --new builds a fresh repo; cd elsewhere or remove it"
+  mkdir -p "$dir" && cd "$dir" || die "cannot create $dir"
+  git init -q && git symbolic-ref HEAD refs/heads/main
+  init_state
+  say "new repo $slug: will be built from the server in $(pwd)"
+}
+
+repo_new_baseline() { # repo_new_baseline <owner/repo> <invite,list>
+  load
+  local slug="$1" invite="$2" big bin u
+  [ -n "${SRC_DIR:-}" ] || die "probe found no webapp dir on $APP — build the repo by hand (RUNBOOK §3)"
+  # files too big for git stay on the server; deploy never deletes them there
+  big=$(rsh "$APP" "sudo -n find '$SRC_DIR' -type f -size +${REPO_NEW_MAXSIZE_MB}M -not -path '$SRC_DIR/.git/*' 2>/dev/null" | sed "s|^$SRC_DIR/||" || true)
+  bin=""
+  [ -n "${APP_EXEC:-}" ] && [ "${APP_EXEC#"$SRC_DIR"/}" != "$APP_EXEC" ] && bin="${APP_EXEC#"$SRC_DIR"/}"
+  local -a ex=(--exclude=.git --exclude=node_modules --exclude='*.log' --exclude=__pycache__ --exclude=.venv --exclude=target)
+  [ -n "$bin" ] && big=$(printf '%s\n' $big | grep -vxF "$bin" || true)   # listed once, as the built app
+  for u in $big $bin; do ex+=("--exclude=/$u"); done
+  say "code baseline: $APP:$SRC_DIR/ -> $(pwd)/"
+  if [ "$APP" = "local" ]; then
+    sudo -n rsync -rlpt "${ex[@]}" "$SRC_DIR/" ./ || die "copying $SRC_DIR failed"
+    sudo -n chown -R "$(id -u):$(id -g)" . 2>/dev/null || true
+  else
+    rsync -rlpt "${ex[@]}" --rsync-path="sudo -n rsync" -e "ssh ${SSH_OPTS:-}" "$APP:$SRC_DIR/" ./ \
+      || die "copying $APP:$SRC_DIR failed"
+  fi
+  {
+    printf '\n# --- isukit go --new\n'
+    printf '%s\n' '**/node_modules/' '*.log' '**/__pycache__/' '**/.venv/' '**/target/'
+    [ -n "$bin" ] && printf '# the built app (systemd runs it; deploy rebuilds it)\n/%s\n' "$bin"
+    if [ -n "$big" ]; then
+      printf '# over %sMB on %s — left on the server, not in git\n' "$REPO_NEW_MAXSIZE_MB" "$APP"
+      printf '/%s\n' $big
+    fi
+  } >> .gitignore
+  [ -z "$big" ] || warn "left on the server (over ${REPO_NEW_MAXSIZE_MB}MB, listed in .gitignore): $(printf '%s ' $big)"
+  git add -A
+  git commit -q -m "baseline: $APP:$SRC_DIR before any change" || die "nothing to commit — is $SRC_DIR empty?"
+  say "creating private repo $slug"
+  gh repo create "$slug" --private --source . --remote origin --push >/dev/null \
+    || die "gh repo create failed — the baseline is committed here; create the repo and push by hand"
+  for u in $(printf '%s' "$invite" | tr , ' '); do
+    gh api -X PUT "repos/$slug/collaborators/$u" -f permission=push >/dev/null 2>&1 \
+      && say "invited $u (push)" || warn "could not invite $u — do it by hand: gh api -X PUT repos/$slug/collaborators/$u -f permission=push"
+  done
+
+  # this repo's root IS the server's webapp dir: pin it, so etc/ never lands in
+  # some git root above it on the server (a /home/isucon/.git would otherwise win)
+  if grep -q '^ETC_REPO=' "$CONF"; then
+    sed -i.bak "s|^ETC_REPO=.*|ETC_REPO='$SRC_DIR'|" "$CONF" && rm -f "$CONF.bak"
+  else
+    printf "ETC_REPO='%s'\n" "$SRC_DIR" >> "$CONF"
+  fi
+  load
+  say "config baseline: /etc -> repo etc/ (symlinks), env files -> hosts/<host>/"
+  ISUKIT_QUIET_NEXT=1 cmd_etc_adopt || warn "etc adopt reported problems (above) — the rest of the baseline goes on"
+  repo_record_env
+  git add -A
+  if git commit -q -m "etc: middleware config and env as handed out, before any change"; then
+    git push -q origin main || warn "push of the config baseline failed — push by hand: git push origin main"
+  fi
+  git switch -q -c work
+  say "repo ready: $(git remote get-url origin)  (baseline on main, you are on work)"
+}
+
+repo_record_env() { # hosts/<host>/<envfile>: a per-host record, not linked — env differs per host
+  local h
+  for h in $(hosts_all); do
+    ( HOST_OVERRIDE="$h"; load
+      [ -n "${ENV_FILE:-}" ] || exit 0
+      mkdir -p "hosts/$h"
+      rsh "$APP" "sudo -n cat '$ENV_FILE'" > "hosts/$h/$(basename "$ENV_FILE")" 2>/dev/null \
+        || { rm -f "hosts/$h/$(basename "$ENV_FILE")"; warn "could not read $ENV_FILE on $h"; } )
+  done
+}
+
 # ---------------------------------------------------------------- one-shot
 go_ssh_catchall_block() { # go_ssh_catchall_block <user> <keyfile> <port> -- 'Host *': hosts added by IP
   printf 'Host *\n'
@@ -1689,8 +1785,16 @@ die_unplaced() { # die_unplaced <bad-arg> -- self-diagnosing die: full argv dump
 
 cmd_go() {
   local -a full_argv=(go "$@")
+  # --new <owner/name>: no team repo yet — build it from the server (see repo_new_*)
+  local new_slug=""
+  if [ "${1:-}" = "--new" ]; then
+    new_slug="${2:-}"
+    case "$new_slug" in */*) ;; *) die "usage: isukit go --new <owner/repo> <app-ssh-target> ... — e.g. --new myteam/isucon2026" ;; esac
+    shift 2
+    set -- "--new:$new_slug" "$@"
+  fi
   local url="${1:-}" apph="${2:-}"
-  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port] [--ssh-opts 'raw'] [--debug-args]"
+  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit go <repo-url | --new owner/repo> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port] [--ssh-opts 'raw'] [--invite user,user] [--debug-args]"
   shift 2 || true
 
   local a
@@ -1702,7 +1806,7 @@ cmd_go() {
     fi
   done
 
-  local benchh="" keyfile="" port="" raw_opts="" val
+  local benchh="" keyfile="" port="" raw_opts="" val invite=""
   while [ "$#" -gt 0 ]; do
     is_blank "$1" && { shift; continue; }
     case "$1" in
@@ -1726,6 +1830,10 @@ cmd_go() {
       -p)
         [ "$#" -ge 2 ] || die "-p needs a port argument"
         port="$2"; shift 2 ;;
+      --invite=*)       invite="${1#--invite=}"; shift ;;
+      --invite)
+        [ "$#" -ge 2 ] || die "--invite needs a comma-separated list of GitHub users"
+        invite="$2"; shift 2 ;;
       --ssh-opts=*)     raw_opts="${1#--ssh-opts=}"; shift ;;
       --ssh-opts)
         [ "$#" -ge 2 ] || die "--ssh-opts needs an argument"
@@ -1750,7 +1858,12 @@ cmd_go() {
     keyfile=$(expand_tilde "$keyfile")
   fi
 
-  cmd_init "$url"
+  if [ -n "$new_slug" ]; then
+    repo_new_prepare "$new_slug"
+  else
+    [ -z "$invite" ] || warn "--invite only applies with --new (the repo already exists) — ignored"
+    cmd_init "$url"
+  fi
   cmd_host app "$apph"
   cmd_host bench "${benchh:-$apph}"
 
@@ -1783,6 +1896,8 @@ cmd_go() {
   fi
 
   cmd_probe
+  # before setup / logs on: the config baseline must be the server as handed out
+  [ -n "$new_slug" ] && repo_new_baseline "$new_slug" "$invite"
   cmd_setup
   cmd_logs on
 
@@ -2023,6 +2138,14 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
   ONE COMMAND
     isukit go <repo-url> <app-host> [bench-host] [-i keyfile] [-p port] [--ssh-opts 'raw']
                                          clone, probe, install tools, enable logs
+    isukit go --new <owner/repo> <app-host> [bench-host] [-i keyfile] [--invite u1,u2]
+                                         no team repo yet (T+0): copy the server's
+                                         webapp here, commit it as the baseline,
+                                         create the private repo with gh and push,
+                                         put nginx/mysql/unit config under git
+                                         (etc adopt) + each host's env file as a
+                                         second baseline commit, then go on as go.
+                                         GitHub credentials never leave the laptop
                                          -i/-p write .isukit/ssh_config (aliases
                                          isukit-app/isukit-bench) and set SSH_OPTS
                                          to '-F .isukit/ssh_config' for you — solves

@@ -266,52 +266,52 @@ isucon13 は言語別に8つ、isucon12-qualify は19個の compose ファイル
 
 ## 3. 競技開始5分：自分たちのリポジトリを作る
 
-**3人で並行して触るための必須手順。** コードは配られたサーバーの上にしか無い状態から始まる。公開リポジトリ（`isucon/isucon13` など）は読む専用で、push できない。
+**3人で並行して触るための必須手順。** 競技開始の時点では、コードは配られたサーバーの上にしか無い。公開リポジトリ（`isucon/isucon13` など）は読む専用で、push できない。
 
-**向きが大事：サーバー → 自分たちのリポジトリ → 各自のラップトップ。**
-
-```
-# ① サーバー上で。まだ何も変えていないコードをベースラインとして push
-ssh <app-host>
-sudo su - isucon
-cd /home/isucon/webapp          # すでに git リポジトリのこともある
-git init                        # 無ければ
-git remote add origin git@github.com:<team>/<private-repo>.git
-git add -A && git commit -m "baseline: 手を入れる前の状態"
-git push -u origin main
-```
-
-nginx と MySQL の設定ファイル（`/etc/nginx`、`/etc/mysql`）も一緒に git に入れておくと、あとで「誰がいつ何を変えたか」が追える。`isukit etc adopt` がそれをやる：設定の実体をこのリポジトリの `etc/` に移し、`/etc` からシンボリックリンクを張る（置き換えたファイルは `/etc/isukit-orig/` にバックアップ、MySQL の AppArmor 許可も追加）。以後は手元の `etc/` を編集して `isukit deploy`（または `isukit etc push`）で反映する。
-
-**リポジトリは private。作ったら残り2人を Collaborator に招待する**（招待しないと push できない）：
+**1人（リポジトリ係）が1コマンドで作る：**
 
 ```
-gh repo create <team>/<private-repo> --private
-gh api -X PUT repos/<team>/<private-repo>/collaborators/n000r111 -f permission=push
-gh api -X PUT repos/<team>/<private-repo>/collaborators/imaharu  -f permission=push
+isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i ~/.ssh/<鍵>.pem \
+  --invite n000r111,imaharu
 ```
 
-参加者： [mako-for-it](https://github.com/mako-for-it) / [n000r111](https://github.com/n000r111) / [imaharu](https://github.com/imaharu)
+これで次のことを順番にやる：
+
+1. **コードのベースライン。** probe で見つけたサーバーの webapp（`SRC_DIR`）を手元に持ってきて、`git init` → コミット → `gh repo create --private` → push。`--invite` の人を Collaborator（push 権限）に招待する。GitHub の認証は手元の `gh` だけを使い、サーバーには何も置かない
+   - 入れないもの：`node_modules`・ログ・ビルド済みのアプリ（systemd が動かしているバイナリ）・10MB を超えるファイル（DB のダンプや大きな画像など）。どれも `.gitignore` に書かれ、サーバー側には残る
+2. **設定のベースライン。** `/etc` の nginx・MySQL・アプリの unit ファイルを repo の `etc/` に移して、`/etc` からシンボリックリンクを張る（`isukit etc adopt` と同じ。置き換えたファイルは `/etc/isukit-orig/` にバックアップ、MySQL の AppArmor 許可も追加）。各台の env ファイル（`/home/isucon/env.sh` など）は `hosts/<台>/` に**控えとして**コピーする（台ごとに中身が違うのでリンクはしない）。ここまでを2つ目のコミットにして push
+3. **いつもの `go` の続き。** ツールのインストール → 計測ログ on → ベンチコマンドの組み立て
+
+終わると、`main` に「コードのベースライン」「設定のベースライン」の2コミットがあり、手元は `work` ブランチにいる。**この2つが唯一の戻り先。** 作らずに走り出すと、スコアが落ちたときに戻る場所が無い。
+
+**残り2人は、できたリポジトリを渡すだけ：**
 
 ```
-# ② 3人それぞれのラップトップで。公開リポジトリではなく自分たちのリポジトリを渡す
-cd ~/personal-projects/isucon
-isukit init git@github.com:<team>/<private-repo>.git isucon-2026
-cd isucon-2026
-isukit host app  <app-host>
-isukit host bench <bench-host>
-isukit probe
-$EDITOR .isukit/config          # BENCH_CMD='...' をリポジトリのREADMEから写す
+isukit go git@github.com:<team>/<private-repo>.git ubuntu@<app-host> [ubuntu@<bench-host>] -i ~/.ssh/<鍵>.pem
 ```
 
-**すでにcloneがあるとき**：`init` は既存ディレクトリをそのまま採用する（cloneし直さない）。**親ディレクトリで**ディレクトリ名を渡して実行する。`init` は `work` ブランチを作って切り替える点に注意。
+以後、設定の変更は手元の `etc/` を編集して `isukit deploy`（または `isukit etc push`）で反映する。サーバーの `/etc` を直接いじらない（repo に残らず、次の push で上書きされる）。
+
+**`gh` が使えない・サーバーに webapp が見つからない等で `--new` が使えないとき**は、手でやる：
 
 ```
-cd ~/personal-projects/isucon
+# サーバー上で：まだ何も変えていないコードをベースラインとして push
+ssh <app-host>; sudo su - isucon; cd /home/isucon/webapp
+git init && git add -A && git commit -m "baseline: 手を入れる前の状態"
+git remote add origin git@github.com:<team>/<private-repo>.git && git push -u origin main   # サーバーに GitHub の鍵が必要
+# 手元で：
+isukit go git@github.com:<team>/<private-repo>.git ubuntu@<app-host> -i ~/.ssh/<鍵>.pem
+isukit etc adopt                 # 設定を repo の etc/ に移してリンク → 手元に取り込まれる
+isukit ship "etc: 手を入れる前の設定"
+```
+
+**すでに clone があるとき**：`init` は既存ディレクトリをそのまま採用する（clone し直さない）。**親ディレクトリで**ディレクトリ名を渡して実行する。`init` は `work` ブランチを作って切り替える点に注意。
+
+```
 isukit init <repo-url> <既にあるディレクトリ名>
 ```
 
-**ベースラインのコミットが唯一の戻り先。** ここを作らずに走り出すと、スコアが落ちたときに戻る場所が無い。
+参加者： [mako-for-it](https://github.com/mako-for-it) / [n000r111](https://github.com/n000r111) / [imaharu](https://github.com/imaharu)
 
 ---
 
@@ -356,6 +356,15 @@ chmod 600 ~/.ssh/<contest>.pem                    # 644 だと ssh が拒否す�
 
 §3 のリポジトリ作成をここで終わらせる。そのあと `.isukit/manifest` をチームに読み上げる：**何台あるか、どのunitが動いているか、メモリ何GBか、データストアは何か**。それがその日の持ち札。
 
+複数台なら、この時点で全台を役割付きで登録しておく（最初は全台同じ AMI なので、とりあえず全部 `web,app,db` でも、実際に使う台だけでもよい。フェーズ3で分けるときに付け直す）：
+
+```
+isukit host role ubuntu@<ip1> web,app,db
+isukit host role ubuntu@<ip2> app
+isukit host role ubuntu@<ip3> app
+isukit hosts
+```
+
 ### フェーズ1 — ベースラインと偵察（0–12%）／コードを触らない
 
 **① まず数字を取る。**
@@ -385,9 +394,19 @@ ssh <app-host> 'journalctl -u <APP_UNIT> -n 200 --no-pager'   # unit名は .isuk
 ```
 isukit logs on
 isukit bench "instrumented — baselineと比較しないこと"
-isukit alp
-isukit slow
+isukit show                     # この回の結果：台ごとの CPU・プロセス、alp、slow、pprof
 ```
+
+`logs on` の間の `bench` は、1回ごとに計測を区切って `.isukit/runs/<日時>/` に保存する（開始時に全台のログを空にし、ベンチ中は全台の CPU とプロセスごとの使用率を1秒ごとに記録し、app の1台目で pprof を取る）。manual モードでは、プロンプトの指示どおり「ポータルで実行が始まったら Enter」→「スコアを入力」とすると同じように記録する。
+
+**まず `show` の hosts 欄で、どの台・どのプロセスが張り付いていたかを見る。** そこが今のボトルネックで、次に見るものが決まる：
+
+| 張り付いているもの | 次に見る |
+|---|---|
+| db の台の `mysqld` | `show` の slow（クエリ） |
+| app の台のアプリ | `show` の pprof（`go tool pprof -http=: <run>/cpu.pprof`） |
+| web の台の `nginx` | 静的ファイル・keepalive・worker 数 |
+| どの台も余裕があるのにスコアが伸びない | ロック待ち・外部 API 待ち・アプリのエラー（③） |
 
 **`alp` は必ず「合計レスポンスタイム」で読む。平均でも件数でもない。** 3msのエンドポイントが40,000回呼ばれていれば、900msが2回より重い。isukitは既定でそう並べる。`pt-query-digest` も合計時間順。
 
@@ -406,7 +425,7 @@ isukit slow
 - [ ] **全件取ってアプリ側でソート・フィルタしている。** インデックスがあればDBの仕事
 - [ ] **webサーバー自身の上限** — worker数、upstreamへの `keepalive`、open files。安いが、アプリがボトルネックでなくなってから
 
-1つやるごとに：`isukit deploy` → `isukit bench "何を変えたか"`。**数字だけで採否を決める。**
+1つやるごとに：`isukit deploy` → `isukit bench "何を変えたか"` → `isukit show`。**数字だけで採否を決める。** 前の回と比べたいときは `isukit show 2`（1つ前）。
 
 ベンチのスコアは揺らぐので、小さい差は有意でない。`isukit attribute` で最後の2回の計測を比較し、差が ±10% を超えているかを判定。
 
@@ -421,9 +440,13 @@ isukit attribute 5         # 閾値を ±5% に設定
 
 **1台をプロファイルし終えて、ボトルネックが分かってから。** 何が重いか分からないまま分けると、問題が移動するだけでネットワーク遅延が増える。
 
-1. データストアを2台目へ。アプリの接続設定は**コードではなくenvファイル**（`.isukit/manifest` の `ENV_FILE`）にある
-2. DBがリモート接続を実際に受けるか、アプリが再接続するかを確認
-3. `isukit bench` — **DBがボトルネックでなかった場合ここでスコアが落ちる。** 落ちたら戻す
+1. **役割を付け直す。** 例：`isukit host role <ip1> web,app` / `isukit host role <ip2> app` / `isukit host role <ip3> db`。以後 `deploy` / `restart` は app の台、nginx のログと alp は web の台、スロークエリと slow は db の台に行く（§2 の「複数インスタンス」）
+2. **構成は手で変える**（isukit は役割に合わせて送り先を変えるだけ）：
+   - db の台：MySQL が他の台から接続を受けるようにする（`etc/` の `mysqld.cnf` の `bind-address`、接続用ユーザーの作成）
+   - app の台：アプリの接続先を db の台に向ける。接続設定は**コードではなく env ファイル**（`.isukit/manifest` の `ENV_FILE`、元の中身は `hosts/<台>/` に控えがある）
+   - db 以外の台：MySQL を止めて自動起動も切る（`sudo systemctl disable --now mysql`）。止めるだけだと `finalize` の再起動で復活する
+   - web の台：nginx の upstream に app の台を並べる（`etc/` の nginx 設定）
+3. `isukit deploy` → `isukit bench` → `isukit show`。**DBがボトルネックでなかった場合ここでスコアが落ちる。** 落ちたら戻す。`show` の hosts 欄で、負荷が狙いどおりの台に移ったかを見る
 4. webサーバーの後ろにアプリ2台目を置いてロードバランス
 
 分散のステップは毎回「再起動後に生き残らないと困るもの」を増やす。何を増やしたか書いておく。フェーズ5で確認する。
@@ -449,7 +472,7 @@ isukit logs off          # 計測ログは今この瞬間もスコアを削っ�
 isukit finalize          # logs off → 全ホスト再起動 → unitの復帰確認 → 採点用ベンチ
 ```
 
-`finalize` があるのは、**実行時だけの状態は再起動で消える**のに、最終採点は再起動されたかもしれないマシンで走るから。複数ホストがある場合は全部を再起動するが、再起動順は保証されない。以下は手で確認する：
+`finalize` があるのは、**実行時だけの状態は再起動で消える**のに、最終採点は再起動されたかもしれないマシンで走るから。複数ホストがある場合は全部を再起動し、各台の役割に必要な unit（app ならアプリ、web なら nginx、db なら MySQL）が自分で上がってくるかを確かめる。再起動順は保証されない。以下は手で確認する：
 
 - [ ] 依存している全サービスが **enabled**（動いているだけでは不十分）：`.isukit/manifest` の各unitに `systemctl is-enabled <unit>`
 - [ ] やった `SET GLOBAL` が**設定ファイルにも書いてある**。MySQLの実行時変数は再起動で消える
@@ -457,6 +480,8 @@ isukit finalize          # logs off → 全ホスト再起動 → unitの復帰�
 - [ ] ディスクに空きがある：`df -h`
 - [ ] スロークエリログが **off** で、ログファイルを削除済み（`long_query_time=0` はディスクを埋める）
 - [ ] アプリが完全なコールドスタートから手作業なしで起動する
+- [ ] db 以外の台で MySQL が**止まったまま**（`disable` し忘れると再起動で復活し、メモリと CPU を食う）
+- [ ] app の台がすべて db の台に接続している（db の台が最後に上がっても、アプリが再接続できる）
 
 そのあとベンチを2〜3回回す。スコアは毎回ぶれる。**知りたいのは「運が良かった数字」ではなく「安定して出る数字」。** 終盤の回で失敗したら、`isukit score` の最後の緑の sha に戻る時間がまだある。
 
@@ -523,6 +548,8 @@ isukit os       # サーバーのスナップショット（uptime / vmstat / io
 ## 9. コマンド早見表
 
 ```
+isukit go --new <team>/<repo> <host> -i <鍵> [--invite u1,u2]
+                               # リポジトリがまだ無いとき：サーバーから作って push（コード＋設定の2つのベースライン）
 isukit go <repo-url> <host> -i <鍵>   # 丸ごと1コマンド：clone→probe→setup→logs→benchprobe
 isukit init <repo-url> [dir]   # clone（既存ディレクトリはそのまま採用）＋ work ブランチ
 isukit host app|bench <target> # ssh先を .isukit/config に設定（'local' も可）
@@ -546,19 +573,22 @@ isukit alp                     # エンドポイントを合計レスポンス�
 isukit slow                    # クエリを合計時間順
 isukit pprof 30                # GoのCPUプロファイル → .isukit/cpu.pprof
 isukit deploy                  # rsync＋ビルド → systemdのExecStartパス → 再起動
-isukit restart                 # 検出したアプリunitを再起動（EXTRA_HOSTS も含む）
+isukit restart                 # アプリの unit を再起動（app の役割を持つ全台）
 isukit ship "<メモ>"            # 新ブランチ作成 → commit → push → draft PR
 isukit revert [<sha>]          # git revert で変更を打ち消す
 isukit finalize                # 終盤の締め処理一式（全ホスト再起動）
 ```
 
+**repo に入るもの**：`etc/`（`/etc` からリンクされている設定の実体）、`hosts/<台>/`（各台の env ファイルの控え）
+
 **ファイル**（全部 git-ignore 済み、各リポジトリの `.isukit/` の中）
 
 ```
-.isukit/config         APP, BENCH, BENCH_CMD, SSH_OPTS, EXTRA_UNITS   ← go/benchprobe が書き、benchcmd で直す
+.isukit/config         APP, BENCH, BENCH_CMD, SSH_OPTS, EXTRA_UNITS, ETC_REPO, PPROF_*   ← go/benchprobe が書き、benchcmd で直す
 .isukit/manifest       probe の結果。他の全コマンドが読む
-.isukit/scores.tsv     日時 / sha / スコア / メモ / 生ログのパス
-.isukit/bench-*.log    実行ごとのベンチ出力そのまま
+.isukit/hosts          台ごとの役割（isukit host role が書く）
+.isukit/scores.tsv     日時 / sha / スコア / メモ / その回の保存先
+.isukit/runs/<日時>/   その回の結果：bench.log・hosts.txt（台ごとの CPU）・alp.txt・slow-<台>.txt・cpu.pprof
 .isukit/bench-help.txt ベンチマーカーの --help 全文
 .isukit/ssh_config     `go -i` が書く ssh 設定
 ```
