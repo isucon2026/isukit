@@ -9,7 +9,11 @@ bash test/run-all.sh isucon8-final    # one fixture (the other suite says "skip"
 bash test/run-all.sh -v isucon13      # ...and dump the full probe output
 ```
 
-Current state: **41 fixtures, 41 passed, 0 failed** (17 probe + 13 bench + 11 etc).
+Current state: **50 fixtures, 50 passed, 0 failed** (17 probe + 13 bench + 11 etc + 9 hosts).
+
+`run-hosts-tests.sh` sources `isukit` (`ISUKIT_SOURCED=1` skips `main`), swaps the ssh
+transport for a recorder and asserts which host each command reaches, with and
+without a `.isukit/hosts` roles file. Full runs only, like the etc suite.
 
 `run-etc-tests.sh` is different in kind: it runs `remote/etc-adopt.sh` and
 `remote/etc-status.sh` as-is (plus `LOGS_SCRIPT`, extracted) against a throwaway

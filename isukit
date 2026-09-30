@@ -62,7 +62,63 @@ looks_like_keyfile() { # looks_like_keyfile <path> -- existing, readable, and na
 }
 
 need_state() { [ -f "$CONF" ] || die "no $CONF here. cd into the problem repo, or run: isukit init <repo-url>"; }
-load()       { need_state; . "$CONF"; [ -f "$STATE/manifest" ] && . "$STATE/manifest" || true; }
+load() {
+  need_state; . "$CONF"; [ -f "$STATE/manifest" ] && . "$STATE/manifest" || true
+  PRIMARY="$APP"                                  # the host probe reads the manifest from
+  [ -n "${HOST_OVERRIDE:-}" ] && APP="$HOST_OVERRIDE"  # on_hosts: this run targets one host
+  return 0
+}
+
+# ---------------------------------------------------------------- roles
+# .isukit/hosts: "<ssh-target> <role,role...>" per line, # comments. Roles:
+#   app  runs the webapp unit     -> deploy, restart, pprof
+#   web  runs nginx               -> nginx logging, alp
+#   db   runs mysql               -> slow log, slow
+# Without the file, the pre-roles layout holds: $APP does all three and every
+# EXTRA_HOSTS entry is an app instance. $APP stays the host probe reads.
+HOSTS_FILE="$STATE/hosts"
+KNOWN_ROLES="app web db"
+host_lines() { # "<target> <roles>" per host
+  local h
+  if [ -f "$HOSTS_FILE" ]; then
+    awk '!/^[[:space:]]*(#|$)/ { print $1, ($2 == "" ? "app" : $2) }' "$HOSTS_FILE"
+  else
+    printf '%s web,app,db\n' "${PRIMARY:-$APP}"
+    for h in ${EXTRA_HOSTS:-}; do printf '%s app\n' "$h"; done
+  fi
+}
+hosts_all()  { host_lines | awk '{ print $1 }'; }
+host_roles() { host_lines | awk -v h="$1" '$1 == h { print $2 }'; }
+hosts_with() { # hosts_with <role>[|<role>...] -- hosts holding any of them
+  host_lines | awk -v want="$1" '{
+    n = split($2, r, ","); m = split(want, w, "|")
+    for (i = 1; i <= n; i++) for (j = 1; j <= m; j++) if (r[i] == w[j]) { print $1; next }
+  }'
+}
+role_units() { # units a host must be running, from its roles
+  local r u=""
+  for r in $(host_roles "$1" | tr , ' '); do
+    case "$r" in
+      app) u="$u ${APP_UNIT:-} ${EXTRA_UNITS:-}" ;;
+      web) u="$u ${WEB_SERVER:-}" ;;
+      db)  u="$u ${DB_SERVER:-}" ;;
+    esac
+  done
+  printf '%s\n' $u | awk 'NF && !seen[$0]++' | tr '\n' ' ' | sed 's/ *$//'
+}
+on_hosts() { # on_hosts <role|all> <fn> [args...] -- run fn once per matching host, $APP pointed at it
+  local sel="$1" fn="$2" hosts h n bad=""
+  shift 2
+  if [ "$sel" = all ]; then hosts=$(hosts_all); else hosts=$(hosts_with "$sel"); fi
+  [ -n "$hosts" ] || die "no host has role '$sel' — set one: isukit host role <target> ${sel%%|*}"
+  n=$(printf '%s\n' $hosts | wc -l | tr -d ' ')
+  for h in $hosts; do
+    [ "$n" -gt 1 ] && say "── $h ($(host_roles "$h"))"
+    # subshell: die inside fn stops this host only, and $APP never leaks back
+    ( HOST_OVERRIDE="$h"; load; "$fn" "$@" ) || bad="$bad $h"
+  done
+  [ -z "$bad" ] || { warn "failed on:$bad"; return 1; }
+}
 
 # ---------------------------------------------------------------- transport
 # Every host is either "local" or an ssh target. Same primitives either way.
@@ -201,6 +257,14 @@ cmd_host() {
     bench) sed -i.bak "s|^BENCH=.*|BENCH=$target|" "$CONF"; rm -f "$CONF.bak" ;;
     add)
       [ -n "$target" ] || die "usage: isukit host add <ssh-target>"
+      if [ -f "$HOSTS_FILE" ]; then
+        # roles file in charge: an added host is an app instance unless told otherwise
+        awk -v h="$target" '$1 == h { found = 1 } END { exit !found }' "$HOSTS_FILE" \
+          && { say "$target already in $HOSTS_FILE — no-op"; return 0; }
+        printf '%s app\n' "$target" >> "$HOSTS_FILE"
+        say "$target = app   (change with: isukit host role $target <roles>)"
+        return 0
+      fi
       local cur
       cur=$( . "$CONF" 2>/dev/null; printf '%s' "${EXTRA_HOSTS:-}" )
       case " $cur " in
@@ -214,7 +278,26 @@ cmd_host() {
           ;;
       esac
       return 0 ;;
-    *) die "usage: isukit host {app|bench|add} <ssh-target|local> [ssh opts...]" ;;
+    role)
+      local roles="$opts" r
+      [ -n "$target" ] && [ -n "$roles" ] || die "usage: isukit host role <ssh-target> <role,role...>   (roles: $KNOWN_ROLES)"
+      for r in $(printf '%s' "$roles" | tr , ' '); do
+        case " $KNOWN_ROLES " in *" $r "*) ;; *) die "unknown role '$r' — roles are: $KNOWN_ROLES" ;; esac
+      done
+      load
+      # first use: write the implied pre-roles layout down, so nothing is dropped
+      if [ ! -f "$HOSTS_FILE" ]; then
+        local seed   # read before the redirect creates the file host_lines would see
+        seed=$(host_lines)
+        printf '# <ssh-target> <roles>   roles: %s\n%s\n' "$KNOWN_ROLES" "$seed" > "$HOSTS_FILE"
+      fi
+      awk -v h="$target" '$1 != h' "$HOSTS_FILE" > "$HOSTS_FILE.tmp"
+      printf '%s %s\n' "$target" "$roles" >> "$HOSTS_FILE.tmp"
+      mv "$HOSTS_FILE.tmp" "$HOSTS_FILE"
+      say "$target = $roles"
+      cmd_hosts
+      return 0 ;;
+    *) die "usage: isukit host {app|bench|add|role} <ssh-target|local> [ssh opts... | roles]" ;;
   esac
   if [ "$rewrite_ssh_config" = 1 ]; then
     local w val prev="" new_key="" new_port=""
@@ -468,6 +551,18 @@ cmd_probe() {
   ( cmd_benchprobe ) || warn "benchprobe failed — set the bench path by hand: isukit benchmode manual (portal), or isukit benchcmd '<command>'"
 }
 
+cmd_hosts() {
+  load
+  local h roles units
+  [ -f "$HOSTS_FILE" ] || say "no $HOSTS_FILE — pre-roles layout ($APP does everything). set roles: isukit host role <target> <roles>"
+  while read -r h roles; do
+    units=$(role_units "$h")
+    printf '  %-28s %-12s %s%s\n' "$h" "$roles" "${units:-?}" "$([ "$h" = "$PRIMARY" ] && printf '   (probe)')"
+  done < <(host_lines)
+  [ -n "$(hosts_with app)" ] || warn "no host has role app — deploy/restart have nowhere to go"
+  case " $(hosts_all | tr '\n' ' ') " in *" $PRIMARY "*) ;; *) warn "APP=$PRIMARY (the probed host) is not listed in $HOSTS_FILE" ;; esac
+}
+
 cmd_unit() {
   need_state
   local name="${1:-}"; [ -n "$name" ] || die "usage: isukit unit <systemd-unit-name>"
@@ -640,8 +735,8 @@ cmd_benchmode() {
 }
 
 # ---------------------------------------------------------------- tools
-cmd_setup() {
-  load
+cmd_setup() { load; on_hosts 'web|db' setup_one; }
+setup_one() {
   say "installing alp + percona-toolkit on $APP"
   rsh_stdin "$APP" <<'EOS'
 set -e
@@ -672,7 +767,8 @@ RC=0
 # the same file, hence sort -u).
 ngx_files() { find -L /etc/nginx -type f ! -name "*.isukit-tmp" 2>/dev/null | xargs -r grep -lE "$1" 2>/dev/null | xargs -r readlink -f | sort -u; }
 # --- nginx: LTSV carrying request_time, which the stock "combined" format lacks.
-if systemctl is-active --quiet nginx 2>/dev/null; then
+# WANT_NGINX / WANT_MYSQL: which tiers this host holds (its roles); default both.
+if [ "${WANT_NGINX:-1}" = 1 ] && systemctl is-active --quiet nginx 2>/dev/null; then
   if [ "$MODE" = on ]; then
     [ -d /etc/nginx.isukit.bak ] || $SUDO cp -a /etc/nginx /etc/nginx.isukit.bak
     $SUDO mkdir -p /etc/nginx/conf.d
@@ -713,11 +809,10 @@ NGXCONF
   fi
 fi
 # --- mysql: long_query_time=0 captures every query. MUST be off for scoring runs.
-if $SUDO mysql -e "SELECT 1" >/dev/null 2>&1; then
+if [ "${WANT_MYSQL:-1}" = 1 ] && $SUDO mysql -e "SELECT 1" >/dev/null 2>&1; then
   if [ "$MODE" = on ]; then
     if $SUDO mysql -e "SET GLOBAL slow_query_log_file=\"/tmp/isukit-slow.log\"; SET GLOBAL long_query_time=0; SET GLOBAL slow_query_log=1;" 2>/dev/null; then
       echo "mysql: slow log -> /tmp/isukit-slow.log (long_query_time=0)"
-      [ -n "${APP_UNIT:-}" ] && $SUDO systemctl restart "$APP_UNIT" && echo "app: restarted $APP_UNIT to pick up fresh connections"
     else
       echo "mysql: FAILED to enable slow log" >&2
       RC=1
@@ -738,23 +833,22 @@ cmd_logs() {
   load
   local mode="${1:-}"
   case "$mode" in on|off) ;; *) die "usage: isukit logs {on|off}" ;; esac
-  say "logs $mode on $APP"
-  # ISUCON practice AMIs commonly ship an 8GB root. long_query_time=0 below
-  # logs every query, and a benchmark run can produce gigabytes of slow log
-  # fast enough to fill that root and wedge the app mid-run — warn, but still
-  # enable it, since a short run under thin headroom may be exactly what's wanted.
-  if [ "$mode" = on ]; then
-    local avail_kb
-    avail_kb=$(rsh "$APP" "df -P /tmp | tail -1 | tr -s ' ' | cut -d' ' -f4" 2>/dev/null || true)
-    if [ -n "$avail_kb" ]; then
-      if [ "$avail_kb" -lt 2097152 ] 2>/dev/null; then
-        warn "only $((avail_kb / 1024))MB free on /tmp on $APP — long_query_time=0 logs EVERY query; a benchmark run can produce gigabytes and a full root wedges the app. enabling anyway."
-      fi
-    else
-      warn "could not check free space on /tmp on $APP before enabling slow logging"
-    fi
+  local h roles wn wm any_db=0 rc=0
+  for h in $(hosts_all); do
+    roles=",$(host_roles "$h"),"
+    wn=0; wm=0
+    case "$roles" in *,web,*) wn=1 ;; esac
+    case "$roles" in *,db,*)  wm=1; any_db=1 ;; esac
+    [ "$wn$wm" = 00 ] && continue
+    say "logs $mode on $h"
+    printf 'MODE=%s\nWANT_NGINX=%s\nWANT_MYSQL=%s\n%s\n' "$mode" "$wn" "$wm" "$LOGS_SCRIPT" | rsh_stdin "$h" || rc=1
+  done
+  # long_query_time applies to new sessions only: make every app host reconnect,
+  # wherever the db lives.
+  if [ "$mode" = on ] && [ "$any_db" = 1 ] && [ -n "${APP_UNIT:-}" ]; then
+    ( cmd_restart ) || warn "could not restart the app — the slow log only sees connections opened after: isukit restart"
   fi
-  printf 'MODE=%s\nAPP_UNIT=%s\n%s\n' "$mode" "${APP_UNIT:-}" "$LOGS_SCRIPT" | rsh_stdin "$APP"
+  return "$rc"
 }
 
 # ---------------------------------------------------------------- etc
@@ -780,7 +874,9 @@ etc_managed() { # etc_managed <repo> -- true if /etc on $APP already links into 
   [ -n "$(rsh "$APP" "find /etc/nginx /etc/mysql /etc/systemd/system -maxdepth 3 -type l -lname '$1/etc/*' 2>/dev/null | head -1" 2>/dev/null)" ]
 }
 
-logs_are_on() { rsh "$APP" "test -f /etc/nginx/conf.d/00-isukit.conf" 2>/dev/null; }
+logs_are_on() { # on this host: nginx carries isukit logging, or mysql logs to isukit's slow log
+  rsh "$APP" "test -f /etc/nginx/conf.d/00-isukit.conf || [ \"\$(sudo -n mysql -N -B -e 'SELECT CONCAT(@@global.slow_query_log, @@global.slow_query_log_file)' 2>/dev/null)\" = 1/tmp/isukit-slow.log ]" 2>/dev/null
+}
 
 etc_rsync() { # etc_rsync <src> <dst> [rsync opts...] -- one side is $APP:..., the other local
   local src="$1" dst="$2" rp="--rsync-path=sudo -n rsync"
@@ -803,27 +899,41 @@ cmd_etc() {
   esac
 }
 
+# Per-host steps below run under on_hosts; whatever must happen once for the
+# whole fleet afterwards (re-apply logging, restart the app) is left as a flag.
+ETC_FLAGS="$STATE/.etc-flags"
+etc_flag()       { mkdir -p "$ETC_FLAGS"; : > "$ETC_FLAGS/$1"; }
+etc_flag_set()   { [ -f "$ETC_FLAGS/$1" ]; }
+etc_flags_reset() { rm -rf "$ETC_FLAGS"; }
+
 cmd_etc_adopt() {
   load
-  local repo targets="$*" was_on=0 rc=0
-  repo=$(etc_repo)
-  logs_are_on && was_on=1
-  say "etc adopt on $APP: /etc -> $repo/etc/ (symlinks; replaced files backed up under /etc/isukit-orig/)"
-  { printf 'REPO=%q\nAPP_UNIT=%q\nTARGETS=%q\n' "$repo" "${APP_UNIT:-}" "$targets"; remote_script etc-adopt.sh; } \
-    | rsh_stdin "$APP" || rc=$?
+  local rc=0
+  etc_flags_reset
+  on_hosts all etc_adopt_one "$@" || rc=1
   # restarting mysqld drops the SET GLOBAL slow-log settings; put them back.
-  if [ "$was_on" = 1 ]; then
+  if etc_flag_set relog; then
     say "measurement logging was on — re-applying it"
     cmd_logs on || warn "could not re-apply logging — run: isukit logs on"
   fi
+  etc_flags_reset
   [ "$rc" = 0 ] || warn "some files were not adopted (see above) — the rest are linked"
-  cmd_etc_pull || warn "adopt is done on $APP, but etc/ was not pulled down — resolve the files above, then: isukit etc pull"
+  cmd_etc_pull || warn "adopt is done, but etc/ was not pulled down from $APP — resolve the files above, then: isukit etc pull"
   say "next: review $(local_repo_root)/etc/, then: isukit ship \"etc: put middleware config under git\""
   return "$rc"
 }
+etc_adopt_one() {
+  local repo targets="$*" rc=0
+  repo=$(etc_repo)
+  logs_are_on && etc_flag relog
+  say "etc adopt on $APP: /etc -> $repo/etc/ (symlinks; replaced files backed up under /etc/isukit-orig/)"
+  { printf 'REPO=%q\nAPP_UNIT=%q\nTARGETS=%q\n' "$repo" "${APP_UNIT:-}" "$targets"; remote_script etc-adopt.sh; } \
+    | rsh_stdin "$APP" || rc=$?
+  return "$rc"
+}
 
-cmd_etc_status() {
-  load
+cmd_etc_status() { load; on_hosts all etc_status_one; }
+etc_status_one() {
   local repo
   repo=$(etc_repo)
   { printf 'REPO=%q\n' "$repo"; remote_script etc-status.sh; } | rsh_stdin "$APP"
@@ -875,14 +985,33 @@ cmd_etc_pull() { # server repo etc/ -> local repo etc/, minus isukit's own loggi
   git -C "$root" status --short -- etc 2>/dev/null || true
 }
 
-cmd_etc_push() { # local repo etc/ -> server repo etc/ (i.e. live /etc), then reload what changed
+cmd_etc_push() { # local repo etc/ -> every host's repo etc/ (i.e. live /etc), then reload what changed
   load
-  local from_deploy=0
+  local from_deploy=0 rc=0
   [ "${1:-}" = "--from-deploy" ] && from_deploy=1
+  etc_flags_reset
+  on_hosts all etc_push_one "$from_deploy" || rc=1
+  if etc_flag_set relog; then
+    cmd_logs on || warn "could not re-apply logging — run: isukit logs on"
+  elif etc_flag_set app-unit && [ "$from_deploy" = 0 ]; then
+    # (logs on already restarts the app) — deploy restarts it right after this
+    say "app unit changed — restarting the app"
+    cmd_restart || rc=1
+  fi
+  etc_flags_reset
+  return "$rc"
+}
+etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
+  local from_deploy="$1"
   local repo root changed was_on=0 rc=0
   repo=$(etc_repo)
   root=$(local_repo_root)
   [ -d "$root/etc" ] || die "no $root/etc — nothing to push (start with: isukit etc adopt)"
+  # deploy only feeds hosts that already read their config from the repo
+  if [ "$from_deploy" = 1 ] && ! etc_managed "$repo"; then
+    say "etc push: $APP does not link /etc into $repo/etc yet — skipped (isukit etc adopt)"
+    return 0
+  fi
   # diff by checksum before copying (logging markers ignored on both sides): the
   # changed paths decide what is copied and what gets reloaded.
   changed=$(LC_ALL=C comm -23 <(etc_sums local "$root" | LC_ALL=C sort) <(etc_sums remote "$repo" | LC_ALL=C sort) \
@@ -916,10 +1045,8 @@ cmd_etc_push() { # local repo etc/ -> server repo etc/ (i.e. live /etc), then re
     local u
     for u in $units; do
       if [ "$u" = "${APP_UNIT:-}" ]; then
-        # deploy restarts the app right after this; on its own, push must do it
-        [ "$from_deploy" = 1 ] && continue
-        say "app unit $u changed — restarting it"
-        cmd_restart || rc=1
+        # restarted once for the fleet after every host is pushed
+        etc_flag app-unit
         continue
       fi
       warn "unit $u changed — restart it when ready: ssh $APP sudo systemctl restart $u"
@@ -931,12 +1058,12 @@ cmd_etc_push() { # local repo etc/ -> server repo etc/ (i.e. live /etc), then re
       || { warn "mysql did not come back — check: ssh $APP sudo journalctl -u mysql -n 50"; rc=1; }
   fi
   # a pushed nginx file replaced the copy 'logs on' had edited, and a DB restart
-  # drops SET GLOBAL — either way logging has to be put back.
+  # drops SET GLOBAL — either way logging has to be put back (once, afterwards).
   if [ "$was_on" = 1 ] && { [ "$reload_nginx" = 1 ] || [ "$restart_db" = 1 ]; }; then
-    cmd_logs on || warn "could not re-apply logging — run: isukit logs on"
+    etc_flag relog
   fi
   # a file new to the repo is copied up but nothing reads it until it is linked.
-  cmd_etc_status | grep -vE '^linked ' >&2 || true
+  etc_status_one | grep -vE '^linked ' >&2 || true
   return "$rc"
 }
 
@@ -1039,11 +1166,11 @@ cmd_score() {
 }
 
 # ---------------------------------------------------------------- analysis
-cmd_alp() {
-  load
+cmd_alp() { load; on_hosts web alp_one; }
+alp_one() {
   rsh "$APP" "command -v alp >/dev/null" || {
     warn "alp not installed on $APP — installing"
-    cmd_setup
+    setup_one
     rsh "$APP" "command -v alp >/dev/null" || die "alp still not installed after isukit setup — install by hand on $APP"
   }
   rsh "$APP" "sudo -n test -s /var/log/nginx/isukit.log 2>/dev/null" || \
@@ -1053,13 +1180,13 @@ cmd_alp() {
     -m '/api/[^/]+/[0-9a-zA-Z-]+,/[0-9a-zA-Z-]{20,}' 2>&1 | head -50"
 }
 
-cmd_slow() {
-  load
+cmd_slow() { load; on_hosts db slow_one; }
+slow_one() {
   rsh "$APP" "sudo -n test -s /tmp/isukit-slow.log 2>/dev/null" || \
     die "no slow log (or it's empty) — run: isukit logs on, then a bench"
   rsh "$APP" "command -v pt-query-digest >/dev/null" || {
     warn "pt-query-digest not installed on $APP — installing"
-    cmd_setup
+    setup_one
     rsh "$APP" "command -v pt-query-digest >/dev/null" || die "pt-query-digest still not installed after isukit setup — install by hand on $APP"
   }
   say "pt-query-digest (top queries by total time)"
@@ -1069,6 +1196,8 @@ cmd_slow() {
 cmd_pprof() {
   load
   local sec="${1:-30}" port="${2:-6060}"
+  APP=$(hosts_with app | head -1)
+  [ -n "$APP" ] || die "no host has role app — set one: isukit host role <target> app"
   say "CPU profile ${sec}s via $APP:$port/debug/pprof — needs net/http/pprof imported and a listener in the app"
   rsh "$APP" "curl -s -o /tmp/isukit-cpu.pprof 'http://localhost:$port/debug/pprof/profile?seconds=$sec'" \
     || die "pprof endpoint not reachable — add: import _ \"net/http/pprof\"  +  go func(){ http.ListenAndServe(\":$port\", nil) }()"
@@ -1110,10 +1239,10 @@ for u in $CHECK_UNITS; do
 done
 '
 
-cmd_os() {
-  load
-  local units="${APP_UNIT:-} ${WEB_SERVER:-} ${DB_SERVER:-}"
-  units="$(printf '%s' "$units" | sed 's/^ *//;s/ *$//')"
+cmd_os() { load; on_hosts all os_one; }
+os_one() {
+  local units
+  units=$(role_units "$APP")
   say "os snapshot on $APP"
   printf 'CHECK_UNITS="%s"\n%s\n' "$units" "$OS_SCRIPT" | rsh_stdin "$APP"
 }
@@ -1124,13 +1253,16 @@ cmd_deploy() {
   local force=0
   [ "${1:-}" = "--force" ] && force=1
   # configs first: once /etc links into the repo, the repo's etc/ is what runs.
+  # (hosts that do not link /etc yet are skipped inside the push)
   if [ -d "$(local_repo_root)/etc" ] && [ -n "${ETC_REPO:-${SRC_DIR:-}}" ]; then
-    local erepo
-    erepo=$(etc_repo)
-    if etc_managed "$erepo"; then
-      cmd_etc_push --from-deploy || warn "etc push reported errors (above) — continuing with the app deploy"
-    fi
+    cmd_etc_push --from-deploy || warn "etc push reported errors (above) — continuing with the app deploy"
   fi
+  on_hosts app deploy_one "$force" || die "deploy failed on some app host (above) — not restarting a half-deployed fleet"
+  # compose mode brings each host up itself; binary mode restarts once, everywhere
+  [ "${APP_EXEC_RAW#*compose}" != "${APP_EXEC_RAW:-}" ] || cmd_restart
+}
+deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it there
+  local force="$1"
   local local_src
   local_src=$(find . -maxdepth 4 -name go.mod -not -path "*/bench*" -not -path "*/vendor/*" | head -1)
   [ -n "$local_src" ] || die "no local go.mod found under $(pwd)"
@@ -1182,7 +1314,6 @@ cmd_deploy() {
   local tmp="/tmp/isukit-build.$$"
   rsh "$APP" "cd $GO_DIR && go build -o $tmp . 2>&1 | head -40 && echo BUILD_OK" || die "build failed — see the compiler output above"
   rsh "$APP" "sudo -n install -m 0755 -o ${APP_USER:-isucon} $tmp '$out' && rm -f $tmp" || die "install failed — check sudo permissions for ${APP_USER:-isucon} on $APP"
-  cmd_restart
 }
 
 cmd_restart() {
@@ -1191,11 +1322,12 @@ cmd_restart() {
   units="$(printf '%s' "$units" | sed 's/^ *//;s/ *$//')"
   [ -n "$units" ] || die "no APP_UNIT in manifest — run: isukit probe"
   local h rc bad=""
-  for h in "$APP" ${EXTRA_HOSTS:-}; do
+  [ -n "$(hosts_with app)" ] || die "no host has role app — set one: isukit host role <target> app"
+  for h in $(hosts_with app); do
     say "restarting on $h:$units"
-    # never let one host abort the loop: a DB-only box legitimately has no app
-    # unit, and a silent partial restart is exactly what fails the post-contest
-    # verification. collect failures, report them all, fail at the end.
+    # never let one host abort the loop: a silent partial restart is exactly
+    # what fails the post-contest verification. collect failures, report them
+    # all, fail at the end. (db-only / web-only hosts are not app hosts.)
     rc=0
     rsh "$h" "sudo -n systemctl restart $units && sleep 2 && systemctl is-active $units" || rc=$?
     [ "$rc" = 0 ] || { warn "restart failed on $h (rc=$rc) — that host may not run all of: $units"; bad="$bad $h"; }
@@ -1209,10 +1341,10 @@ cmd_restart() {
 # applied at runtime (SET GLOBAL, manual service starts, /tmp artefacts).
 cmd_finalize() {
   load
-  local hosts="$APP ${EXTRA_HOSTS:-}"
-  hosts="$(printf '%s' "$hosts" | sed 's/^ *//;s/ *$//')"
+  local hosts
+  hosts="$(hosts_all | tr '\n' ' ' | sed 's/^ *//;s/ *$//')"
   local h
-  [ -n "${EXTRA_HOSTS:-}" ] && warn "multiple hosts ($hosts) — reboot/return order across them is NOT guaranteed, never assume cross-host startup dependencies"
+  [ "$(printf '%s\n' $hosts | wc -l | tr -d ' ')" -gt 1 ] && warn "multiple hosts ($hosts) — reboot/return order across them is NOT guaranteed, never assume cross-host startup dependencies"
   say "1/4 turning measurement logging OFF (it costs real score)"
   cmd_logs off
   say "2/4 rebooting: $hosts"
@@ -1228,9 +1360,14 @@ cmd_finalize() {
       sleep 5
     done
   done
+  local want
   for h in $hosts; do
-    rsh "$h" "systemctl is-active ${UNITS_ACTIVE:-}" \
-      || warn "some units did not come up on their own on $h — enable them: ssh ${SSH_OPTS:-} $h sudo systemctl enable --now ${UNITS_ACTIVE:-}"
+    # with roles, each host must bring up what its roles need; without, every
+    # host is assumed to be a copy of the probed one.
+    if [ -f "$HOSTS_FILE" ]; then want=$(role_units "$h"); else want="${UNITS_ACTIVE:-}"; fi
+    [ -n "$want" ] || continue
+    rsh "$h" "systemctl is-active $want" \
+      || warn "some units did not come up on their own on $h — enable them: ssh ${SSH_OPTS:-} $h sudo systemctl enable --now $want"
   done
   say "4/4 scoring run"
   if [ "${BENCH_MODE:-auto}" = "manual" ]; then
@@ -1359,6 +1496,13 @@ cmd_go() {
       go_ssh_host_block isukit-app "$apph" "$abskey" "$port"
       printf '\n'
       go_ssh_host_block isukit-bench "${benchh:-$apph}" "$abskey" "$port"
+      # every other contest host (isukit host add / host role <ip>) gets the
+      # same key, user and port — ssh -F reads nothing else.
+      printf '\nHost *\n'
+      [ "${apph#*@}" != "$apph" ] && printf '  User %s\n' "${apph%%@*}"
+      [ -n "$abskey" ] && printf '  IdentityFile %s\n' "$abskey"
+      [ -n "$port" ] && printf '  Port %s\n' "$port"
+      printf '  StrictHostKeyChecking accept-new\n'
     } > "$STATE/ssh_config"
     chmod 600 "$STATE/ssh_config" 2>/dev/null || true
     local ssh_opts_line="-F $STATE/ssh_config"
@@ -1499,12 +1643,16 @@ cmd_doctor() {
   fi
   load
 
-  if rsh "$APP" "true" 2>/dev/null; then
-    doctor_ok "reachable: $APP"
-  else
-    doctor_fail "cannot reach $APP — check: ssh ${SSH_OPTS:-} $APP true"
-    return 1
-  fi
+  local h dead=0
+  for h in $(hosts_all); do
+    if rsh "$h" "true" 2>/dev/null; then
+      doctor_ok "reachable: $h ($(host_roles "$h"))"
+    else
+      doctor_fail "cannot reach $h — check: ssh ${SSH_OPTS:-} $h true"
+      dead=1
+    fi
+  done
+  [ "$dead" = 0 ] || return 1
   if [ "${BENCH_MODE:-auto}" = "auto" ]; then
     if rsh "$BENCH" "true" 2>/dev/null; then
       doctor_ok "reachable: $BENCH"
@@ -1521,18 +1669,19 @@ cmd_doctor() {
   fi
   load
 
-  if [ -z "${APP_UNIT:-}" ]; then
-    doctor_warn "no APP_UNIT in manifest — fix: isukit unit <systemd-unit-name>"
-  else
-    local ustate
-    ustate=$(rsh "$APP" "systemctl is-active '$APP_UNIT'" 2>/dev/null || true)
-    if [ "$ustate" = "active" ]; then
-      doctor_ok "APP_UNIT $APP_UNIT is active"
-    else
-      doctor_fail "APP_UNIT $APP_UNIT is ${ustate:-unknown} — recent log:"
-      rsh "$APP" "sudo -n journalctl -u '$APP_UNIT' -n 30 --no-pager" 2>/dev/null || true
-    fi
-  fi
+  [ -n "${APP_UNIT:-}" ] || doctor_warn "no APP_UNIT in manifest — fix: isukit unit <systemd-unit-name>"
+  local u ustate
+  for h in $(hosts_all); do
+    for u in $(role_units "$h"); do
+      ustate=$(rsh "$h" "systemctl is-active '$u'" 2>/dev/null || true)
+      if [ "$ustate" = "active" ]; then
+        doctor_ok "$h: $u is active"
+      else
+        doctor_fail "$h: $u is ${ustate:-unknown} (its roles need it) — recent log:"
+        rsh "$h" "sudo -n journalctl -u '$u' -n 30 --no-pager" 2>/dev/null || true
+      fi
+    done
+  done
 
   if [ -n "${APP_UNIT:-}" ] && [ "${APP_UNIT_CONFIDENCE:-}" != "high" ] && [ "${APP_UNIT_CONFIDENCE:-}" != "override" ]; then
     doctor_warn "APP_UNIT_CONFIDENCE=${APP_UNIT_CONFIDENCE:-unknown} — candidates: ${APP_CANDIDATES:-none} — fix: isukit unit <name>"
@@ -1540,29 +1689,38 @@ cmd_doctor() {
     doctor_ok "APP_UNIT_CONFIDENCE=${APP_UNIT_CONFIDENCE:-n/a}"
   fi
 
-  if rsh "$APP" "command -v alp >/dev/null && command -v pt-query-digest >/dev/null" 2>/dev/null; then
+  local missing=0
+  for h in $(hosts_with 'web|db'); do
+    rsh "$h" "command -v alp >/dev/null && command -v pt-query-digest >/dev/null" 2>/dev/null || missing=1
+  done
+  if [ "$missing" = 0 ]; then
     doctor_ok "alp + pt-query-digest installed"
   else
     doctor_warn "alp and/or pt-query-digest missing — running: isukit setup"
     cmd_setup || doctor_warn "isukit setup failed — install by hand"
   fi
 
-  if rsh "$APP" "test -f /etc/nginx/conf.d/00-isukit.conf" 2>/dev/null; then
-    doctor_warn "measurement logging is ON — must be OFF for a scoring run: isukit logs off"
+  local on=""
+  for h in $(hosts_all); do
+    ( HOST_OVERRIDE="$h"; load; logs_are_on ) && on="$on $h"
+  done
+  if [ -n "$on" ]; then
+    doctor_warn "measurement logging is ON on:$on — must be OFF for a scoring run: isukit logs off"
   else
     doctor_ok "measurement logging is off"
   fi
 
   if [ -n "${ETC_REPO:-${SRC_DIR:-}}" ]; then
-    local erepo
-    erepo=$(etc_repo 2>/dev/null || true)
-    if [ -n "$erepo" ] && etc_managed "$erepo"; then
-      if cmd_etc_status >/dev/null 2>&1; then
-        doctor_ok "etc: /etc reads every managed config from $erepo/etc"
-      else
-        doctor_warn "etc: some configs in $erepo/etc are not what /etc reads — run: isukit etc status"
-      fi
-    fi
+    for h in $(hosts_all); do
+      ( HOST_OVERRIDE="$h"; load
+        erepo=$(etc_repo 2>/dev/null || true)
+        [ -n "$erepo" ] && etc_managed "$erepo" || exit 0
+        if etc_status_one >/dev/null 2>&1; then
+          doctor_ok "etc: $h reads every managed config from $erepo/etc"
+        else
+          doctor_warn "etc: on $h some configs in $erepo/etc are not what /etc reads — run: isukit etc status"
+        fi )
+    done
   fi
 
   local pct
@@ -1614,8 +1772,13 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          '-F ./ssh_config' or '-i ~/key.pem -p 2222'
                                          note: scp needs -P for port, not -p — if you
                                          hand-edit SSH_OPTS for a custom port, check both
-    isukit host add <target>            add another app instance to EXTRA_HOSTS
-                                         (restart/finalize hit these too)
+    isukit host add <target>            add another app instance (EXTRA_HOSTS, or an
+                                         'app' line in .isukit/hosts once that exists)
+    isukit host role <target> <roles>   give a host its roles, comma-separated:
+                                         app (deploy/restart/pprof), web (nginx logs,
+                                         alp), db (slow log, slow). writes .isukit/hosts
+    isukit hosts                        list hosts, their roles and the units each
+                                         must run
     isukit probe                        interrogate the server, write .isukit/manifest,
                                          then auto-probe + compose BENCH_CMD (see below)
     isukit benchprobe                   (re-)probe the benchmarker binary on $BENCH and
@@ -1652,8 +1815,8 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     isukit deploy [--force]             rsync source up, build/compose, restart
                                          --force skips the "does this look like a
                                          built binary under /home/isucon" safety check
-    isukit restart                      restart APP_UNIT (+ EXTRA_UNITS) on $APP and
-                                         every EXTRA_HOSTS entry
+    isukit restart                      restart APP_UNIT (+ EXTRA_UNITS) on every
+                                         host with role app
     isukit score                        run history
 
   DIAGNOSE
@@ -1680,7 +1843,7 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
   CONFIG (.isukit/config)
     SSH_OPTS       extra ssh/scp flags applied to every remote call
     EXTRA_UNITS    space-separated extra units 'restart'/'finalize' also restart
-    EXTRA_HOSTS    space-separated extra ssh targets; 'restart'/'finalize' hit these too
+    EXTRA_HOSTS    space-separated extra app instances (used until .isukit/hosts exists)
     BENCH_MODE     auto (ssh + BENCH_CMD) or manual (portal, paste the score)
     ETC_REPO       server dir whose etc/ holds linked configs (default: git root of
                    the probed SRC_DIR, else SRC_DIR)
@@ -1713,6 +1876,7 @@ main() {
     go)       cmd_go "$@" ;;
     init)     cmd_init "$@" ;;
     host)     cmd_host "$@" ;;
+    hosts)    cmd_hosts ;;
     probe)    cmd_probe ;;
     benchprobe) cmd_benchprobe ;;
     benchcmd) cmd_benchcmd "$@" ;;
@@ -1738,4 +1902,5 @@ main() {
     *)        usage ;;
   esac
 }
-main "$@"
+# tests source this file to reach the functions without running a command
+[ "${ISUKIT_SOURCED:-0}" = 1 ] || main "$@"

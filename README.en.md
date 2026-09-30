@@ -180,8 +180,13 @@ ISUCON's real systemd units and configs.
 - `EXTRA_UNITS` (config) is a space-separated list of extra units that
   `restart`/`finalize` also restart alongside the detected `APP_UNIT` —
   matcher/mock/simulator services some years ship as separate units.
+- Multiple instances: `isukit host role <target> <roles>` writes `.isukit/hosts`
+  with each host's roles (`app`, `web`, `db`). deploy / restart / pprof go to app
+  hosts, nginx logging and alp to web hosts, the slow log and slow to db hosts,
+  etc / os / finalize to every host. Roles only route isukit — stopping mysql on
+  app hosts, bind-address, DB_HOST and the like are still manual.
 - `EXTRA_HOSTS` (config) is a space-separated list of additional app instances
-  (set via `isukit host add <target>`). Both `restart` and `finalize` iterate
+  (set via `isukit host add <target>`), used while `.isukit/hosts` does not exist. Both `restart` and `finalize` iterate
   every host; restart order is not guaranteed across instances.
 - `BENCH_MODE` (config) is either `auto` (runs `BENCH_CMD` over ssh to the bench
   host) or `manual` (you enqueue the run in the contest portal and record the

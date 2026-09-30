@@ -112,6 +112,6 @@ ISUCONのリポジトリ構成は何ひとつ安定していない。isucon9, 10
 - `deploy` はGoアプリを前提としており、systemdが既にexecしている正確なパスへビルドする。他言語実装は手でデプロイする。
 - `SSH_OPTS`（config）は全ての `ssh`/`scp` 呼び出しに付与される — カスタム鍵、カスタムポート、カスタム設定ファイルなど。`ssh` は `-p <port>`、`scp` は `-P <port>` と大文字小文字が違う点に注意 — 手でポートフラグを組み立てる場合は両方の形が要る。
 - `EXTRA_UNITS`（config）はスペース区切りの追加unitリストで、`restart`/`finalize` は検出した `APP_UNIT` と一緒にこれらも再起動する — matcher/mock/simulator系のサービスを別unitとして持つ年向け。
-- `EXTRA_HOSTS`（config）はスペース区切りの追加アプリインスタンスのリスト（`isukit host add <target>` で設定）。`restart` と `finalize` はどちらも全ホストを回るが、インスタンス間の再起動順は保証されない。
+- 複数インスタンスは `isukit host role <target> <役割>` で `.isukit/hosts` に役割（`app` / `web` / `db`）を書く。`deploy`・`restart`・`pprof` は app の台、nginx ログと `alp` は web の台、スロークエリと `slow` は db の台、`etc`・`os`・`finalize` は全台で動く。役割は isukit の送り先を決めるだけで、MySQL を止める・`bind-address`・`DB_HOST` などの構成変更は手で行う。`.isukit/hosts` が無いときは `EXTRA_HOSTS`（`isukit host add <target>` で設定）がアプリの台として扱われる。インスタンス間の再起動順は保証されない。
 - `BENCH_MODE`（config）は `auto`（`BENCH_CMD` をベンチホストへsshして実行）か `manual`（コンテストポータルで実行をキューし、`isukit bench --score <N>` でスコアを記録）のどちらか。`isukit benchprobe` はベンチマーカーのバイナリが見つからないと自動で `manual` モードを検出する。本番環境（ISUCON11以降）ではベンチマークはWebポータルから起動されssh経由ではないので、`manual` モードは失敗ではなく正しい本番状態。モードの切り替えは `isukit benchmode <mode>`。manualモードでは、合格した実行の記録に `isukit bench --score <N> "<note>"`、エラーで終わった実行の記録に `isukit bench --fail "<note>"` を使う。
 - `isukit revert [<sha>]` は `isukit/*` ブランチ上の1コミットを取り消す — 競技中に`scores.tsv`の記録を失わずに悪い変更を戻すときに使う。
