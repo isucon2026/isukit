@@ -735,23 +735,30 @@ cmd_benchmode() {
 }
 
 # ---------------------------------------------------------------- tools
-cmd_setup() { load; on_hosts 'web|db' setup_one; }
-setup_one() {
-  say "installing alp + percona-toolkit on $APP"
-  rsh_stdin "$APP" <<'EOS'
+cmd_setup() { load; on_hosts all setup_one; }
+setup_one() { # alp on web hosts, percona-toolkit on db hosts, sysstat (pidstat) everywhere
+  local roles=",$(host_roles "$APP"),"
+  local web=0 db=0
+  case "$roles" in *,web,*) web=1 ;; esac
+  case "$roles" in *,db,*) db=1 ;; esac
+  say "installing tools on $APP ($(host_roles "$APP"))"
+  { printf 'WANT_ALP=%s\nWANT_PTQD=%s\n' "$web" "$db"; cat <<'EOS'
 set -e
-command -v alp >/dev/null || {
+apt_get() { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }
+command -v pidstat >/dev/null || {
+  apt_get update -qq && apt_get install -y -qq sysstat >/dev/null && echo "sysstat installed"
+} || echo "sysstat install failed (non-fatal — bench runs lose per-process CPU)"
+[ "$WANT_ALP" = 1 ] && ! command -v alp >/dev/null && {
   V=1.0.21; A=$(uname -m); case "$A" in x86_64) A=amd64;; aarch64) A=arm64;; esac
   cd /tmp && curl -fsSL -o alp.tar.gz "https://github.com/tkuchiki/alp/releases/download/v${V}/alp_linux_${A}.tar.gz" \
     && tar xzf alp.tar.gz && sudo install -m755 alp /usr/local/bin/alp && echo "alp installed"
 }
-command -v pt-query-digest >/dev/null || {
-  sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq \
-    && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq percona-toolkit >/dev/null \
-    && echo "percona-toolkit installed"
-} || echo "percona-toolkit install failed (non-fatal)"
-alp --version 2>/dev/null || true
+[ "$WANT_PTQD" = 1 ] && ! command -v pt-query-digest >/dev/null && {
+  apt_get update -qq && apt_get install -y -qq percona-toolkit >/dev/null && echo "percona-toolkit installed"
+} || true
+exit 0
 EOS
+  } | rsh_stdin "$APP"
   say "done"
 }
 
@@ -1067,6 +1074,135 @@ etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
   return "$rc"
 }
 
+# ---------------------------------------------------------------- runs
+# One `isukit bench` = one run, saved under .isukit/runs/<when>/:
+#   bench.log     benchmarker output (auto mode)
+#   hosts.txt     per host: cpu avg/max/iowait + the top processes, sampled 1s
+#   alp.txt       endpoints for this run only (every web host's log, merged)
+#   slow-<h>.txt  pt-query-digest per db host
+#   cpu.pprof     a CPU profile taken while the load was on (first app host)
+#   meta          when / sha / score / note
+# Measuring happens only while `isukit logs on` is in effect, so a logs-off
+# scoring run stays clean. Logs are emptied at the start AND after collecting,
+# so a portal score typed in later (--score) still gets exactly its own run.
+RUNS="$STATE/runs"
+PPROF_PORT_DEFAULT=6060
+
+run_measuring() { # true if logging is on anywhere
+  local h
+  for h in $(hosts_all); do
+    ( HOST_OVERRIDE="$h"; load; logs_are_on ) && return 0
+  done
+  return 1
+}
+
+run_reset() { # run_reset <sample 0|1> -- empty the run logs everywhere; optionally start samplers
+  local h roles rn rm
+  for h in $(hosts_all); do
+    roles=",$(host_roles "$h"),"
+    rn=0; rm=0
+    case "$roles" in *,web,*) rn=1 ;; esac
+    case "$roles" in *,db,*)  rm=1 ;; esac
+    { printf 'RESET_NGINX=%s\nRESET_MYSQL=%s\nSAMPLE=%s\n' "$rn" "$rm" "$1"; remote_script run-start.sh; } \
+      | rsh_stdin "$h" 2>&1 | sed "s|^|    $h: |" >&2 || warn "could not reset/sample on $h"
+  done
+}
+
+pprof_begin() { # start a CPU profile on the first app host, detached; skipped if no endpoint
+  local h port="${PPROF_PORT:-$PPROF_PORT_DEFAULT}" sec="${PPROF_SEC:-30}" delay="${PPROF_DELAY:-5}"
+  h=$(hosts_with app | head -1)
+  [ -n "$h" ] || return 0
+  if [ "$(rsh "$h" "curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://localhost:$port/debug/pprof/" 2>/dev/null)" != 200 ]; then
+    say "pprof: no endpoint on $h:$port — skipped (import _ \"net/http/pprof\" + a listener; PPROF_PORT in config)"
+    return 0
+  fi
+  rsh "$h" "rm -f /tmp/isukit-cpu.pprof /tmp/isukit-cpu.pprof.part; setsid nohup sh -c 'sleep $delay; curl -s --max-time $((sec + 30)) -o /tmp/isukit-cpu.pprof.part \"http://localhost:$port/debug/pprof/profile?seconds=$sec\" && mv /tmp/isukit-cpu.pprof.part /tmp/isukit-cpu.pprof' >/dev/null 2>&1 < /dev/null &" \
+    && say "pprof: ${sec}s CPU profile on $h starts in ${delay}s"
+}
+
+pprof_collect() { # pprof_collect <run-dir> -- wait for the profile to finish, then fetch it
+  local h port="${PPROF_PORT:-$PPROF_PORT_DEFAULT}" i=0 limit
+  h=$(hosts_with app | head -1)
+  [ -n "$h" ] || return 0
+  rsh "$h" "test -e /tmp/isukit-cpu.pprof.part || test -e /tmp/isukit-cpu.pprof" 2>/dev/null || return 0
+  limit=$(( ${PPROF_SEC:-30} + ${PPROF_DELAY:-5} + 5 ))
+  until rsh "$h" "test -s /tmp/isukit-cpu.pprof" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -gt "$limit" ] && { warn "pprof: profile on $h did not finish — skipped"; return 0; }
+    [ "$i" = 1 ] && say "pprof: waiting for the profile on $h to finish"
+    sleep 1
+  done
+  rpull "$h" /tmp/isukit-cpu.pprof "$1/cpu.pprof" && say "pprof: $1/cpu.pprof"
+}
+
+run_alp() { # run_alp <out> -- alp over every web host's log, merged onto the first one
+  local webs first h
+  webs=$(hosts_with web)
+  first=$(printf '%s\n' $webs | head -1)
+  [ -n "$first" ] || return 0
+  if [ "$(printf '%s\n' $webs | wc -l | tr -d ' ')" -gt 1 ]; then
+    rsh "$first" "sudo -n cp /var/log/nginx/isukit.log /tmp/isukit-alp.log 2>/dev/null || sudo -n truncate -s 0 /tmp/isukit-alp.log"
+    for h in $webs; do
+      [ "$h" = "$first" ] && continue
+      rsh "$h" "sudo -n cat /var/log/nginx/isukit.log 2>/dev/null" | rsh "$first" "sudo -n tee -a /tmp/isukit-alp.log >/dev/null"
+    done
+    ( HOST_OVERRIDE="$first"; load; alp_one /tmp/isukit-alp.log ) > "$1" 2>/dev/null
+  else
+    ( HOST_OVERRIDE="$first"; load; alp_one ) > "$1" 2>/dev/null
+  fi
+  [ -s "$1" ] || { rm -f "$1"; warn "alp: nothing to report for this run"; }
+}
+
+run_end() { # run_end <run-dir> <sampled 0|1> -- collect everything, then empty the logs
+  local run="$1" h out
+  if [ "$2" = 1 ]; then
+    : > "$run/hosts.txt"
+    for h in $(hosts_all); do
+      out=$(remote_script run-stop.sh | rsh_stdin "$h" 2>/dev/null)
+      [ -n "$out" ] && printf '%s (%s)\n%s\n\n' "$h" "$(host_roles "$h")" "$(printf '%s\n' "$out" | sed 's/^/  /')" >> "$run/hosts.txt"
+    done
+  fi
+  run_alp "$run/alp.txt"
+  for h in $(hosts_with db); do
+    ( HOST_OVERRIDE="$h"; load; slow_one ) > "$run/slow-$h.txt" 2>/dev/null || rm -f "$run/slow-$h.txt"
+  done
+  [ "$2" = 1 ] && pprof_collect "$run"
+  run_reset 0
+}
+
+run_record() { # run_record <run-dir> <when> <sha> <score> <note> -- scores.tsv + meta
+  printf '%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$1" >> "$STATE/scores.tsv"
+  printf 'when=%s\nsha=%s\nscore=%s\nnote=%s\n' "$2" "$3" "$4" "$5" > "$1/meta"
+}
+
+run_summary() { # run_summary <run-dir> -- the short view printed after a run and by `show`
+  local run="$1" f
+  [ -f "$run/meta" ] && awk '{ i = index($0, "="); printf "%s %s   ", substr($0, 1, i - 1), substr($0, i + 1) } END { print "" }' "$run/meta"
+  if [ -s "$run/hosts.txt" ]; then echo; echo "== hosts (while the load was on) =="; cat "$run/hosts.txt"; fi
+  if [ -s "$run/alp.txt" ]; then echo "== alp (top 15 by sum) =="; head -18 "$run/alp.txt"; echo; fi
+  for f in "$run"/slow-*.txt; do
+    [ -s "$f" ] || continue
+    echo "== slow: $(basename "$f" .txt | sed 's/^slow-//') =="
+    awk '/^# Profile/ { on = 1 } on && NF == 0 { exit } on' "$f"
+    echo
+  done
+  [ -f "$run/cpu.pprof" ] && echo "pprof: go tool pprof -http=: $run/cpu.pprof"
+  return 0
+}
+
+cmd_show() { # show [n | when] -- a saved run; default the latest, 2 = the one before
+  need_state
+  local sel="${1:-1}" run
+  [ -d "$RUNS" ] || die "no saved runs yet — they are written by isukit bench while logs are on"
+  case "$sel" in
+    ''|*[!0-9]*) run=$(ls -1d "$RUNS"/*"$sel"* 2>/dev/null | tail -1) ;;
+    *)           run=$(ls -1d "$RUNS"/* 2>/dev/null | tail -n "$sel" | head -1) ;;
+  esac
+  [ -n "$run" ] && [ -d "$run" ] || die "no run matches '$sel' — see: ls $RUNS"
+  echo "run: $run"
+  run_summary "$run"
+}
+
 # ---------------------------------------------------------------- bench
 cmd_bench() {
   load
@@ -1091,10 +1227,17 @@ cmd_bench() {
     [ -n "${BENCH_CMD:-}" ] || die "BENCH_CMD is still empty after benchprobe — set it by hand: isukit benchcmd '<command>', or switch to the portal: isukit benchmode manual"
   fi
   local note="${*:-}"
-  local sha ts raw
+  local sha ts run raw measure=0
   sha=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
   ts=$(date +%Y%m%d-%H%M%S)
-  raw="$STATE/bench-$ts.log"
+  run="$RUNS/$ts"; mkdir -p "$run"
+  raw="$run/bench.log"
+  run_measuring && measure=1
+  if [ "$measure" = 1 ]; then
+    say "measuring this run (logs are on): logs emptied, samplers on every host"
+    run_reset 1
+    pprof_begin
+  fi
   say "bench on $BENCH: $BENCH_CMD"
   set +e
   rsh "$BENCH" "$BENCH_CMD" 2>&1 | tee "$raw"
@@ -1103,9 +1246,11 @@ cmd_bench() {
   local score
   score=$(grep -oiE '"?(total[ _-]?)?score"?[^0-9-]{0,12}-?[0-9]+' "$raw" | tail -1 | grep -oE '\-?[0-9]+$' || true)
   [ -n "$score" ] || score="?"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$sha" "$score" "${note:-}" "$raw" >> "$STATE/scores.tsv"
-  say "score=$score  sha=$sha  rc=$rc  raw=$raw"
+  [ "$measure" = 1 ] && run_end "$run" 1
+  run_record "$run" "$ts" "$sha" "$score" "${note:-}"
+  say "score=$score  sha=$sha  rc=$rc  run=$run"
   [ "$score" = "?" ] && warn "could not parse a score — read $raw, then fix the line in $STATE/scores.tsv by hand"
+  [ "$measure" = 1 ] && run_summary "$run"
   return 0
 }
 
@@ -1127,12 +1272,16 @@ cmd_bench_manual() {
     esac
   done
   local note="${args[*]:-}"
-  local sha ts
+  local sha ts run measure=0 sampled=0
   sha=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
   ts=$(date +%Y%m%d-%H%M%S)
+  run="$RUNS/$ts"
+  run_measuring && measure=1
 
   if [ "$fail_flag" = 1 ]; then
-    printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$sha" "FAIL" "${note:-}" "portal" >> "$STATE/scores.tsv"
+    mkdir -p "$run"
+    [ "$measure" = 1 ] && run_end "$run" 0
+    run_record "$run" "$ts" "$sha" "FAIL" "${note:-}"
     say "score=FAIL  sha=$sha  (recorded via --fail)"
     return 0
   fi
@@ -1142,6 +1291,15 @@ cmd_bench_manual() {
     say "  rerun:  isukit bench --score <N>"
     say "  or paste the score below"
     if [ -t 0 ]; then
+      if [ "$measure" = 1 ]; then
+        # an interactive run gets the full window: samplers from now, pprof from
+        # when the portal says the load has started
+        say "measuring this run (logs are on): logs emptied, samplers on every host"
+        run_reset 1; sampled=1
+        printf 'enqueue the run in the portal; press Enter once it is RUNNING (starts the CPU profile): ' >&2
+        read -r _ || true
+        pprof_begin
+      fi
       printf 'portal score: ' >&2
       read -r score || true
     fi
@@ -1154,8 +1312,13 @@ cmd_bench_manual() {
     *) die "score must be an integer, got: $score" ;;
   esac
 
-  printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$sha" "$score" "${note:-}" "portal" >> "$STATE/scores.tsv"
-  say "score=$score  sha=$sha  (recorded from portal)"
+  mkdir -p "$run"
+  # --score without the prompt still gets this run's alp / slow: the logs were
+  # emptied when the previous run was collected
+  [ "$measure" = 1 ] && run_end "$run" "$sampled"
+  run_record "$run" "$ts" "$sha" "$score" "${note:-}"
+  say "score=$score  sha=$sha  (recorded from portal)  run=$run"
+  [ "$measure" = 1 ] && run_summary "$run"
   return 0
 }
 
@@ -1167,16 +1330,17 @@ cmd_score() {
 
 # ---------------------------------------------------------------- analysis
 cmd_alp() { load; on_hosts web alp_one; }
-alp_one() {
+alp_one() { # alp_one [log] -- default: this host's live isukit.log
+  local log="${1:-/var/log/nginx/isukit.log}"
   rsh "$APP" "command -v alp >/dev/null" || {
     warn "alp not installed on $APP — installing"
     setup_one
     rsh "$APP" "command -v alp >/dev/null" || die "alp still not installed after isukit setup — install by hand on $APP"
   }
-  rsh "$APP" "sudo -n test -s /var/log/nginx/isukit.log 2>/dev/null" || \
-    die "no isukit.log (or it's empty) — run: isukit logs on, then a bench"
+  rsh "$APP" "sudo -n test -s '$log' 2>/dev/null" || \
+    die "no requests in $log — run: isukit logs on, then a bench"
   say "alp (sorted by summed response time — the only ranking that matters)"
-  rsh "$APP" "sudo -n alp ltsv --file=/var/log/nginx/isukit.log --sort=sum -r --limit=30 \
+  rsh "$APP" "sudo -n alp ltsv --file='$log' --sort=sum -r --limit=30 \
     -m '/api/[^/]+/[0-9a-zA-Z-]+,/[0-9a-zA-Z-]{20,}' 2>&1 | head -50"
 }
 
@@ -1805,10 +1969,18 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     isukit etc pull                     server etc/ -> local etc/ (isukit's own logging
                                          edits stripped)
     isukit bench [note] [--score N] [--fail]
-                                         auto mode: run BENCH_CMD, record score+sha
+                                         auto mode: run BENCH_CMD, record score+sha;
+                                         while logs are on it also empties the logs,
+                                         samples every host each second, takes a
+                                         pprof during the load and saves it all to
+                                         .isukit/runs/<when>/ (isukit show)
                                          manual mode: no ssh — prints portal instructions;
                                          --score N (or a paste prompt) supplies the score,
                                          --fail records FAIL for an errored run
+    isukit show [n | when]              a saved run: per-host CPU and top processes
+                                         while the load was on, alp, slow, pprof.
+                                         1 = latest (default), 2 = the one before.
+                                         bench saves these while logs are on
     isukit alp                          top endpoints by SUMMED response time
     isukit slow                         top queries by total time
     isukit pprof [sec] [port]           pull a Go CPU profile
@@ -1845,6 +2017,8 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     EXTRA_UNITS    space-separated extra units 'restart'/'finalize' also restart
     EXTRA_HOSTS    space-separated extra app instances (used until .isukit/hosts exists)
     BENCH_MODE     auto (ssh + BENCH_CMD) or manual (portal, paste the score)
+    PPROF_PORT     pprof listener on app hosts (default 6060); PPROF_SEC (30) and
+                   PPROF_DELAY (5) shape the profile bench takes during the load
     ETC_REPO       server dir whose etc/ holds linked configs (default: git root of
                    the probed SRC_DIR, else SRC_DIR)
 
@@ -1887,6 +2061,7 @@ main() {
     etc)      cmd_etc "$@" ;;
     bench)    cmd_bench "$@" ;;
     score)    cmd_score ;;
+    show)     cmd_show "$@" ;;
     alp)      cmd_alp ;;
     slow)     cmd_slow ;;
     pprof)    cmd_pprof "$@" ;;

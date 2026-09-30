@@ -29,6 +29,9 @@
     isukit bench "added idx X"   # スコアを記録（manualモードでは値の入力を求められる）
     isukit ship "added idx X"    # 全部commit + push + draft PR、1変更1コミット
     isukit score                 # 全履歴
+    isukit show [n]              # 保存した回の結果（1 = 最新、2 = その前）
+
+`logs on` の間の `isukit bench` は、1回ごとに計測を区切って `.isukit/runs/<日時>/` に保存する：ベンチの開始時に全台のログを空にし、ベンチ中は全台の CPU とプロセスごとの使用率を1秒ごとに記録し、app の1台目で負荷がかかっている最中の pprof（`PPROF_SEC` 秒、既定30秒）を取る。終わったら、台ごとの使用率の要約・alp（web の台が複数なら全台のログをまとめて集計）・db の台ごとの slow・`cpu.pprof`・ベンチの出力を保存して、要約を表示する。どの台（どのプロセス）が張り付いていたかで、次に見るもの（slow か pprof か）が決まる。manual モードでも、プロンプトに答えれば同じように記録する。`--score N` で後からスコアだけ入れた場合も、その回の alp / slow は残る（ログは記録のたびに空にしているので、前回の記録以降の分になる）。`logs off` の間は何も計測しない。
 
 ## ミドルウェア設定を git で管理
 

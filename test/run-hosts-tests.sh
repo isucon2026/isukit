@@ -20,14 +20,17 @@ ISUKIT_SOURCED=1
 set +e +u +o pipefail   # isukit's own strict mode; the harness checks by hand
 
 CALLS="$WORK/calls"
-rsh() { # record "<host> <command>"; everything "succeeds"
+rsh() { # record "<host> <command>"; everything "succeeds" (LOGS_OFF=1: logging reads as off)
   printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"
+  case "$*" in *00-isukit.conf*) [ "${LOGS_OFF:-0}" = 1 ] && return 1 ;; esac
   return 0
 }
 rsh_stdin() { # record "<host> stdin:" + the VAR= lines the caller prepended
   local body
   body=$(cat)
-  printf '%s stdin: %s\n' "$1" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|REPO)=' | tr '\n' ' ')" >> "$CALLS"
+  local tag=""
+  case "$body" in *"Closes the measurement window"*) tag="run-stop " ;; esac
+  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE)=' | tr '\n' ' ')" >> "$CALLS"
   return 0
 }
 say()  { :; }
@@ -181,6 +184,58 @@ t_etc_push_fleet_followups_once() {
   check -z "$(grep 'systemctl restart' "$CALLS")"      # deploy restarts right after
 }
 
+t_bench_measures_run() {
+  setup_state isu1 "" "$ROLES"
+  sed -i.bak "s|^BENCH_MODE=manual|BENCH_MODE=auto|; s|^BENCH_CMD=''|BENCH_CMD='./bench'|" .isukit/config && rm -f .isukit/config.bak
+  load
+  cmd_bench "idx" >/dev/null 2>&1
+  # window opened on every host, each emptying only the logs its roles write
+  check -n "$(grep '^isu1 stdin: RESET_NGINX=1 RESET_MYSQL=0 SAMPLE=1' "$CALLS")"
+  check -n "$(grep '^isu2 stdin: RESET_NGINX=0 RESET_MYSQL=0 SAMPLE=1' "$CALLS")"
+  check -n "$(grep '^isu3 stdin: RESET_NGINX=0 RESET_MYSQL=1 SAMPLE=1' "$CALLS")"
+  check "$(hosts_called 'stdin: run-stop')" = "isu1 isu2 isu3"
+  check "$(hosts_called 'alp ltsv')" = "isu1"
+  check "$(hosts_called 'pt-query-digest --limit')" = "isu3"
+  # the bench ran between opening and closing the window
+  local open bench close
+  open=$(grep -n 'SAMPLE=1' "$CALLS" | tail -1 | cut -d: -f1)
+  bench=$(grep -n '^bench ./bench' "$CALLS" | cut -d: -f1)
+  close=$(grep -n 'run-stop' "$CALLS" | head -1 | cut -d: -f1)
+  check -n "$bench"
+  check "$open" -lt "${bench:-0}"
+  check "${bench:-0}" -lt "$close"
+  # and the logs are emptied again after collecting, for the next record
+  check "$(grep 'SAMPLE=0' "$CALLS" | awk '{print $1}' | tr '\n' ' ')" = "isu1 isu2 isu3 "
+  local run
+  run=$(ls -1d .isukit/runs/* | tail -1)
+  check -f "$run/meta"
+  check -n "$(grep '^note=idx' "$run/meta")"
+  check -n "$(awk -F'\t' -v r="$run" '$5 == r' .isukit/scores.tsv)"
+}
+
+t_bench_clean_when_logs_off() {
+  setup_state isu1 "" "$ROLES"
+  sed -i.bak "s|^BENCH_MODE=manual|BENCH_MODE=auto|; s|^BENCH_CMD=''|BENCH_CMD='./bench'|" .isukit/config && rm -f .isukit/config.bak
+  load
+  # logs_are_on also asks mysql; make that read "off" too
+  rsh() { printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"; case "$*" in *00-isukit.conf*) return 1 ;; esac; return 0; }
+  cmd_bench "final" >/dev/null 2>&1
+  check -z "$(grep -E 'SAMPLE=|run-stop|alp ltsv|pt-query-digest' "$CALLS")"
+  check -n "$(grep '^bench ./bench' "$CALLS")"
+}
+
+t_manual_score_collects_run() {
+  setup_state isu1 "" "$ROLES"
+  load
+  cmd_bench --score 1234 "portal run" </dev/null >/dev/null 2>&1
+  # no window was opened (no prompt), but this run's logs are still collected
+  check -z "$(grep 'SAMPLE=1' "$CALLS")"
+  check "$(hosts_called 'alp ltsv')" = "isu1"
+  check "$(hosts_called 'pt-query-digest --limit')" = "isu3"
+  check "$(grep -c 'SAMPLE=0' "$CALLS")" = 3
+  check -n "$(awk -F'\t' '$3 == 1234 && $4 == "portal run"' .isukit/scores.tsv)"
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -190,6 +245,9 @@ case_ host-role-seeds-hosts-file      t_host_role_seeds_file
 case_ on-hosts-isolates-and-continues t_on_hosts_isolates_and_continues
 case_ deploy-each-app-host-restart-once t_deploy_builds_each_app_host_restarts_once
 case_ etc-push-followups-run-once     t_etc_push_fleet_followups_once
+case_ bench-measures-one-run          t_bench_measures_run
+case_ bench-clean-when-logs-off       t_bench_clean_when_logs_off
+case_ manual-score-collects-its-run   t_manual_score_collects_run
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]
