@@ -37,7 +37,7 @@
     isukit etc push             # 手元の etc/ → サーバー。変わった層だけ reload / restart
     isukit etc pull             # サーバーの etc/ → 手元の etc/
 
-`adopt` は `nginx.conf`・有効なサイト設定・`[mysqld]` を含む `.cnf`・アプリの unit ファイルを自動で探し、それぞれ `<サーバーの repo>/etc/`（例：`etc/nginx/sites-available/isucon.conf`）に移して `/etc` からシンボリックリンクを張る。置き換えたファイルは `/etc/isukit-orig/<同じパス>` にバックアップする（`sites-enabled/*` などの include で読み込まれないよう、元の場所には置かない）。そのあと層ごとに確認し（`nginx -t` + reload、`daemon-reload`、mysql 再起動 + mysql ユーザーがリンク先を読めるか + 設定値が実際に反映されているか）、失敗した層だけ元に戻す。Ubuntu では、mysqld がリンク先を読めるように AppArmor の許可も追加する。repo にすでに同じファイルがあれば（repo からサーバーを作り直す場合）、repo 側が優先される。`/etc` がリンク済みなら、`deploy` が先に `etc push` を行う。サーバー側の repo は、probe で見つけた `SRC_DIR` の git ルート（`.isukit/config` の `ETC_REPO` で上書き可）。サーバー側で動くスクリプトは `remote/` にある。
+`adopt` は `nginx.conf`・有効なサイト設定・`[mysqld]` を含む `.cnf`・アプリの unit ファイルを自動で探し、それぞれ `<サーバーの repo>/etc/`（例：`etc/nginx/sites-available/isucon.conf`）に移して `/etc` からシンボリックリンクを張る。置き換えたファイルは `/etc/isukit-orig/<同じパス>` にバックアップする（`sites-enabled/*` などの include で読み込まれないよう、元の場所には置かない）。そのあと層ごとに確認し（`nginx -t` + reload、`daemon-reload`、mysql 再起動 + mysql ユーザーがリンク先を読めるか + 設定値が実際に反映されているか）、失敗した層だけ元に戻す。Ubuntu では、mysqld がリンク先を読めるように AppArmor の許可も追加する。repo にすでに同じファイルがあれば（repo からサーバーを作り直す場合）、repo 側が優先される。`/etc` がリンク済みなら、`deploy` が先に `etc push` を行う。サーバー側の repo は、probe で見つけた `SRC_DIR` の git ルート（`.isukit/config` の `ETC_REPO` で上書き可）。サーバー側で動くスクリプトは `remote/` にある。複数台では `etc pull` が全台から取り込み、台ごとに中身が違うファイル（db の台だけ調整した `mysqld.cnf` など）は、どちらかで黙って上書きしないよう取り込まずに知らせる。
 
 `isukit probe` はスコア付きヒューリスティックでアプリのsystemd unitを選ぶ。保証ではない — 理由は下の「なぜリポジトリを読まずにサーバーに聞くのか」を参照。選択が外れていたら：
 
@@ -112,6 +112,6 @@ ISUCONのリポジトリ構成は何ひとつ安定していない。isucon9, 10
 - `deploy` はGoアプリを前提としており、systemdが既にexecしている正確なパスへビルドする。他言語実装は手でデプロイする。
 - `SSH_OPTS`（config）は全ての `ssh`/`scp` 呼び出しに付与される — カスタム鍵、カスタムポート、カスタム設定ファイルなど。`ssh` は `-p <port>`、`scp` は `-P <port>` と大文字小文字が違う点に注意 — 手でポートフラグを組み立てる場合は両方の形が要る。
 - `EXTRA_UNITS`（config）はスペース区切りの追加unitリストで、`restart`/`finalize` は検出した `APP_UNIT` と一緒にこれらも再起動する — matcher/mock/simulator系のサービスを別unitとして持つ年向け。
-- `EXTRA_HOSTS`（config）はスペース区切りの追加アプリインスタンスのリスト（`isukit host add <target>` で設定）。`restart` と `finalize` はどちらも全ホストを回るが、インスタンス間の再起動順は保証されない。
+- 複数インスタンスは `isukit host role <target> <役割>` で `.isukit/hosts` に役割（`app` / `web` / `db`）を書く。`deploy`・`restart`・`pprof` は app の台、nginx ログと `alp` は web の台、スロークエリと `slow` は db の台、`etc`・`os`・`finalize` は全台で動く。役割は isukit の送り先を決めるだけで、MySQL を止める・`bind-address`・`DB_HOST` などの構成変更は手で行う。`.isukit/hosts` が無いときは `EXTRA_HOSTS`（`isukit host add <target>` で設定）がアプリの台として扱われる。インスタンス間の再起動順は保証されない。
 - `BENCH_MODE`（config）は `auto`（`BENCH_CMD` をベンチホストへsshして実行）か `manual`（コンテストポータルで実行をキューし、`isukit bench --score <N>` でスコアを記録）のどちらか。`isukit benchprobe` はベンチマーカーのバイナリが見つからないと自動で `manual` モードを検出する。本番環境（ISUCON11以降）ではベンチマークはWebポータルから起動されssh経由ではないので、`manual` モードは失敗ではなく正しい本番状態。モードの切り替えは `isukit benchmode <mode>`。manualモードでは、合格した実行の記録に `isukit bench --score <N> "<note>"`、エラーで終わった実行の記録に `isukit bench --fail "<note>"` を使う。
 - `isukit revert [<sha>]` は `isukit/*` ブランチ上の1コミットを取り消す — 競技中に`scores.tsv`の記録を失わずに悪い変更を戻すときに使う。

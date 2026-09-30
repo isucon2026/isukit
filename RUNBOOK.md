@@ -221,14 +221,20 @@ isukit host app   ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem
 isukit host bench ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem   # 練習で1台に寄せる場合は app と同じでよい
 ```
 
-複数のアプリインスタンスがある場合（ISUCON2026予定）、追加のホストを登録：
+複数インスタンスの場合（ISUCON2026予定）は、ホストごとに役割を付ける。役割は `app`（アプリ）・`web`（nginx）・`db`（MySQL）の組み合わせ：
 
 ```
-isukit host add ubuntu@43.207.152.141 -i ~/.ssh/isukit-sandbox.pem
-isukit host add ubuntu@43.207.152.142 -i ~/.ssh/isukit-sandbox.pem
+isukit host role ubuntu@43.207.152.140 web,app   # 1台目: nginx + アプリ（isukit go で指定した台）
+isukit host role ubuntu@43.207.152.141 app       # 2台目: アプリだけ
+isukit host role ubuntu@43.207.152.142 db        # 3台目: MySQL だけ
+isukit hosts                                     # 役割と、各台で動いているべき unit の一覧
 ```
 
-`restart` と `finalize` はすべてのホストを回す（ただし再起動順は保証されない）。
+役割は `.isukit/hosts` に書かれ、各コマンドはそれを見て動く台を決める：`deploy` / `restart` / `pprof` は app の台、nginx のログと `alp` は web の台、スロークエリログと `slow` は db の台、`etc` と `os` は全台。`finalize` は全台を再起動し、それぞれの役割に必要な unit が自分で上がってくるかを確かめる（再起動順は保証されない）。`isukit go -i <鍵>` で作った ssh 設定は、追加した台にも同じ鍵・ユーザー・ポートを使う。
+
+役割は「isukit がどの台に何をするか」を決めるだけで、構成そのものは変えない。app の台の MySQL を止める（`systemctl disable --now mysql`）、db の台の `bind-address` と接続ユーザー、アプリの DB 接続先（`env.sh` の `DB_HOST` など）は、今のところ手で行う。
+
+`.isukit/hosts` が無いときは従来どおり：`isukit go` の台がすべての役割を持ち、`isukit host add` で足した台はアプリ（app）として扱う。
 
 #### 台数
 
@@ -520,7 +526,9 @@ isukit os       # サーバーのスナップショット（uptime / vmstat / io
 isukit go <repo-url> <host> -i <鍵>   # 丸ごと1コマンド：clone→probe→setup→logs→benchprobe
 isukit init <repo-url> [dir]   # clone（既存ディレクトリはそのまま採用）＋ work ブランチ
 isukit host app|bench <target> # ssh先を .isukit/config に設定（'local' も可）
-isukit host add <target>       # 追加ホストを EXTRA_HOSTS に追加
+isukit host add <target>       # 追加ホストをアプリの台として追加
+isukit host role <target> <役割> # app / web / db をカンマ区切りで（.isukit/hosts に書く）
+isukit hosts                   # ホストと役割、各台で動いているべき unit の一覧
 isukit probe                   # サーバーを調査して .isukit/manifest を書く。インフラ変更後は毎回
 isukit benchprobe              # ベンチマーカーを発見して BENCH_CMD を自動生成（probe が自動で呼ぶ）
 isukit benchcmd '<行>'         # BENCH_CMD を手で上書き／引数なしで現在値を表示
