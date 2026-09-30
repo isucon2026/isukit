@@ -1184,23 +1184,26 @@ run_reset() { # run_reset <sample 0|1> -- empty the run logs everywhere; optiona
   done
 }
 
-pprof_begin() { # start a CPU profile on the first app host, detached; skipped if no endpoint
-  local h port="${PPROF_PORT:-$PPROF_PORT_DEFAULT}" sec="${PPROF_SEC:-30}" delay="${PPROF_DELAY:-5}"
+pprof_begin() { # pprof_begin <run-dir> -- start a CPU profile on the first app host, detached
+  local run="$1" h port="${PPROF_PORT:-$PPROF_PORT_DEFAULT}" sec="${PPROF_SEC:-30}" delay="${PPROF_DELAY:-5}"
   h=$(hosts_with app | head -1)
   [ -n "$h" ] || return 0
+  # a profile left by an earlier run (or `isukit pprof`) must never pass for this one
+  rsh "$h" "rm -f /tmp/isukit-cpu.pprof /tmp/isukit-cpu.pprof.part" 2>/dev/null || true
   if [ "$(rsh "$h" "curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://localhost:$port/debug/pprof/" 2>/dev/null)" != 200 ]; then
     say "pprof: no endpoint on $h:$port — skipped (import _ \"net/http/pprof\" + a listener; PPROF_PORT in config)"
     return 0
   fi
-  rsh "$h" "rm -f /tmp/isukit-cpu.pprof /tmp/isukit-cpu.pprof.part; setsid nohup sh -c 'sleep $delay; curl -s --max-time $((sec + 30)) -o /tmp/isukit-cpu.pprof.part \"http://localhost:$port/debug/pprof/profile?seconds=$sec\" && mv /tmp/isukit-cpu.pprof.part /tmp/isukit-cpu.pprof' >/dev/null 2>&1 < /dev/null &" \
+  rsh "$h" "setsid nohup sh -c 'sleep $delay; curl -s --max-time $((sec + 30)) -o /tmp/isukit-cpu.pprof.part \"http://localhost:$port/debug/pprof/profile?seconds=$sec\" && mv /tmp/isukit-cpu.pprof.part /tmp/isukit-cpu.pprof' >/dev/null 2>&1 < /dev/null &" \
+    && : > "$run/.pprof-started" \
     && say "pprof: ${sec}s CPU profile on $h starts in ${delay}s"
+  return 0
 }
 
 pprof_collect() { # pprof_collect <run-dir> -- wait for the profile to finish, then fetch it
   local h port="${PPROF_PORT:-$PPROF_PORT_DEFAULT}" i=0 limit
   h=$(hosts_with app | head -1)
-  [ -n "$h" ] || return 0
-  rsh "$h" "test -e /tmp/isukit-cpu.pprof.part || test -e /tmp/isukit-cpu.pprof" 2>/dev/null || return 0
+  [ -n "$h" ] && [ -f "$1/.pprof-started" ] || return 0
   limit=$(( ${PPROF_SEC:-30} + ${PPROF_DELAY:-5} + 5 ))
   until rsh "$h" "test -s /tmp/isukit-cpu.pprof" 2>/dev/null; do
     i=$((i + 1))
@@ -1208,7 +1211,8 @@ pprof_collect() { # pprof_collect <run-dir> -- wait for the profile to finish, t
     [ "$i" = 1 ] && say "pprof: waiting for the profile on $h to finish"
     sleep 1
   done
-  rpull "$h" /tmp/isukit-cpu.pprof "$1/cpu.pprof" && say "pprof: $1/cpu.pprof"
+  if rpull "$h" /tmp/isukit-cpu.pprof "$1/cpu.pprof"; then say "pprof: $1/cpu.pprof"; else warn "pprof: could not fetch the profile from $h"; fi
+  rm -f "$1/.pprof-started"
 }
 
 run_alp() { # run_alp <out> -- alp over every web host's log, merged onto the first one
@@ -1217,33 +1221,44 @@ run_alp() { # run_alp <out> -- alp over every web host's log, merged onto the fi
   first=$(printf '%s\n' $webs | head -1)
   [ -n "$first" ] || return 0
   if [ "$(printf '%s\n' $webs | wc -l | tr -d ' ')" -gt 1 ]; then
-    rsh "$first" "sudo -n cp /var/log/nginx/isukit.log /tmp/isukit-alp.log 2>/dev/null || sudo -n truncate -s 0 /tmp/isukit-alp.log"
+    rsh "$first" "sudo -n cp /var/log/nginx/isukit.log /tmp/isukit-alp.log 2>/dev/null || sudo -n truncate -s 0 /tmp/isukit-alp.log" \
+      || warn "alp: could not stage the merged log on $first"
     for h in $webs; do
       [ "$h" = "$first" ] && continue
-      rsh "$h" "sudo -n cat /var/log/nginx/isukit.log 2>/dev/null" | rsh "$first" "sudo -n tee -a /tmp/isukit-alp.log >/dev/null"
+      rsh "$h" "sudo -n cat /var/log/nginx/isukit.log 2>/dev/null" | rsh "$first" "sudo -n tee -a /tmp/isukit-alp.log >/dev/null" \
+        || warn "alp: could not merge $h's log — alp shows the other web hosts only"
     done
-    ( HOST_OVERRIDE="$first"; load; alp_one /tmp/isukit-alp.log ) > "$1" 2>/dev/null
+    ( HOST_OVERRIDE="$first"; load; alp_one /tmp/isukit-alp.log ) > "$1" 2>/dev/null || true
   else
-    ( HOST_OVERRIDE="$first"; load; alp_one ) > "$1" 2>/dev/null
+    ( HOST_OVERRIDE="$first"; load; alp_one ) > "$1" 2>/dev/null || true
   fi
   [ -s "$1" ] || { rm -f "$1"; warn "alp: nothing to report for this run"; }
 }
 
 run_end() { # run_end <run-dir> <sampled 0|1> -- collect everything, then empty the logs
+  # Called in a subshell after the score is recorded. Every step may fail on its
+  # own (a host down, an empty log after a failed /initialize); none may stop
+  # the rest, least of all the reset the next run depends on.
   local run="$1" h out
   if [ "$2" = 1 ]; then
     : > "$run/hosts.txt"
     for h in $(hosts_all); do
-      out=$(remote_script run-stop.sh | rsh_stdin "$h" 2>/dev/null)
+      out=$(remote_script run-stop.sh | rsh_stdin "$h" 2>/dev/null) || out=""
       [ -n "$out" ] && printf '%s (%s)\n%s\n\n' "$h" "$(host_roles "$h")" "$(printf '%s\n' "$out" | sed 's/^/  /')" >> "$run/hosts.txt"
     done
   fi
-  run_alp "$run/alp.txt"
+  run_alp "$run/alp.txt" || warn "alp: could not collect this run"
   for h in $(hosts_with db); do
     ( HOST_OVERRIDE="$h"; load; slow_one ) > "$run/slow-$h.txt" 2>/dev/null || rm -f "$run/slow-$h.txt"
   done
-  [ "$2" = 1 ] && pprof_collect "$run"
-  run_reset 0
+  if [ "$2" = 1 ]; then pprof_collect "$run" || warn "pprof: could not collect this run"; fi
+  run_reset 0 || warn "could not empty the logs for the next run — the next record may include this one"
+  return 0
+}
+
+run_collect() { # run_collect <run-dir> <sampled 0|1> -- run_end, isolated: its failure is only a warning
+  ( set +e; run_end "$@" ) || warn "collecting $1 stopped partway — the score is recorded; see what was saved: isukit show"
+  return 0
 }
 
 run_record() { # run_record <run-dir> <when> <sha> <score> <note> -- scores.tsv + meta
@@ -1272,7 +1287,11 @@ cmd_show() { # show [n | when] -- a saved run; default the latest, 2 = the one b
   [ -d "$RUNS" ] || die "no saved runs yet — they are written by isukit bench while logs are on"
   case "$sel" in
     ''|*[!0-9]*) run=$(ls -1d "$RUNS"/*"$sel"* 2>/dev/null | tail -1) ;;
-    *)           run=$(ls -1d "$RUNS"/* 2>/dev/null | tail -n "$sel" | head -1) ;;
+    *)
+      local count
+      count=$(ls -1d "$RUNS"/* 2>/dev/null | wc -l | tr -d ' ')
+      [ "$sel" -ge 1 ] && [ "$sel" -le "$count" ] || die "only $count saved run(s) — show takes 1..$count"
+      run=$(ls -1d "$RUNS"/* 2>/dev/null | tail -n "$sel" | head -1) ;;
   esac
   [ -n "$run" ] && [ -d "$run" ] || die "no run matches '$sel' — see: ls $RUNS"
   echo "run: $run"
@@ -1312,7 +1331,7 @@ cmd_bench() {
   if [ "$measure" = 1 ]; then
     say "measuring this run (logs are on): logs emptied, samplers on every host"
     run_reset 1
-    pprof_begin
+    pprof_begin "$run"
   fi
   say "bench on $BENCH: $BENCH_CMD"
   set +e
@@ -1322,8 +1341,8 @@ cmd_bench() {
   local score
   score=$(grep -oiE '"?(total[ _-]?)?score"?[^0-9-]{0,12}-?[0-9]+' "$raw" | tail -1 | grep -oE '\-?[0-9]+$' || true)
   [ -n "$score" ] || score="?"
-  [ "$measure" = 1 ] && run_end "$run" 1
   run_record "$run" "$ts" "$sha" "$score" "${note:-}"
+  [ "$measure" = 1 ] && run_collect "$run" 1
   say "score=$score  sha=$sha  rc=$rc  run=$run"
   [ "$score" = "?" ] && warn "could not parse a score — read $raw, then fix the line in $STATE/scores.tsv by hand"
   [ "$measure" = 1 ] && run_summary "$run"
@@ -1356,8 +1375,8 @@ cmd_bench_manual() {
 
   if [ "$fail_flag" = 1 ]; then
     mkdir -p "$run"
-    [ "$measure" = 1 ] && run_end "$run" 0
     run_record "$run" "$ts" "$sha" "FAIL" "${note:-}"
+    [ "$measure" = 1 ] && run_collect "$run" 0
     say "score=FAIL  sha=$sha  (recorded via --fail)"
     return 0
   fi
@@ -1374,7 +1393,8 @@ cmd_bench_manual() {
         run_reset 1; sampled=1
         printf 'enqueue the run in the portal; press Enter once it is RUNNING (starts the CPU profile): ' >&2
         read -r _ || true
-        pprof_begin
+        mkdir -p "$run"
+        pprof_begin "$run"
       fi
       printf 'portal score: ' >&2
       read -r score || true
@@ -1391,8 +1411,8 @@ cmd_bench_manual() {
   mkdir -p "$run"
   # --score without the prompt still gets this run's alp / slow: the logs were
   # emptied when the previous run was collected
-  [ "$measure" = 1 ] && run_end "$run" "$sampled"
   run_record "$run" "$ts" "$sha" "$score" "${note:-}"
+  [ "$measure" = 1 ] && run_collect "$run" "$sampled"
   say "score=$score  sha=$sha  (recorded from portal)  run=$run"
   [ "$measure" = 1 ] && run_summary "$run"
   return 0

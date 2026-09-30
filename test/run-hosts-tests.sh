@@ -288,6 +288,42 @@ t_catchall_follows_app_key() {
   check "$(grep -c '^Host \*$' .isukit/ssh_config)" = 1
 }
 
+t_bench_records_score_when_collection_fails() {
+  setup_state isu1 "" "$ROLES"
+  sed -i.bak "s|^BENCH_MODE=manual|BENCH_MODE=auto|; s|^BENCH_CMD=''|BENCH_CMD='./bench'|" .isukit/config && rm -f .isukit/config.bak
+  # an empty log after a failed /initialize: alp_one dies, and a host is down for run-stop
+  rsh() {
+    printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"
+    case "$*" in *"test -s"*) return 1 ;; esac
+    case "$1 $*" in bench*) echo "score: 777" ;; esac
+    return 0
+  }
+  rsh_stdin() { cat >/dev/null; [ "$1" = isu2 ] && return 255; return 0; }
+  # the real command runs under isukit's own strict mode
+  ( set -euo pipefail; load; cmd_bench "empty run" ) >/dev/null 2>&1
+  check -n "$(awk -F'\t' '$3 == 777 && $4 == "empty run"' .isukit/scores.tsv)"
+  check -f "$(ls -1d .isukit/runs/* | tail -1)/meta"
+}
+
+t_stale_pprof_never_saved() {
+  setup_state isu1 "" "$ROLES"
+  sed -i.bak "s|^BENCH_MODE=manual|BENCH_MODE=auto|; s|^BENCH_CMD=''|BENCH_CMD='./bench'|" .isukit/config && rm -f .isukit/config.bak
+  load
+  rpull() { printf 'PULLED %s\n' "$2" >> "$CALLS"; }
+  cmd_bench "no endpoint" >/dev/null 2>&1        # curl gets no 200: the profile is skipped
+  check -n "$(grep 'rm -f /tmp/isukit-cpu.pprof' "$CALLS")"   # old files cleared regardless
+  check -z "$(grep PULLED "$CALLS")"
+  check ! -e "$(ls -1d .isukit/runs/* | tail -1)/cpu.pprof"
+}
+
+t_show_out_of_range() {
+  setup_state isu1 "" "$ROLES"
+  mkdir -p .isukit/runs/20260101-000000 .isukit/runs/20260102-000000
+  ( cmd_show 3 ) >/dev/null 2>&1; check "$?" != 0
+  ( cmd_show 0 ) >/dev/null 2>&1; check "$?" != 0
+  check -n "$(cmd_show 2 2>/dev/null | grep 'runs/20260101-000000')"
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -304,6 +340,9 @@ case_ logs-space-guard-on-db-hosts    t_logs_space_guard_on_db_hosts
 case_ etc-pull-leaves-out-disagreeing t_etc_pull_leaves_out_disagreeing_files
 case_ host-app-moves-hosts-line       t_host_app_moves_hosts_line
 case_ catchall-follows-app-key        t_catchall_follows_app_key
+case_ bench-records-score-on-failure  t_bench_records_score_when_collection_fails
+case_ stale-pprof-never-saved         t_stale_pprof_never_saved
+case_ show-out-of-range-errors        t_show_out_of_range
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]
