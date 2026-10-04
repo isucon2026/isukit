@@ -4,10 +4,13 @@
 # Args after the script (via `bash -s --`) are forwarded to the freshly
 # installed isukit, so this also works as a one-shot:
 #   curl -fsSL .../install.sh | bash -s -- go <repo-url> ubuntu@1.2.3.4 -i ~/.ssh/key.pem
+# Contest day: install the frozen tag, not whatever main is that morning:
+#   curl -fsSL .../install.sh | ISUKIT_REF=v1.0.0 bash
 set -euo pipefail
 
 REPO_URL="https://github.com/isucon2026/isukit"
 SRC="${ISUKIT_HOME:-$HOME/.isukit-src}"
+REF="${ISUKIT_REF:-}"   # a tag / branch / commit to pin to; empty = follow main
 
 say()  { printf '\033[36m:: %s\033[0m\n' "$*" >&2; }
 warn() { printf '\033[33m~~ %s\033[0m\n' "$*" >&2; }
@@ -22,11 +25,19 @@ if [ -d "$SRC/.git" ]; then
     git -C "$SRC" remote set-url origin "$REPO_URL"
   fi
   say "updating $SRC"
-  git -C "$SRC" pull --ff-only
+  git -C "$SRC" fetch -q --tags origin
+  if [ -n "$REF" ]; then
+    git -C "$SRC" checkout -q "$REF" || die "no such ref: $REF"
+  else
+    # a previous pinned install leaves a detached HEAD: go back to main first
+    git -C "$SRC" checkout -q main && git -C "$SRC" pull -q --ff-only
+  fi
 else
   say "cloning $REPO_URL to $SRC"
-  git clone "$REPO_URL" "$SRC"
+  git clone -q "$REPO_URL" "$SRC"
+  [ -z "$REF" ] || git -C "$SRC" checkout -q "$REF" || die "no such ref: $REF"
 fi
+[ -z "$REF" ] || say "pinned to $REF ($(git -C "$SRC" rev-parse --short HEAD))"
 
 pick_bin_dir() {
   if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then

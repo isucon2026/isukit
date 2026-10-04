@@ -123,8 +123,16 @@ first_ip=$(pick_ip "$(printf '%s' "$first_row" | awk '{print $3}')" "$(printf '%
 
 echo >&2
 say "ready-to-paste commands (adjust ssh user if the AMI isn't ubuntu):"
-echo "  isukit go <repo-url> ubuntu@${first_ip} -i $KEY_FILE" >&2
+{
+  echo "  # no team repo yet (T+0): ONE person builds it from ${prefix}-1"
+  echo "  isukit go --new <team>/<repo> ubuntu@${first_ip} -i $KEY_FILE --invite <teammate>,<teammate>"
+  echo "  # everyone else, once it exists:"
+  echo "  isukit go <repo-url> ubuntu@${first_ip} -i $KEY_FILE"
+  echo "  # every box starts as an identical copy; give each its roles (re-assign when you split):"
+  echo "  isukit host role ubuntu@${first_ip} web,app,db  # ${prefix}-1"
+} >&2
 printf '%s\n' "$info" | awk -v n="${prefix}-1" '$1!=n' | while read -r name iid pub priv; do
   ip=$(pick_ip "$pub" "$priv")
-  echo "  isukit host add ubuntu@${ip}  # $name" >&2
+  echo "  isukit host role ubuntu@${ip} app  # $name (private $priv)" >&2
 done
+echo "  isukit hosts" >&2

@@ -108,6 +108,22 @@ cmd_unit() {
 # Same discipline as PROBE_SCRIPT — read it off the binary's own --help,
 # never a per-year lookup table.
 
+bench_target_host() { # where the benchmarker must aim: 127.0.0.1 on the app box itself, else the app's private IP
+  # compared by address, not by ssh name: isukit-app and isukit-bench may be
+  # two aliases for one box, and a separate bench box must not hit itself
+  local app_ip bench_ips
+  app_ip=$(rsh "$APP" "hostname -I 2>/dev/null" 2>/dev/null | awk '{print $1}')
+  bench_ips=$(rsh "$BENCH" "hostname -I 2>/dev/null" 2>/dev/null || true)
+  if [ -z "$app_ip" ] || [ "$APP" = "$BENCH" ]; then
+    echo 127.0.0.1
+    return 0
+  fi
+  case " $bench_ips " in
+    *" $app_ip "*) echo 127.0.0.1 ;;
+    *)             echo "$app_ip" ;;
+  esac
+}
+
 cmd_benchprobe() {
   load
   say "probing benchmarker on $BENCH"
@@ -131,15 +147,21 @@ cmd_benchprobe() {
     rpull "$BENCH" "$BENCH_HELP_FILE" "$STATE/bench-help.txt" 2>/dev/null || warn "could not pull help text ($BENCH_HELP_FILE)"
   fi
 
-  local binbase cmdline
+  local binbase cmdline target scheme=http
   binbase=$(basename "$BENCH_BIN")
   cmdline="cd ${BENCH_DIR:-.} && ./$binbase"
   [ -n "${BENCH_SUBCMD:-}" ] && cmdline="$cmdline $BENCH_SUBCMD"
+  target=$(bench_target_host)
+  [ "${BENCH_HAS_SSL_FLAG:-0}" = 1 ] && scheme=https
+  # on the app box, the binary's own default (localhost) already points home;
+  # from a separate box every target flag must carry the app's address
   case "${BENCH_TARGET_FLAG:-}" in
-    *-addr) cmdline="$cmdline $BENCH_TARGET_FLAG 127.0.0.1:443" ;;
-    *) ;;
+    *-addr) cmdline="$cmdline $BENCH_TARGET_FLAG $target:443" ;;
+    *url)   [ "$target" = 127.0.0.1 ] || cmdline="$cmdline $BENCH_TARGET_FLAG $scheme://$target" ;;
+    ?*)     [ "$target" = 127.0.0.1 ] || cmdline="$cmdline $BENCH_TARGET_FLAG $target" ;;
   esac
-  [ "${BENCH_HAS_NAMESERVER:-0}" = "1" ] && cmdline="$cmdline ${BENCH_NAMESERVER_FLAG:---nameserver} 127.0.0.1"
+  [ "${BENCH_HAS_NAMESERVER:-0}" = "1" ] && cmdline="$cmdline ${BENCH_NAMESERVER_FLAG:---nameserver} $target"
+  [ "$target" = 127.0.0.1 ] || say "the benchmarker runs on another box: aiming it at the app host's private IP $target"
 
   local composed="sudo -iu ${BENCH_OWNER:-isucon} sh -c '$cmdline'"
   say "composed BENCH_CMD (auto, from the binary's own --help):"

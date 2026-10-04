@@ -399,6 +399,46 @@ t_finalize_http_per_role() {
   check -z "$(grep '^isu3 ' "$CALLS")"
 }
 
+bench_case() { # bench_case <app ips> <bench ips> <target flag> -- the BENCH_CMD benchprobe composes
+  setup_state isu1 "" "$ROLES"
+  sed -i.bak "s|^BENCH_MODE=manual|BENCH_MODE=auto|" .isukit/config && rm -f .isukit/config.bak
+  load
+  APP_IPS="$1"; BENCH_IPS="$2"; TFLAG="$3"
+  rsh() {
+    printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"
+    case "$1 $*" in
+      "isu1 "*"hostname -I"*)  echo "$APP_IPS" ;;
+      "bench "*"hostname -I"*) echo "$BENCH_IPS" ;;
+    esac
+    return 0
+  }
+  rsh_stdin() { cat >/dev/null; printf 'BENCH_BIN=/home/isucon/bench/bench\nBENCH_DIR=/home/isucon/bench\nBENCH_OWNER=isucon\nBENCH_SUBCMD=run\nBENCH_TARGET_FLAG=%s\nBENCH_HAS_NAMESERVER=1\nBENCH_NAMESERVER_FLAG=--nameserver\nBENCH_HAS_SSL_FLAG=1\n' "$TFLAG"; }
+  rpull() { :; }
+  cmd_benchprobe >/dev/null 2>&1
+  ( . .isukit/config; printf '%s\n' "$BENCH_CMD" )
+}
+
+t_bench_target_separate_box() {
+  local cmd
+  cmd=$(bench_case "10.0.1.11 172.17.0.1" "10.0.1.14" --target)
+  check -n "$(printf '%s' "$cmd" | grep -F -- '--target 10.0.1.11')"
+  check -n "$(printf '%s' "$cmd" | grep -F -- '--nameserver 10.0.1.11')"
+  cmd=$(bench_case "10.0.1.11" "10.0.1.14" -target-url)
+  check -n "$(printf '%s' "$cmd" | grep -F -- '-target-url https://10.0.1.11')"
+  cmd=$(bench_case "10.0.1.11" "10.0.1.14" -target-addr)
+  check -n "$(printf '%s' "$cmd" | grep -F -- '-target-addr 10.0.1.11:443')"
+}
+
+t_bench_target_same_box() {
+  local cmd
+  # two ssh aliases, one box: the bench host reports the app's address too
+  cmd=$(bench_case "10.0.1.11" "10.0.1.11 172.17.0.1" --target)
+  check -z "$(printf '%s' "$cmd" | grep -F -- '--target')"     # the binary's own default (localhost)
+  check -n "$(printf '%s' "$cmd" | grep -F -- '--nameserver 127.0.0.1')"
+  cmd=$(bench_case "10.0.1.11" "10.0.1.11" -target-addr)
+  check -n "$(printf '%s' "$cmd" | grep -F -- '-target-addr 127.0.0.1:443')"
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -423,6 +463,8 @@ case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts
 case_ db-left-enabled-reported        t_db_left_enabled_reported
 case_ final-check-per-role            t_final_check_per_role
 case_ finalize-http-per-role          t_finalize_http_per_role
+case_ bench-target-separate-box       t_bench_target_separate_box
+case_ bench-target-same-box           t_bench_target_same_box
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]
