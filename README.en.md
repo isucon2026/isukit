@@ -6,6 +6,14 @@ One command from a repo URL to an instrumented, measurable app host.
 
 ## Install
 
+    go install github.com/isucon2026/isukit/cmd/isukit@latest     # contest day: the frozen tag instead of latest
+
+One binary: it embeds the bash kit (`isukit`, `lib/`, `remote/`) and unpacks it
+into the user cache on first run. `isukit version` shows the tag / commit, so
+the team can check everyone runs the same build.
+
+Without Go, the bash kit still installs as before:
+
     curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash
 
 Clones/updates into `${ISUKIT_HOME:-$HOME/.isukit-src}` and symlinks `isukit`
@@ -169,6 +177,14 @@ contests coexist without stepping on each other.
 Development: `bash test/run-all.sh` (offline suites), `bash test/e2e/run.sh` (the
 real isukit end to end in docker), and shellcheck (command in
 [`test/README.md`](test/README.md)); CI runs all three on every PR.
+
+Moving to Go: `cmd/isukit` is the entry point (cobra). Commands not ported yet
+are handed, argv untouched, to the embedded bash kit (`internal/shell`).
+Config, hosts and how to reach them (`internal/config`, `hosts`, `runner`) are
+built once into `internal/app` and passed to each command. To port one: write
+it in `internal/cli`, drop it from `Passthrough`, and add a test holding its
+output identical to the bash one (`TestHostsMatchesBash` is the pattern).
+`version` and `hosts` are native today.
 
 Layout: `isukit` is only the entry point (config, loading `lib/`, help,
 dispatch). Laptop-side code lives in `lib/` by feature (core, hosts, probe,

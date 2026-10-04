@@ -6,6 +6,12 @@
 
 ## インストール
 
+    go install github.com/isucon2026/isukit/cmd/isukit@latest      # 本番は凍結したタグを指定する（@isucon2026 など）
+
+バイナリひとつで完結する（bash のスクリプト `isukit`・`lib/`・`remote/` を埋め込んでいて、初回実行時にキャッシュへ展開する）。`isukit version` で、全員が同じタグ・コミットを使っているかを確かめられる。
+
+Go が無い環境では、従来どおり bash 版も使える：
+
     curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash
 
 `${ISUKIT_HOME:-$HOME/.isukit-src}` に clone / 更新し、`isukit` を PATH の通る場所にシンボリックリンクする。スクリプトの後ろに続けた引数はそのままインストール直後の `isukit` に渡るので、これは「ゼロから、調査・計測可能な状態のホストまで」を1行で終わらせる本物のワンライナーでもある。
@@ -111,6 +117,8 @@ ISUCONのリポジトリ構成は何ひとつ安定していない。isucon9, 10
 全部git-ignore済み。`.isukit/` はcloneした各問題リポジトリの中に入るので、複数のコンテストが互いに干渉せず同居できる。
 
 開発：`bash test/run-all.sh`（オフラインのテスト）、`bash test/e2e/run.sh`（Docker の中で isukit を通しで動かす）、shellcheck（コマンドは [`test/README.md`](test/README.md)）。3つとも PR ごとに CI で回る。
+
+Go への移行：`cmd/isukit` が入口（cobra）。まだ移していないコマンドは、埋め込んだ bash にそのまま渡す（`internal/shell`）。設定・ホスト・実行は `internal/config`・`hosts`・`runner` を `internal/app` にまとめて各コマンドに渡す。1つ移すときは、`internal/cli` に Go のコマンドを書き、`Passthrough` から外し、bash 版と出力が完全に一致するテストを付ける（`TestHostsMatchesBash` が例）。今 Go で動くのは `version` と `hosts`。
 
 コードの置き場所：`isukit` は入口だけ（設定・`lib/` の読み込み・ヘルプ・コマンドの振り分け）。手元で動く処理は `lib/` に機能ごと（`core`・`hosts`・`probe`・`logs`・`etc`・`runs`・`analyze`・`deploy`・`repo`・`go`・`doctor`）、サーバー側で動く処理は `remote/` に普通のスクリプトとして置き、isukit は ssh で送るだけ。
 

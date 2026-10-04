@@ -17,6 +17,20 @@ jobs:
             isukit lib/*.sh install.sh launch/*.sh remote/*.sh test/*.sh test/e2e/*.sh \
             test/bin/docker test/bin/sudo test/bin/supervisorctl test/bin/free test/bin/nproc
 
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt, vet, test (incl. Go-vs-bash parity), build
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "run gofmt -w"; exit 1; }
+          go vet ./...
+          go test ./...
+          go build ./cmd/isukit
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -26,7 +40,15 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: [bash, go]   # the same scenarios through both entry points
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        if: matrix.entry == 'go'
+        with:
+          go-version-file: go.mod
       - name: end-to-end scenarios in throwaway ubuntu containers
-        run: bash test/e2e/run.sh
+        run: E2E_GO=${{ matrix.entry == 'go' && '1' || '0' }} bash test/e2e/run.sh

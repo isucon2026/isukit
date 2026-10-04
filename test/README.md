@@ -13,6 +13,13 @@ Current state: **70 fixtures, 70 passed, 0 failed** (17 probe + 13 bench + 11 et
 plus **6 e2e scenarios** (`test/e2e/`). CI (`.github/workflows/ci.yml`) runs shellcheck,
 this suite and the e2e scenarios on every PR.
 
+## Go (`go test ./...`)
+
+Unit tests for the Go side, plus parity: `TestHostsMatchesBash` runs the bash
+`isukit hosts` and the Go port on the same `.isukit` layouts and requires identical
+stdout and stderr; `TestEveryBashCommandIsRouted` fails if bash's dispatcher gains a
+command the Go CLI neither passes through nor implements.
+
 ## e2e (`test/e2e/`, needs docker)
 
 ```
