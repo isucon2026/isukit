@@ -32,7 +32,8 @@ rsh_stdin() { # record "<host> stdin:" + the VAR= lines the caller prepended
   local tag=""
   case "$body" in *"Closes the measurement window"*) tag="run-stop " ;; esac
   case "$body" in *"sent by \`isukit alp\`"*) tag="alp-script " ;; esac
-  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE)=' | tr '\n' ' ')" >> "$CALLS"
+  case "$body" in *"sent by \`isukit final check\`"*) tag="final-check " ;; esac
+  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|APP_UNIT|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE)=' | tr '\n' ' ')" >> "$CALLS"
   return 0
 }
 say()  { :; }
@@ -366,6 +367,26 @@ t_db_left_enabled_reported() {
   check -z "$(grep '^isu3 .*is-enabled' "$CALLS")"   # the db host itself is not asked
 }
 
+t_final_check_per_role() {
+  setup_state isu1 "" "$ROLES"
+  load
+  local_repo_root() { printf '%s\n' "$WORK/app"; }
+  mkdir -p "$WORK/app/go" "$WORK/app/vendor/x"
+  printf 'package main\nimport _ "net/http/pprof"\nfunc f() { r := gin.Default(); _ = r }\n' > "$WORK/app/go/main.go"
+  printf 'import _ "net/http/pprof"\n' > "$WORK/app/vendor/x/x.go"     # vendored code is not ours
+  cmd_final_check >/dev/null 2>&1; local rc=$?
+  check "$rc" = 1
+  # each host is asked only about the tiers its roles hold
+  check -n "$(grep '^isu1 stdin: final-check WANT_NGINX=1 WANT_MYSQL=0 APP_UNIT=isu-go.service' "$CALLS")"
+  check -n "$(grep '^isu2 stdin: final-check WANT_NGINX=0 WANT_MYSQL=0 APP_UNIT=isu-go.service' "$CALLS")"
+  check -n "$(grep "^isu3 stdin: final-check WANT_NGINX=0 WANT_MYSQL=1 APP_UNIT=''" "$CALLS")"
+  local code
+  code=$(final_code_findings)
+  check -n "$(printf '%s\n' "$code" | grep '^go/main.go:2	pprof imported')"
+  check -n "$(printf '%s\n' "$code" | grep '^go/main.go:3	gin.Default()')"
+  check -z "$(printf '%s\n' "$code" | grep vendor)"
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -388,6 +409,7 @@ case_ show-out-of-range-errors        t_show_out_of_range
 case_ db-checks-survive-reprobe       t_db_checks_survive_reprobe
 case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts
 case_ db-left-enabled-reported        t_db_left_enabled_reported
+case_ final-check-per-role            t_final_check_per_role
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]

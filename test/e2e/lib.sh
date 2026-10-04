@@ -30,10 +30,12 @@ X
   cat > /stub/systemctl <<'X'
 #!/bin/bash
 echo "systemctl $*" >> /tmp/systemctl.calls
+# units disabled with `disable --now` stay down: is-active / is-enabled say so
 case "$1" in
+  disable) shift; for u in "$@"; do case "$u" in -*) ;; *) echo "$u" >> /tmp/disabled-units ;; esac; done; exit 0 ;;
+  is-active) for u in "$@"; do grep -qxF -- "$u" /tmp/disabled-units 2>/dev/null && exit 3; done; exit 0 ;;
+  is-enabled) grep -qxF -- "${*: -1}" /tmp/disabled-units 2>/dev/null && { echo disabled; exit 1; }; echo enabled; exit 0 ;;
   list-units) printf '%s\n' "isu-go.service loaded active running isu" "nginx.service loaded active running n" "mysql.service loaded active running m" ;;
-  is-active) exit 0 ;;
-  is-enabled) echo enabled ;;
   show)
     p="$3"; u="${*: -1}"
     case "$p:$u" in
@@ -55,9 +57,12 @@ exit 0
 X
   cat > /stub/mysql <<'X'
 #!/bin/bash
+# SET GLOBAL x = v is remembered in /tmp/mysql-vars; SELECT @@GLOBAL.x reads it back
 case "$*" in
   *VERSION*) echo 8.0.36 ;;
   *@@GLOBAL.max_connections*) grep -h max_connections /etc/mysql/mysql.conf.d/mysqld.cnf 2>/dev/null | tr -dc 0-9 ;;
+  *"SELECT @@GLOBAL."*) v="${*##*@@GLOBAL.}"; v="${v%% *}"; awk -v k="$v" '$1 == k { r = $2 } END { print (r == "" ? 0 : r) }' /tmp/mysql-vars 2>/dev/null ;;
+  *"SET GLOBAL"*) printf '%s\n' "$*" | grep -oE 'SET GLOBAL [a-z_]+ ?= ?[^;"]+' | sed -E 's/SET GLOBAL ([a-z_]+) ?= ?(.*)/\1 \2/' >> /tmp/mysql-vars ;;
 esac
 exit 0
 X

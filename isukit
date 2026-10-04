@@ -55,6 +55,8 @@ ISUKIT_LIB="$(kit_dir)/lib"
 . "$ISUKIT_LIB/go.sh"
 # shellcheck source=lib/doctor.sh
 . "$ISUKIT_LIB/doctor.sh"
+# shellcheck source=lib/final.sh
+. "$ISUKIT_LIB/final.sh"
 
 usage() { cat >&2 <<'EOF'
 isukit — repo-agnostic ISUCON bootstrap + measurement loop
@@ -163,6 +165,16 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          commit on an isukit/* branch reachable from HEAD
 
   ENDGAME
+    isukit final check                  list everything that still logs or measures and
+                                         costs score: nginx access_log (on as handed
+                                         out), slow / general log (live and in .cnf),
+                                         sysstat collectors, isukit leftovers, app log
+                                         volume, and in the app's Go code: pprof, request
+                                         loggers, debug switches. changes nothing
+    isukit final apply                  logs off, access_log off + mysql logs off via
+                                         etc/ (a diff you can revert), etc push, clean
+                                         the hosts, check again. app code is reported,
+                                         not edited — fix it, deploy, bench, then ship
     isukit finalize                     logs off -> reboot ALL hosts -> verify -> score
                                          (restart order across hosts is not guaranteed)
 
@@ -232,6 +244,7 @@ main() {
     revert)   cmd_revert "$@" ;;
     deploy)   cmd_deploy "$@" ;;
     restart)  cmd_restart ;;
+    final)    cmd_final "$@" ;;
     finalize) cmd_finalize ;;
     version|--version) cmd_version ;;
     help|--help|-h) usage 0 ;;

@@ -87,6 +87,8 @@ Diagnostic:
 
 Endgame:
 
+    isukit final check          # what still logs or measures (access_log, slow log, loggers, pprof, leftovers)
+    isukit final apply          # turn off what config can, as an etc/ diff; clean every host
     isukit finalize             # logs OFF -> reboot ALL hosts -> verify units -> score
 
 ## Why it probes instead of assuming
