@@ -24,7 +24,7 @@
 ## ループ
 
     isukit bench "baseline"     # BENCH_CMD をベンチホストで実行し、スコアとgit shaを記録
-    isukit alp                  # エンドポイントを合計レスポンスタイム順に
+    isukit alp                  # エンドポイントを合計レスポンスタイム順に（URL のまとめ方はログから自動で作る。--patterns で確認）
     isukit slow                 # クエリを合計時間順に
     isukit pprof 30             # Go CPUプロファイル（pprofが組み込まれていれば）
     isukit attribute            # 直近2回の計測を比較；KEEP / REVERT / INCONCLUSIVE

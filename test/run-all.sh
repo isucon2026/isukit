@@ -33,7 +33,7 @@ BENCH_RC=$?
 echo "$BENCH_OUT"
 
 # etc and hosts cases are scenarios, not per-year fixtures: full runs only.
-ETC_OUT=""; ETC_RC=0; HOSTS_OUT=""; HOSTS_RC=0
+ETC_OUT=""; ETC_RC=0; HOSTS_OUT=""; HOSTS_RC=0; ALP_OUT=""; ALP_RC=0
 if [ -z "$ONLY" ]; then
   ETC_OUT="$("$HERE/run-etc-tests.sh" ${FLAGS+"${FLAGS[@]}"})"
   ETC_RC=$?
@@ -41,6 +41,9 @@ if [ -z "$ONLY" ]; then
   HOSTS_OUT="$("$HERE/run-hosts-tests.sh" ${FLAGS+"${FLAGS[@]}"} 2>/dev/null)"
   HOSTS_RC=$?
   echo "$HOSTS_OUT"
+  ALP_OUT="$("$HERE/run-alp-tests.sh" ${FLAGS+"${FLAGS[@]}"})"
+  ALP_RC=$?
+  echo "$ALP_OUT"
 fi
 
 parse_summary() {
@@ -52,12 +55,13 @@ read -r P_TOTAL P_PASS P_FAIL <<< "$(parse_summary "$PROBE_OUT")"
 read -r B_TOTAL B_PASS B_FAIL <<< "$(parse_summary "$BENCH_OUT")"
 read -r E_TOTAL E_PASS E_FAIL <<< "$(parse_summary "$ETC_OUT")"
 read -r H_TOTAL H_PASS H_FAIL <<< "$(parse_summary "$HOSTS_OUT")"
+read -r A_TOTAL A_PASS A_FAIL <<< "$(parse_summary "$ALP_OUT")"
 
 # A skipped suite prints no summary line, so parse_summary yields empty fields.
-TOTAL=$((${P_TOTAL:-0} + ${B_TOTAL:-0} + ${E_TOTAL:-0} + ${H_TOTAL:-0}))
-PASS=$((${P_PASS:-0} + ${B_PASS:-0} + ${E_PASS:-0} + ${H_PASS:-0}))
-FAIL=$((${P_FAIL:-0} + ${B_FAIL:-0} + ${E_FAIL:-0} + ${H_FAIL:-0}))
+TOTAL=$((${P_TOTAL:-0} + ${B_TOTAL:-0} + ${E_TOTAL:-0} + ${H_TOTAL:-0} + ${A_TOTAL:-0}))
+PASS=$((${P_PASS:-0} + ${B_PASS:-0} + ${E_PASS:-0} + ${H_PASS:-0} + ${A_PASS:-0}))
+FAIL=$((${P_FAIL:-0} + ${B_FAIL:-0} + ${E_FAIL:-0} + ${H_FAIL:-0} + ${A_FAIL:-0}))
 
 echo "$TOTAL fixtures, $PASS passed, $FAIL failed"
 
-[ "$PROBE_RC" -eq 0 ] && [ "$BENCH_RC" -eq 0 ] && [ "$ETC_RC" -eq 0 ] && [ "$HOSTS_RC" -eq 0 ]
+[ "$PROBE_RC" -eq 0 ] && [ "$BENCH_RC" -eq 0 ] && [ "$ETC_RC" -eq 0 ] && [ "$HOSTS_RC" -eq 0 ] && [ "$ALP_RC" -eq 0 ]
