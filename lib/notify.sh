@@ -29,11 +29,21 @@ clip_lines() { # keep whole lines under 1900 bytes: Discord caps a message at 20
   awk '{ n += length($0) + 1; if (n > 1900) { print "…"; exit } print }'
 }
 
+notify_tag() { # which repo is talking: NOTIFY_TAG, else origin's name, else the dir's
+  local t="${NOTIFY_TAG:-}" u
+  if [ -z "$t" ]; then
+    u=$(git -C "$(local_repo_root)" remote get-url origin 2>/dev/null || true)
+    if [ -n "$u" ]; then t=$(basename "$u" .git); else t=$(basename "$(local_repo_root)"); fi
+  fi
+  printf '%s' "$t"
+}
+
 notify() { # notify <bench|ops> -- message on stdin
   local url body
   url=$(notify_url "$1")
   if [ -z "$url" ] || [ "${ISUKIT_NOTIFY:-1}" = 0 ]; then cat >/dev/null; return 0; fi
-  body=$(clip_lines | json_string)
+  # practice and contest repos may post to the same channel by mistake: say which
+  body=$({ printf '[%s] ' "$(notify_tag)"; cat; } | clip_lines | json_string)
   curl -sS -m 5 -o /dev/null -H 'Content-Type: application/json' \
     -d "{\"username\":\"isukit\",\"allowed_mentions\":{\"parse\":[]},\"content\":$body}" "$url" 2>/dev/null \
     || warn "could not post to Discord ($1) — carrying on"

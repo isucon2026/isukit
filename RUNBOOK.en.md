@@ -62,8 +62,13 @@ git push origin v1.0.0
 ```
 
 **After the freeze:** only fixes for things that would hurt on the day — PR,
-green CI, merge, then `v1.0.1`, `v1.0.2`, ... **Tell the team the last tag the
-day before.**
+green CI, merge, then `v1.0.1`, `v1.0.2`, ...
+
+**The day before:**
+- tell the team the last tag
+- switch the three Discord webhook exports in each person's shell profile to
+  **the contest channels** (Discord section). A missed switch shows as contest
+  posts landing in the practice channels — each post starts with `[repo]`.
 
 **On the day** (everyone):
 
@@ -80,7 +85,11 @@ If `go install` does not see a new tag yet, the module proxy is catching up
 ## Discord (channels and notifications)
 
 Keep where people talk apart from where isukit and GitHub post, or the
-discussion scrolls away under the notifications.
+discussion scrolls away under the notifications. **Then split a "practice"
+and a "contest" category**, each with its own #bench, #servers and #git
+(#plan and voice can be shared): practice scores and PRs mixed into the
+contest's make its history unreadable. Every isukit post starts with
+`[<repo>]`, so a mix-up is at least visible (`NOTIFY_TAG` overrides it).
 
 | Channel | Written by | What |
 |---|---|---|
@@ -90,8 +99,9 @@ discussion scrolls away under the notifications.
 | **#git** | GitHub | PRs opened / merged, pushes to main, CI failures |
 | voice | people | open all contest long |
 
-**Before the day:** create a webhook in #bench, #servers and #git (channel
-settings → Integrations → Webhooks) and export the URLs in **each** person's
+**Before the day:** create a webhook in the practice and the contest #bench,
+#servers and #git (channel settings → Integrations → Webhooks; use the
+practice ones until the day before, then switch) and export the URLs in **each** person's
 shell profile, so they work in the repo created on the day too
 (`.isukit/config` also works) — anyone with the URL can post, so never in the
 repo (`isukit.conf` included):

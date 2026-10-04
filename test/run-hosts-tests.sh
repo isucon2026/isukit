@@ -617,7 +617,7 @@ t_notify_bench_message() {
   notify_bench .isukit/runs/b
   local msg
   msg=$(post_text 0)                                  # also proves the payload is valid JSON
-  check -n "$(printf '%s\n' "$msg" | grep -F '📊 **1150**  (+15.0% vs main 1000  KEEP)')"
+  check -n "$(printf '%s\n' "$msg" | grep -F "[$(basename "$WORK")] 📊 **1150**  (+15.0% vs main 1000  KEEP)")"
   check -n "$(printf '%s\n' "$msg" | grep -F 'isukit/idx by bob — "add "idx" on users')"   # quotes and a tab survive
   check -n "$(printf '%s\n' "$msg" | grep -F '· isu1 cpu 94% (isuride 142%)')"
   check -n "$(printf '%s\n' "$msg" | grep -F '· GET ^/api/user/[^/]+/icon$  8.000s')"
@@ -630,7 +630,7 @@ t_notify_ops_and_silence() {
   load; local_server; fake_discord
   DISCORD_WEBHOOK=https://discord.test/all              # one hook: ops goes there too
   ISUKIT_WHO=alice cmd_lock >/dev/null 2>&1
-  check "$(post_text 0)" = "🔒 alice has the servers"
+  check "$(post_text 0)" = "[$(basename "$WORK")] 🔒 alice has the servers"   # which repo is talking
   ( ISUKIT_WHO=bob cmd_unlock --force ) >/dev/null 2>&1
   check -n "$(post_text 1 | grep -F '🔓 bob force-released alice: turn')"
   # Discord down: the command still succeeds

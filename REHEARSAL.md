@@ -20,7 +20,7 @@ gh auth status              # リポジトリ係は必須（go --new が gh で�
 ```
 
 - [ ] 全員の `isukit version` が同じ
-- [ ] Discord に #作戦・#ベンチ・#サーバー・#git を作り、3つの Webhook を各自のシェルの設定に `export` した（RUNBOOK §3.6）
+- [ ] Discord に「練習」カテゴリ（#ベンチ・#サーバー・#git）を作り、その3つの Webhook を各自のシェルの設定に `export` した（RUNBOOK §3.6。本番用は前日に切り替える）
 - [ ] 鍵ファイル（`isukit.pem`）を受け取り、`chmod 600` 済み
 
 **リポジトリ係（AWS 担当）**

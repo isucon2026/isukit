@@ -49,7 +49,7 @@ echo "discord"
 said() { python3 -c 'import json,sys
 for l in open("/tmp/discord.log"):
     print(json.loads(l)["content"])' | grep -qF -- "$1"; }
-check "lock announced"                            said "🔒 alice has the servers"
+check "lock announced, tagged with the repo"      said "[origin] 🔒 alice has the servers"
 check "release announced"                         said "🔓 alice handed the servers back"
 check "bob's score posted with branch and who"    said "📊 **1234**"
 check "  ... and who ran it"                      said "main by bob"
