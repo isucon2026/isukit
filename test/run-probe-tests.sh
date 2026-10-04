@@ -6,7 +6,6 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
-ISUKIT="$REPO_ROOT/isukit"
 FIXTURES_DIR="$HERE/fixtures"
 
 VERBOSE=0
@@ -18,18 +17,10 @@ for a in "$@"; do
   esac
 done
 
-# --- extract PROBE_SCRIPT verbatim from isukit (read-only; never hand-copied).
-extract_probe_script() {
-  awk '
-    /^PROBE_SCRIPT='"'"'$/ { grab=1; next }
-    grab && /^'"'"'$/ { exit }
-    grab { print }
-  ' "$ISUKIT"
-}
-
-RAW_PROBE="$(extract_probe_script)"
+# --- PROBE_SCRIPT is remote/probe.sh, run as-is (read-only; never hand-copied).
+RAW_PROBE="$(cat "$REPO_ROOT/remote/probe.sh" 2>/dev/null)"
 if [ -z "$RAW_PROBE" ]; then
-  echo "FATAL: could not extract PROBE_SCRIPT from $ISUKIT" >&2
+  echo "FATAL: could not read $REPO_ROOT/remote/probe.sh" >&2
   exit 2
 fi
 

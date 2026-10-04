@@ -1,0 +1,3 @@
+# isukit sources files whose paths are only known at runtime (.isukit/config,
+# the manifests, the script's own dir); shellcheck cannot follow them.
+disable=SC1090

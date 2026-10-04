@@ -34,6 +34,7 @@ normalize_ws_arg() { # normalize_ws_arg <token> -- Unicode whitespace-lookalikes
     -e $'s/\xef\xbb\xbf//g'
 }
 expand_tilde() { # expand_tilde <token> -- "~" or "~/..." -> $HOME/...; anything else unchanged
+  # shellcheck disable=SC2088  # matching a literal "~" the shell did not expand
   case "$1" in
     "~")   printf '%s\n' "$HOME" ;;
     "~/"*) printf '%s\n' "$HOME/${1#\~/}" ;;
@@ -405,178 +406,13 @@ cmd_host() {
 
 # ---------------------------------------------------------------- probe
 # The whole point of the kit. Interrogates the RUNNING SERVER, not the repo.
-PROBE_SCRIPT='
-set -u
-S() { printf "%s=%s\n" "$1" "$(printf "%q" "$2")"; }
-SUDO=""; sudo -n true 2>/dev/null && SUDO="sudo -n"
-
-# --- machine
-S HOST_CPUS  "$(nproc 2>/dev/null || echo ?)"
-S HOST_MEM   "$(free -m 2>/dev/null | awk "/^Mem:/{print \$2\"MB\"}")"
-S HOST_OS    "$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}")"
-
-# --- locally-provisioned systemd units (fragment under /etc/systemd/system).
-# This is the year-agnostic hook: catches isuride-go.service, isucondition.go.service,
-# xsuportal-api-golang.service, isuports.service alike, without name guessing.
-UNITS=$(systemctl list-units --type=service --all --no-legend --plain 2>/dev/null | awk "{print \$1}" \
-  | while read -r u; do
-      f=$(systemctl show -p FragmentPath --value "$u" 2>/dev/null)
-      [ "${f#/etc/systemd/system/}" != "$f" ] && echo "$u"
-    done | sort -u | tr "\n" " ")
-S UNITS_LOCAL "$UNITS"
-ACTIVE=""; for u in $UNITS; do systemctl is-active --quiet "$u" && ACTIVE="$ACTIVE $u"; done
-S UNITS_ACTIVE "${ACTIVE# }"
-
-# --- introspect the active app unit: gives workdir, binary, env file, user.
-# Scored, not first-match-wins: alphabetical UNITS_LOCAL order used to hand this
-# to whatever infra unit sorted first (aws-env-*, blackauth, isupipe-cache).
-DENY_PAT="nginx* mysql* mariadb* redis* postgres* docker* containerd* envoy* memcached* aws-* cloud-init* systemd-* ssh* sshd* cron* getty* dbus* snap* unattended* chrony* ntp* rsyslog* datadog* td-agent* filebeat* node_exporter* netdata* envcheck* env-checker* blackauth* *mock* *pdns* *powerdns* *bench*"
-is_denied() {
-  local n="$1" p
-  for p in $DENY_PAT; do
-    [[ "$n" == $p ]] && return 0
-  done
-  return 1
-}
-CANDS=""; BEST=""; BESTSCORE=""
-for u in $ACTIVE; do
-  is_denied "$u" && continue
-  [ "$(systemctl show -p Type --value "$u" 2>/dev/null)" = "oneshot" ] && continue
-  wd=$(systemctl show -p WorkingDirectory --value "$u" 2>/dev/null)
-  execraw=$(systemctl show -p ExecStart --value "$u" 2>/dev/null)
-  execpath=$(printf "%s" "$execraw" | sed "s/.*path=\([^ ]*\).*/\1/")
-  envf=$(systemctl show -p EnvironmentFiles --value "$u" 2>/dev/null | sed "s/ (ignore_errors=[a-z]*)//g")
-  usr=$(systemctl show -p User --value "$u" 2>/dev/null)
-  sc=0
-  [ -n "$wd" ] && [ "${wd#/home/isucon}" != "$wd" ] && sc=$((sc+4))
-  [ "${execpath#/home/isucon}" != "$execpath" ] && sc=$((sc+3))
-  [ -n "$envf" ] && sc=$((sc+2))
-  [ "$usr" = "isucon" ] && sc=$((sc+2))
-  [ "${execraw#*compose}" != "$execraw" ] && [ -n "$wd" ] && [ "${wd#/home/isucon}" != "$wd" ] && sc=$((sc+2))
-  if [ "${execpath#/opt}" != "$execpath" ] || [ "${execpath#/usr/local/bin}" != "$execpath" ]; then
-    [ -z "$wd" ] && sc=$((sc-3))
-  fi
-  CANDS="$CANDS $u:$sc"
-  if [ -z "$BESTSCORE" ] || [ "$sc" -gt "$BESTSCORE" ]; then BEST="$u"; BESTSCORE="$sc"; fi
-done
-CANDS_SORTED=$(printf "%s\n" $CANDS | sort -t: -k2,2 -rn | tr "\n" " ")
-S APP_CANDIDATES "${CANDS_SORTED% }"
-
-APPUNIT="$BEST"; CONFIDENCE="low"
-if [ -n "${APP_UNIT_OVERRIDE:-}" ]; then
-  APPUNIT="$APP_UNIT_OVERRIDE"; CONFIDENCE="override"
-elif [ -n "$BESTSCORE" ] && [ "$BESTSCORE" -ge 6 ]; then
-  CONFIDENCE="high"
-fi
-S APP_UNIT "$APPUNIT"
-S APP_UNIT_CONFIDENCE "$CONFIDENCE"
-if [ -n "$APPUNIT" ]; then
-  S APP_WORKDIR  "$(systemctl show -p WorkingDirectory --value "$APPUNIT")"
-  S APP_EXEC_RAW "$(systemctl show -p ExecStart --value "$APPUNIT")"
-  S APP_EXEC     "$(systemctl show -p ExecStart --value "$APPUNIT" | sed "s/.*path=\([^ ]*\).*/\1/")"
-  S APP_ENVFILE  "$(systemctl show -p EnvironmentFiles --value "$APPUNIT" | sed "s/ (ignore_errors=[a-z]*)//g")"
-  S APP_USER     "$(systemctl show -p User --value "$APPUNIT")"
-fi
-
-# --- process manager. isucon5-final ran every language under supervisord, so the only
-# systemd-visible unit is supervisor.service itself. `systemctl restart supervisor` does
-# restart the app, so keeping it as APP_UNIT is correct -- but it is the manager, not the
-# app, and the per-program handle is supervisorctl. Say which one this is instead of
-# leaving a bare low confidence score to imply it.
-PROC_MANAGER=systemd
-case "$APPUNIT" in
-  supervisor*)
-    PROC_MANAGER=supervisor
-    S SUPERVISOR_PROGRAMS "$($SUDO supervisorctl status 2>/dev/null | awk "{print \$1}" | tr "\n" " ")"
-    ;;
-esac
-S PROC_MANAGER "$PROC_MANAGER"
-
-# --- env file: path varies (env.sh / env / absent). Find it, do not assume.
-ENVF=""
-for c in /home/isucon/env.sh /home/isucon/env /home/isucon/.env; do [ -f "$c" ] && ENVF="$c" && break; done
-S ENV_FILE "$ENVF"
-[ -n "$ENVF" ] && S ENV_KEYS "$(grep -oE "^(export +)?[A-Z_][A-Z0-9_]*" "$ENVF" | sed "s/export *//" | tr "\n" " ")"
-
-# --- source tree on the server + which languages are present
-SRC=""
-for c in /home/isucon/webapp /home/isucon/*/webapp /home/isucon/private_isu/webapp; do [ -d "$c" ] && SRC="$c" && break; done
-S SRC_DIR "$SRC"
-[ -n "$SRC" ] && S SRC_LANGS "$(ls -1 "$SRC" 2>/dev/null | tr "\n" " ")"
-GOMODS=$(find /home/isucon -maxdepth 5 -name go.mod \
-  -not -path "*/vendor/*" -not -path "*/bench*" -not -path "*/blackauth*" \
-  -not -path "*/portal*" -not -path "*/data/*" -not -path "*/env-checker*" \
-  -not -path "*/envcheck*" -not -path "*/tools/*" 2>/dev/null)
-GOMOD=""
-for g in $GOMODS; do [ "${g#*/webapp/}" != "$g" ] && GOMOD="$g" && break; done
-[ -z "$GOMOD" ] && GOMOD=$(printf "%s\n" $GOMODS | head -1)
-S GO_DIR "$(dirname "${GOMOD:-/}" 2>/dev/null)"
-S GO_VER "$(go version 2>/dev/null || echo none)"
-
-# --- web server: nginx is usual, Envoy happened (isucon10-final), h2o/caddy possible
-WEB=""; WEB_SRC=""
-for s in nginx h2o envoy caddy apache2 httpd; do systemctl is-active --quiet "$s" 2>/dev/null && WEB="$s" && WEB_SRC=host && break; done
-# isucon8-final and isucon6-final ran the entire stack under docker-compose: systemctl
-# sees ONE wrapper unit and nothing else, so the systemctl sweep above reports "no web
-# server" on a box that plainly has one. Ask docker before believing that.
-DOCKER_PS=""
-command -v docker >/dev/null 2>&1 && DOCKER_PS="$($SUDO docker ps --format "{{.Image}} {{.Names}}" 2>/dev/null)"
-IN_DOCKER=0
-if [ -z "$WEB" ] && [ -n "$DOCKER_PS" ]; then
-  for s in nginx h2o envoy caddy apache httpd; do
-    printf "%s\n" "$DOCKER_PS" | grep -qi "$s" && WEB="$s" && WEB_SRC=docker && IN_DOCKER=1 && break
-  done
-fi
-S WEB_SERVER "$WEB"
-# host-native nginx only: `nginx -T` on the host cannot see a containerised config, and
-# `isukit logs on` rewrites the host nginx.conf — both are wrong when WEB_SRC=docker.
-if [ "$WEB" = "nginx" ] && [ "$WEB_SRC" = "host" ]; then
-  ALOG_LINES="$($SUDO nginx -T 2>/dev/null | grep -vE "^[[:space:]]*#" | grep -oE "access_log[[:space:]]+[^ ;]+" | awk "{print \$2}")"
-  S NGINX_ACCESS_LOGS "$(printf "%s" "$ALOG_LINES" | tr "\n" " ")"
-  NGINX_LASTLOG=""
-  for p in $ALOG_LINES; do [ "$p" != "off" ] && NGINX_LASTLOG="$p"; done
-  S NGINX_ACCESS_LOG "$NGINX_LASTLOG"
-  S NGINX_CONFS "$($SUDO nginx -T 2>/dev/null | grep -oE "^# configuration file [^:]+" | awk "{print \$4}" | tr "\n" " ")"
-  S NGINX_HAS_CONFD "$($SUDO nginx -T 2>/dev/null | grep -cE "include.*conf\.d" || true)"
-fi
-
-# --- datastores: MySQL/MariaDB usual, SQLite appeared (isucon12-q), redis common
-DB=""
-for s in mysql mariadb postgresql; do systemctl is-active --quiet "$s" 2>/dev/null && DB="$s" && break; done
-if [ -z "$DB" ] && [ -n "$DOCKER_PS" ]; then
-  for s in mysql mariadb postgres; do
-    printf "%s\n" "$DOCKER_PS" | grep -qi "$s" && DB="$s" && IN_DOCKER=1 && break
-  done
-  [ "$DB" = "postgres" ] && DB=postgresql
-fi
-S DB_SERVER "$DB"
-# 1 = at least one of the web/db tiers was found only as a container. Everything that
-# edits host config (logs on, alp, slow) has to be done inside the container instead.
-S STACK_IN_DOCKER "$IN_DOCKER"
-S CACHE "$(for s in redis-server redis memcached; do systemctl is-active --quiet $s 2>/dev/null && echo -n "$s "; done)"
-MYSQL="$SUDO mysql"
-if $MYSQL -e "SELECT 1" >/dev/null 2>&1; then
-  S MYSQL_OK 1
-  S MYSQL_VER  "$($MYSQL -N -B -e "SELECT VERSION()" 2>/dev/null)"
-  S MYSQL_SLOW "$($MYSQL -N -B -e "SELECT @@slow_query_log_file" 2>/dev/null)"
-  S MYSQL_DBS  "$($MYSQL -N -B -e "SHOW DATABASES" 2>/dev/null | grep -vE "^(information_schema|performance_schema|mysql|sys)$" | tr "\n" " ")"
-else
-  S MYSQL_OK 0
-fi
-S SQLITE_FILES "$(find /home/isucon -maxdepth 4 \( -name "*.db" -o -name "*.sqlite*" \) 2>/dev/null | head -5 | tr "\n" " ")"
-
-# --- tooling we depend on
-S HAS_ALP  "$(command -v alp >/dev/null && echo 1 || echo 0)"
-S HAS_PTQD "$(command -v pt-query-digest >/dev/null && echo 1 || echo 0)"
-S HAS_DOCKER "$(command -v docker >/dev/null && echo 1 || echo 0)"
-'
 
 cmd_probe() {
   load
   local override
   override=$( . "$CONF" 2>/dev/null; printf '%s' "${APP_UNIT_OVERRIDE:-}" )
   say "probing app host: $APP"
-  printf 'APP_UNIT_OVERRIDE=%s\n%s\n' "$override" "$PROBE_SCRIPT" | rsh_stdin "$APP" > "$STATE/manifest.tmp" \
+  { printf 'APP_UNIT_OVERRIDE=%s\n' "$override"; remote_script probe.sh; } | rsh_stdin "$APP" > "$STATE/manifest.tmp" \
     || die "probe failed — check connectivity by hand: ssh ${SSH_OPTS:-} $APP true"
   mv "$STATE/manifest.tmp" "$STATE/manifest"
   cat "$STATE/manifest"
@@ -612,7 +448,7 @@ probe_fleet() { # probe_fleet <unit-override> -- every other host into manifest.
     [ "$h" = "$primary" ] && continue
     f=$(host_manifest "$h")
     say "probing $h ($(host_roles "$h"))"
-    if printf 'APP_UNIT_OVERRIDE=%s\n%s\n' "$override" "$PROBE_SCRIPT" | rsh_stdin "$h" > "$f.tmp" 2>/dev/null && [ -s "$f.tmp" ]; then
+    if { printf 'APP_UNIT_OVERRIDE=%s\n' "$override"; remote_script probe.sh; } | rsh_stdin "$h" > "$f.tmp" 2>/dev/null && [ -s "$f.tmp" ]; then
       mv "$f.tmp" "$f"
     else
       rm -f "$f.tmp"; warn "could not probe $h — its checks fall back to what other hosts report"
@@ -659,6 +495,13 @@ db_left_enabled() { # print each non-db host where the fleet's DB unit is still 
   return 0
 }
 
+cmd_version() { # which kit is running: the frozen contest tag, or a sha to report
+  local d rev
+  d=$(kit_dir)
+  rev=$(git -C "$d" describe --tags --always --dirty 2>/dev/null || echo "not a git checkout")
+  printf 'isukit %s (%s) at %s\n' "$KIT_VERSION" "$rev" "$d"
+}
+
 cmd_hosts() {
   load
   local h roles units
@@ -687,91 +530,11 @@ cmd_unit() {
 # The other thing that varies every year: how to invoke the benchmarker.
 # Same discipline as PROBE_SCRIPT — read it off the binary's own --help,
 # never a per-year lookup table.
-BENCH_PROBE_SCRIPT='
-set -u
-S() { printf "%s=%s\n" "$1" "$(printf "%q" "$2")"; }
-
-CANDS=""
-for f in $(find /home/isucon -maxdepth 4 -type f -perm -u+x 2>/dev/null); do
-  case "$f" in
-    */src/*) continue ;;
-    */vendor/*) continue ;;
-    *.go) continue ;;
-  esac
-  b=$(basename "$f")
-  hit=0
-  case "$b" in
-    bench) hit=1 ;;
-    bench_*) hit=1 ;;
-    benchmarker) hit=1 ;;
-    *bench*_linux_*) hit=1 ;;
-  esac
-  [ "$hit" = 1 ] && CANDS="$CANDS $f"
-done
-CANDS="${CANDS# }"
-S BENCH_CANDIDATES "$CANDS"
-
-BEST=""; BESTSIZE=-1
-for f in $CANDS; do
-  if file "$f" 2>/dev/null | grep -q ELF; then
-    sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
-    [ "$sz" -gt "$BESTSIZE" ] && BEST="$f" && BESTSIZE="$sz"
-  fi
-done
-if [ -z "$BEST" ]; then
-  for f in $CANDS; do
-    sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
-    [ "$sz" -gt "$BESTSIZE" ] && BEST="$f" && BESTSIZE="$sz"
-  done
-fi
-S BENCH_BIN "$BEST"
-if [ -n "$BEST" ]; then
-  S BENCH_DIR   "$(dirname "$BEST")"
-  S BENCH_OWNER "$(stat -c %U "$BEST" 2>/dev/null || echo isucon)"
-fi
-
-HELP=""
-if [ -n "$BEST" ]; then
-  HELP="$("$BEST" --help 2>&1 | head -200)"
-  [ -n "$HELP" ] || HELP="$("$BEST" -h 2>&1 | head -200)"
-  [ -n "$HELP" ] || HELP="$("$BEST" help 2>&1 | head -200)"
-fi
-HELPFILE="/tmp/isukit-bench-help.$$"
-printf "%s\n" "$HELP" > "$HELPFILE"
-S BENCH_HELP_FILE "$HELPFILE"
-
-has_tok() {
-  printf "%s\n" "$HELP" | grep -Eq "(^|[^A-Za-z0-9-])$1([^A-Za-z0-9-]|\$)"
-}
-
-TFLAG=""
-for f in -target-addr -target-url --target-url -target-host --target -target --addr -addr; do
-  if [ -z "$TFLAG" ] && has_tok "$f"; then TFLAG="$f"; fi
-done
-S BENCH_TARGET_FLAG "$TFLAG"
-
-NS=0; NSFLAG=""
-if has_tok --nameserver; then NS=1; NSFLAG="--nameserver"; fi
-if [ "$NS" = 0 ] && has_tok -nameserver; then NS=1; NSFLAG="-nameserver"; fi
-S BENCH_HAS_NAMESERVER "$NS"
-S BENCH_NAMESERVER_FLAG "$NSFLAG"
-
-SSL=0
-has_tok --enable-ssl && SSL=1
-has_tok -tls && SSL=1
-S BENCH_HAS_SSL_FLAG "$SSL"
-
-SUB=""
-if printf "%s\n" "$HELP" | grep -Eq "^(COMMANDS:|Available Commands:)"; then
-  has_tok run && SUB="run"
-fi
-S BENCH_SUBCMD "$SUB"
-'
 
 cmd_benchprobe() {
   load
   say "probing benchmarker on $BENCH"
-  printf '%s\n' "$BENCH_PROBE_SCRIPT" | rsh_stdin "$BENCH" > "$STATE/bench-manifest.tmp" \
+  remote_script bench-probe.sh | rsh_stdin "$BENCH" > "$STATE/bench-manifest.tmp" \
     || die "benchprobe failed — check connectivity by hand: ssh ${SSH_OPTS:-} $BENCH true"
   mv "$STATE/bench-manifest.tmp" "$STATE/bench-manifest"
   cat "$STATE/bench-manifest"
@@ -871,78 +634,6 @@ EOS
 }
 
 # ---------------------------------------------------------------- logs
-LOGS_SCRIPT='
-set -u
-SUDO="sudo -n"
-RC=0
-# find -L + readlink -f: once `isukit etc adopt` has run, nginx.conf and the site
-# confs are symlinks into the repo. grep -r skips them, and sed -i on the link
-# would replace it with a plain file and silently cut the repo out. Edit the real
-# file behind every link instead (sites-enabled and sites-available resolve to
-# the same file, hence sort -u).
-ngx_files() { find -L /etc/nginx -type f ! -name "*.isukit-tmp" 2>/dev/null | xargs -r grep -lE "$1" 2>/dev/null | xargs -r readlink -f | sort -u; }
-# --- nginx: LTSV carrying request_time, which the stock "combined" format lacks.
-# WANT_NGINX / WANT_MYSQL: which tiers this host holds (its roles); default both.
-if [ "${WANT_NGINX:-1}" = 1 ] && systemctl is-active --quiet nginx 2>/dev/null; then
-  if [ "$MODE" = on ]; then
-    [ -d /etc/nginx.isukit.bak ] || $SUDO cp -a /etc/nginx /etc/nginx.isukit.bak
-    $SUDO mkdir -p /etc/nginx/conf.d
-    $SUDO tee /etc/nginx/conf.d/00-isukit.conf >/dev/null <<"NGXCONF"
-log_format ltsv "time:$time_iso8601\tmethod:$request_method\turi:$request_uri\tstatus:$status\tsize:$body_bytes_sent\treqtime:$request_time\tapptime:$upstream_response_time\tvhost:$host";
-access_log /var/log/nginx/isukit.log ltsv;
-NGXCONF
-    for f in $(ngx_files "^[[:space:]]*access_log" | grep -v 00-isukit.conf); do
-      $SUDO sed -i.isukit-tmp "s|^\([[:space:]]*\)access_log|\1#isukit# access_log|" "$f" && $SUDO rm -f "$f.isukit-tmp"
-    done
-    NGX_MAIN=$(readlink -f /etc/nginx/nginx.conf)
-    grep -qE "include.*conf\.d" "$NGX_MAIN" 2>/dev/null || \
-      $SUDO sed -i "0,/^http {/s|^http {|http {\n    include /etc/nginx/conf.d/*.conf; # isukit-include|" "$NGX_MAIN"
-    if $SUDO nginx -t && $SUDO systemctl reload nginx; then
-      echo "nginx: ltsv -> /var/log/nginx/isukit.log"
-    else
-      echo "nginx: FAILED to enable ltsv logging" >&2
-      RC=1
-    fi
-  else
-    # Undo exactly what "on" did, by its markers. Restoring /etc/nginx.isukit.bak
-    # wholesale would clobber repo symlinks made after the backup (or resurrect
-    # stale ones), and throw away any tuning done since. The backup stays on disk
-    # for manual recovery only.
-    MARKED=$(ngx_files "#isukit# |# isukit-include$")
-    if [ -f /etc/nginx/conf.d/00-isukit.conf ] || [ -n "$MARKED" ]; then
-      $SUDO rm -f /etc/nginx/conf.d/00-isukit.conf
-      for f in $MARKED; do
-        $SUDO sed -i.isukit-tmp -e "s|#isukit# access_log|access_log|" -e "/# isukit-include$/d" "$f" && $SUDO rm -f "$f.isukit-tmp"
-      done
-      if $SUDO nginx -t && $SUDO systemctl reload nginx; then
-        echo "nginx: isukit logging removed, original access_log lines back"
-      else
-        echo "nginx: FAILED to reload after removing isukit logging (backup: /etc/nginx.isukit.bak)" >&2
-        RC=1
-      fi
-    fi
-  fi
-fi
-# --- mysql: long_query_time=0 captures every query. MUST be off for scoring runs.
-if [ "${WANT_MYSQL:-1}" = 1 ] && $SUDO mysql -e "SELECT 1" >/dev/null 2>&1; then
-  if [ "$MODE" = on ]; then
-    if $SUDO mysql -e "SET GLOBAL slow_query_log_file=\"/tmp/isukit-slow.log\"; SET GLOBAL long_query_time=0; SET GLOBAL slow_query_log=1;" 2>/dev/null; then
-      echo "mysql: slow log -> /tmp/isukit-slow.log (long_query_time=0)"
-    else
-      echo "mysql: FAILED to enable slow log" >&2
-      RC=1
-    fi
-  else
-    if $SUDO mysql -e "SET GLOBAL slow_query_log=0;" 2>/dev/null; then
-      echo "mysql: slow log off"
-    else
-      echo "mysql: FAILED to disable slow log" >&2
-      RC=1
-    fi
-  fi
-fi
-exit $RC
-'
 
 cmd_logs() {
   load
@@ -971,7 +662,7 @@ cmd_logs() {
         warn "could not check free space on /tmp on $h before enabling slow logging"
       fi
     fi
-    printf 'MODE=%s\nWANT_NGINX=%s\nWANT_MYSQL=%s\n%s\n' "$mode" "$wn" "$wm" "$LOGS_SCRIPT" | rsh_stdin "$h" || rc=1
+    { printf 'MODE=%s\nWANT_NGINX=%s\nWANT_MYSQL=%s\n' "$mode" "$wn" "$wm"; remote_script logs.sh; } | rsh_stdin "$h" || rc=1
   done
   # long_query_time applies to new sessions only: make every app host reconnect,
   # wherever the db lives.
@@ -1559,45 +1250,13 @@ cmd_pprof() {
 }
 
 # ---------------------------------------------------------------- os
-OS_SCRIPT='
-set -u
-echo "== uptime =="
-uptime
-
-echo
-echo "== vmstat 1 5 =="
-command -v vmstat >/dev/null 2>&1 && vmstat 1 5 || echo "vmstat not installed (apt install sysstat)"
-
-echo
-echo "== iostat -x 1 3 =="
-command -v iostat >/dev/null 2>&1 && iostat -x 1 3 || echo "iostat not installed (apt install sysstat)"
-
-echo
-echo "== mpstat -P ALL 1 3 =="
-command -v mpstat >/dev/null 2>&1 && mpstat -P ALL 1 3 || echo "mpstat not installed (apt install sysstat)"
-
-echo
-echo "== free -h =="
-free -h
-
-echo
-echo "== df -h =="
-df -h
-
-echo
-echo "== units =="
-for u in $CHECK_UNITS; do
-  st=$(systemctl is-active "$u" 2>/dev/null || true)
-  printf "%s: %s\n" "$u" "${st:-unknown}"
-done
-'
 
 cmd_os() { load; on_hosts all os_one; }
 os_one() {
   local units
   units=$(role_units "$APP")
   say "os snapshot on $APP"
-  printf 'CHECK_UNITS="%s"\n%s\n' "$units" "$OS_SCRIPT" | rsh_stdin "$APP"
+  { printf 'CHECK_UNITS=%q\n' "$units"; remote_script os.sh; } | rsh_stdin "$APP"
 }
 
 # ---------------------------------------------------------------- deploy
@@ -2343,6 +2002,10 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     isukit finalize                     logs off -> reboot ALL hosts -> verify -> score
                                          (restart order across hosts is not guaranteed)
 
+  VERSION
+    isukit version                      the kit's version and git tag/sha — check
+                                         everyone runs the frozen contest tag
+
   CONFIG (.isukit/config)
     SSH_OPTS       extra ssh/scp flags applied to every remote call
     EXTRA_UNITS    space-separated extra units 'restart'/'finalize' also restart
@@ -2395,7 +2058,7 @@ main() {
     bench)    cmd_bench "$@" ;;
     score)    cmd_score ;;
     show)     cmd_show "$@" ;;
-    alp)      cmd_alp ;;
+    alp)      cmd_alp "$@" ;;
     slow)     cmd_slow ;;
     pprof)    cmd_pprof "$@" ;;
     os)       cmd_os ;;
@@ -2406,6 +2069,7 @@ main() {
     deploy)   cmd_deploy "$@" ;;
     restart)  cmd_restart ;;
     finalize) cmd_finalize ;;
+    version|--version) cmd_version ;;
     help|--help|-h) usage 0 ;;
     *)        usage ;;
   esac
