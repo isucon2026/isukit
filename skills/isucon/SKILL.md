@@ -38,15 +38,22 @@ ask a human to enqueue a run in the portal and paste the score. That is correct
 behaviour, not a failure. Do not try to "fix" it by finding a bench binary to run —
 on contest day there isn't one, and hunting for it on the bench host is prohibited.
 
-Then, before touching anything:
+Getting a shell on the servers is **not** part of this loop, and it differs between
+contest day (the day's manual — in ISUCON14 a team CloudFormation template, `isucon@`,
+GitHub keys) and practice (`launch/` + a past AMI, `ubuntu@` + a `.pem`). Read
+`references/environment.md` once; never run `launch/` on contest day unless the manual
+leaves the launch to you.
 
-0. Bring the whole kit up in one command, from the directory you want the problem repo in:
-   `isukit go <repo-url> <app-ssh-target> [-i <keyfile>]`. That clones, writes
-   `.isukit/config`, probes the app host, probes the benchmarker (and so settles
-   `BENCH_MODE`), installs alp + percona-toolkit, and turns logging on. It prints the
-   exact next command for whichever bench mode it landed in — follow that, don't guess.
-   If it half-finishes, `isukit doctor` re-runs the missing pieces; nothing in it is
-   destructive to re-run.
+Then, once you can SSH, before touching anything:
+
+0. Bring the whole kit up in one command, from the directory you want the problem repo in.
+   No team repo yet (T+0): `isukit go --new <team>/<repo> <app-ssh-target> [-i <keyfile>]`
+   — it commits the server's code and config as two baselines plus a CI, and pushes a
+   private repo. Everyone else: `isukit go <repo-url> <app-ssh-target> [-i <keyfile>]`.
+   Both write `.isukit/config`, probe the app host and the benchmarker (settling
+   `BENCH_MODE`), install the tools and turn logging on, and print the exact next command
+   for the bench mode they landed in — follow that, don't guess. If it half-finishes,
+   `isukit doctor` re-runs the missing pieces; nothing in it is destructive to re-run.
 1. Read the contest manual and regulations **in full**. They change every year. Extract
    and write into `.isukit/notes.md`: the score formula, the fail conditions, the
    `/initialize` contract (path, time limit, required response fields), the restart
@@ -64,17 +71,15 @@ Then, before touching anything:
    - `PROC_MANAGER=supervisor` (isucon5-final) means `APP_UNIT` is `supervisor.service`:
      restarting it restarts every language at once. To restart a single program, use
      `supervisorctl restart <program>` with a name from `SUPERVISOR_PROGRAMS`.
-4. If the contest handed out **more than one instance**, register the others:
-   `isukit host add <target>` for each. `restart` and `finalize` then cover all of them.
-   ISUCON2026 explicitly does **not** guarantee the order instances come back in, so never
-   build a fix that assumes one host is up before another.
-5. Take a baseline: `isukit bench baseline`. A loop with no baseline cannot attribute
-   anything.
-
-(Before contest day: `launch/prestage.sh` stages the AWS account, VPC/subnet, security
-group and key pair; at T+0 `launch/launch.sh --ami <org AMI> --type <t> --count <n>` boots
-the instances with instrumentation installed via user-data. See `launch/README.md`. The
-organisers' own launch procedure always wins over these scripts.)
+4. If the contest handed out **more than one instance**, give each its roles:
+   `isukit host role <target> <app,web,db>`, then `isukit probe`, and commit
+   `isukit.hosts` so every teammate's isukit targets the same boxes. deploy / restart go
+   to app hosts, nginx logs and alp to web hosts, the slow log to db hosts, and `finalize`
+   checks each host's roles. ISUCON2026 explicitly does **not** guarantee the order
+   instances come back in, so never build a fix that assumes one host is up before another.
+5. Take a baseline **on main**: `git switch main && isukit logs off && isukit bench baseline`.
+   `attribute` judges every later change against the latest run deployed from main; a loop
+   with no main baseline cannot attribute anything.
 
 ---
 
@@ -91,20 +96,22 @@ measure  ->  diagnose  ->  ONE fix  ->  ship (PR)  ->  re-measure  ->  keep or r
 ```
 isukit logs on          # nginx LTSV + mysql slow log (long_query_time=0)
 isukit bench            # with logging ON — this run is for evidence, not for score
-isukit alp              # endpoints by SUMMED response time
-isukit slow             # queries by total time
-isukit pprof 30         # Go CPU profile, if the app exposes net/http/pprof
-isukit os               # vmstat / iostat / mpstat / free during the last run
+isukit show             # that run, saved: per-host CPU + top processes while loaded,
+                        # alp, slow per db host, a CPU profile taken during the load
 ```
 
-Order matters and the reason is not stylistic: **alp tells you which endpoint, the slow
-log and pprof tell you why.** Going straight to the slow log gets you optimising a query
-that the hot endpoint never calls.
+Read `show` top-down and the order is not stylistic: **the hosts block says which box and
+process was pinned** (mysqld on the db host → the slow log; the app on an app host →
+pprof; everything idle but the score flat → lock waits, external calls, app errors);
+**alp says which endpoint, the slow log and pprof say why.** Going straight to the slow
+log gets you optimising a query that the hot endpoint never calls.
 
-Before you read alp output at all, check that dynamic path segments are grouped. If you
-see `/users/1`, `/users/2`, `/users/3` as separate rows, the ranking is meaningless —
-every real endpoint has been shattered into hundreds of near-zero rows and the actual
-bottleneck is invisible. Fix the `-m` patterns first, re-run alp, then read it.
+Before you read alp output at all, check that dynamic path segments are grouped. isukit
+derives the groups from the log (ids, UUIDs, long tokens, segments with very many values;
+a far busier sibling like `/users/me` stays its own row) — `isukit alp --patterns` shows
+them. If you still see `/users/1`, `/users/2` as separate rows, the ranking is meaningless:
+put your own regexes in `ALP_MATCHES` (`.isukit/config` or the team's `isukit.conf`),
+re-run alp, then read it.
 
 Sort by **SUM**, never by AVG or MAX. The endpoint you must fix is the one consuming the
 most total time. A 4-second endpoint called twice matters less than a 40ms endpoint called
@@ -154,7 +161,8 @@ Prefer, in this order:
 isukit ship "add composite index on reservations(user_id, created_at)"
 ```
 
-This branches, commits just your working-tree change, pushes, and opens a **draft PR**.
+This runs `go build` (and reports `go vet`) first, then branches, commits just your
+working-tree change, pushes, and opens a **draft PR**.
 
 The PR is not a review gate — nobody is going to review it inside eight hours, and the
 server has to actually run the change to score it. It exists for three reasons, all of
@@ -164,23 +172,32 @@ which matter more under time pressure than code review does:
   reads as a list of changes, not a list of numbers.
 - **Revert handle.** When a change turns out to cost score, `isukit revert` takes exactly
   that change back out without disturbing the four good ones you shipped after it.
-- **Parallel safety.** Three humans and an agent editing one checkout is how a team loses
-  an hour to a merge they didn't intend.
+- **Parallel safety.** Two humans and an agent editing one checkout is how a team loses
+  an hour to a merge they didn't intend. Branches are parallel; **the servers are not** —
+  measuring is a turn (next section).
 
 ### 1.5 Re-measure
 
+Measuring is a turn on shared servers. On your branch:
+
 ```
-isukit logs off         # logging costs real score — never score with it on
-isukit bench "<what you changed>"
+git fetch && git rebase origin/main   # main as it is now + your one change
+isukit lock                           # others' deploy / bench now stop with "busy — <you>"
+isukit deploy                         # refuses uncommitted work or a branch without main
+isukit logs off                       # logging costs real score — never score with it on
+isukit bench "<what you changed>"     # posted to Discord #bench, shared on isukit-runs
 ```
 
 ### 1.6 Keep or revert
 
-`isukit attribute` compares against the previous run **with the noise band applied**.
-Its verdict is one of:
+`isukit attribute` compares the latest run against **the latest run deployed from main**
+(not against the other person's branch), **with the noise band applied**. Its verdict is
+one of:
 
-- **KEEP** — improvement is outside the noise band. Move on to the next bottleneck.
-- **REVERT** — regression is outside the noise band. `isukit revert` and take the lesson.
+- **KEEP** — improvement is outside the noise band. Merge the PR (`gh pr merge`) right
+  away so the other branch can rebase onto it, then `isukit unlock`.
+- **REVERT** — regression is outside the noise band. Do not merge; `git switch main &&
+  isukit deploy` to put main back, `isukit unlock`, and take the lesson.
 - **INCONCLUSIVE** — the delta is inside the noise band. This is the common case and the
   one where discipline is actually tested. Re-run the bench 2–3 more times before
   deciding. Do **not** stack the next change on top of an unresolved one; you will never
@@ -244,8 +261,13 @@ post-contest restart verification, scoring zero. It is always the same cause: se
 applied at runtime that were never written down — `SET GLOBAL ...`, a manually-started
 service, a file in `/tmp`, a process launched by hand outside systemd.
 
-`isukit finalize` runs the real thing: logs off → reboot → verify units came back →
-score. **Run it at least twice during the contest**, not once at the end. p1ass lost
+`isukit finalize` runs the real thing: logs off → reboot every host → verify each host's
+roles came back → ask every web host (through nginx) and app host (directly) over HTTP →
+score. Set `FINAL_CHECK_PATH` to a path that touches the DB, so "up but cannot reach the
+DB" fails here and not in the organisers' re-run. **Run it at least twice during the
+contest**, not once at the end. Before the last one, `isukit final check` lists everything
+that still logs or measures (nginx access_log, the slow log, app loggers, pprof) and
+`isukit final apply` turns off what config can. p1ass lost
 ISUCON10 qualification to an `/initialize` timeout that only ever appeared after a cold
 boot — it was invisible in every warm run they did all day.
 
@@ -281,8 +303,8 @@ Rough shape of an 8-hour contest. Adjust, but know when you are behind:
 | +1:00 | `isukit probe` correct, logs on, **baseline score recorded** |
 | +1:30 | First alp/slow triage done, first fix shipped and measured |
 | +5:00 | Stop starting architecture-scale changes; nothing new gets finished after this |
-| +7:00 | **Feature freeze.** `isukit finalize` from here on. Only revert, never add |
-| +7:30 | Logs off, final `isukit finalize`, confirm the restart run scores |
+| +7:00 | **Feature freeze.** `isukit final check` / `final apply`, then `isukit finalize`. Only revert, never add |
+| +7:30 | Final `isukit finalize`, confirm every host answers and the restart run scores |
 | +8:00 | Hands off the servers |
 
 The +7:00 freeze is the one people skip and regret. A change that is measured but not
@@ -296,6 +318,10 @@ The kit discovers everything at runtime precisely because ISUCON's shape changes
 year, so discovery failing is an expected state, not a broken tool. Work the failure:
 
 - `isukit doctor` — self-diagnoses the config/manifest and repairs what it can.
+- "busy — <who>: <what> for Nm" → someone else's turn. `isukit lock status`; only if they
+  are gone, `isukit unlock --force`.
+- deploy refuses → commit (`isukit ship`) and `git rebase origin/main`; `--force` only if
+  you accept that nobody can reproduce that run.
 - Probe picked the wrong app unit → `isukit unit <name>` (read `APP_CANDIDATES` first).
 - No bench binary found → you are in portal mode. Set `isukit benchmode manual` and carry
   on; this is normal on contest day.
@@ -321,3 +347,5 @@ score history as if it were true.
 - `references/variance.md` — how past ISUCONs differed year to year. Read this when
   discovery fails and you need to know what shapes are plausible.
 - `references/initialize.md` — the `/initialize` contract and how teams have failed it.
+- `references/environment.md` — getting a shell: contest day (the manual; ISUCON14's
+  CloudFormation / `isucon@` / GitHub keys, account risks) vs practice (`launch/`).

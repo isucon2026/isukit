@@ -9,47 +9,40 @@
 
 ## 0. 三行で
 
-1. `isukit` は「計測できる状態のサーバー」を用意して、**スコアと git sha を毎回記録する**ための1枚のbashスクリプト。インストールは `curl | bash` の1行（§1）。
-2. サーバーは**自分のAWSアカウントでEC2を立てる**。本番も練習も同じ形。
-3. 3人で触るなら**最初の5分で自分たちのリポジトリを作る**（§3）。ここを飛ばすと並行作業できない。
+1. `isukit` は「計測できる状態のサーバー」を用意して、**変更1つごとにスコアと計測を記録し、2人で同じ記録を見ながら回す**ための道具。インストールは `go install` の1行（§1）。
+2. **サーバーに SSH できるまでは、当日のマニュアルに従う**（§2-1。ISUCON14 は CloudFormation のテンプレート）。練習は `launch/` で自分で立てる（§2-2）。SSH できた後の手順は、本番も練習も同じ。
+3. **最初の5分で、自分たちのリポジトリを作る**（§3、`isukit go --new`）。ここを飛ばすと並行作業できない。
 
 ---
 
 ## 1. isukit とは何か
 
-**bash 1枚**。依存なし。配布元は https://github.com/isucon2026/isukit （public）。
+配布元は https://github.com/isucon2026/isukit （public）。**Go のバイナリ1つ**で、中に bash のスクリプト（手元で動く `lib/`、サーバーで動く `remote/`）を埋め込んでいる。サーバー側に入れるものは無い（ssh でスクリプトを送るだけ）。
 
-インストールは1行。
-
-```
-curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash
-```
-
-`~/.isukit-src` に clone して、`isukit` を PATH の通る場所に置く。2回目以降は更新になる。PATH が通っていなければ、追加すべき `export` 行をそのまま出力するのでそれを貼る。
-
-**インストールと立ち上げを丸ごと1行**にもできる（`--` の後ろはそのまま `isukit` に渡る）。
+インストールは1行（本番は凍結したタグを指定する。§3.5）：
 
 ```
-curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
-  | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/<key>.pem
+go install github.com/isucon2026/isukit/cmd/isukit@latest
+isukit version                      # 全員で同じ表示か確かめる
 ```
 
-これで clone → サーバー調査 → `alp`/`pt-query-digest` 導入 → 計測ログ有効化 → **ベンチマーカーの発見と `BENCH_CMD` の自動生成**まで終わる。手で入れる値は3つだけ：**リポジトリURL、サーバーのIP、鍵のパス**。それ以外は全部サーバーに聞いて決まる。
+Go が無い環境では bash 版も入る：`curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash`
 
-やることは4つだけ。
+主なコマンド（全部は §9 と `isukit help`）：
 
 | | コマンド | 中身 |
 |---|---|---|
-| **① 立ち上げ** | `isukit go <repo-url> <app-host> [bench-host]` | リポジトリを clone → サーバーを調査 → `alp` と `pt-query-digest` を入れる → nginx の LTSV ログと `long_query_time=0` を有効化 |
-| **② 発見** | `isukit probe` | **動いているサーバーに直接聞く**。systemd unit / `WorkingDirectory` / `ExecStart` / env ファイル / データストアを特定して `.isukit/manifest` に書く |
-| **③ 計測** | `isukit bench` `alp` `slow` `attribute` `score` | スコアと git sha を毎回記録。エンドポイントとクエリを**合計時間**で並べる。`attribute` で 2 回の計測の有意差を判定 |
-| **④ 反映** | `isukit deploy` `ship` `revert` `finalize` | systemd が実際に exec しているパスへビルドして再起動 / 変更を commit + push + PR。終盤の締め処理 |
+| **① 立ち上げ** | `isukit go --new <team>/<repo> <app-host>`／`isukit go <repo-url> <app-host>` | リポジトリを作る（サーバーのコード・設定をベースラインに）／clone する → サーバーを調査 → ツール導入 → 計測ログ on → ベンチの準備 |
+| **② 構成** | `isukit host role` `hosts` `probe` `etc` `env` | 台ごとの役割（app / web / db）、全台の調査、設定（`etc/`）と env ファイル（`hosts/<台>/`）を repo で管理 |
+| **③ 計測** | `isukit bench` `show` `score` `attribute` `alp` `slow` `pprof` | 1回のベンチごとに、台ごとの CPU・alp・slow・pprof を保存（`show`）。`attribute` は **main の最新の回**と比べて KEEP / REVERT / 判断不能 |
+| **④ 反映** | `isukit lock` `deploy` `ship` `unlock` | サーバーを自分の番として確保 → main を含むコミット済みのブランチだけを deploy。`ship` はビルドを確かめてから PR |
+| **⑤ 締め** | `isukit final check` `final apply` `finalize` | スコアを削る出力を止める → 全台再起動 → サービスと HTTP の応答を確認 → 最終ベンチ |
 
 **なぜリポジトリを読まずにサーバーに聞くのか**：ISUCONのリポジトリ構成は年ごとに何も安定していない。Goのディレクトリ名（`webapp/go` か `webapp/golang`）、ビルド方法（Make → Taskfile → 無し）、docker composeの有無、unit名、envファイルの場所と変数名、ベンチのフラグ名 — 全部違う。systemdに問い合わせるのが全年代で唯一通用する手。
 
-**`BENCH_CMD` は自動生成される。ただし唯一「人間が直す可能性が高い」行**でもある。ベンチマーカーのターゲット指定フラグは毎年違う（`-target` / `-target-url` / `-target-host` / `-target-addr` / `--target`）ので、isukit は**ベンチマーカーのバイナリ自身の `--help` を読んで**使えるフラグを判定し、コマンド行を組み立てて表示する。違っていたら `isukit benchcmd '<正しい行>'` で上書きする（エディタ不要）。使えるフラグの全一覧は `.isukit/bench-help.txt` に落ちている。
+**`BENCH_CMD` は自動生成される（練習のみ。本番はポータル）。ただし唯一「人間が直す可能性が高い」行**でもある。ベンチマーカーのターゲット指定フラグは毎年違う（`-target` / `-target-url` / `-target-host` / `-target-addr` / `--target`）ので、isukit は**ベンチマーカーのバイナリ自身の `--help` を読んで**使えるフラグを判定し、コマンド行を組み立てて表示する。違っていたら `isukit benchcmd '<正しい行>'` で上書きする。使えるフラグの全一覧は `.isukit/bench-help.txt` に落ちている。
 
-コンテストごとの状態は clone した各リポジトリの中の `.isukit/` に入るので、複数のコンテストを並行して持てる。
+チームで共有するもの（役割 `isukit.hosts`、共通の設定 `isukit.conf`、`etc/`、`hosts/<台>/`、計測の記録 `isukit-runs` ブランチ）は repo に入り、各自の手元に残るのは ssh 先や鍵（`.isukit/config`）と probe の結果だけ。
 
 ### ベンチモード：`auto` と `manual`
 
@@ -62,14 +55,14 @@ isukit bench --score 12345 "インデックス追加"    # スコアを記録
 isukit bench --fail "タイムアウト"                # 失敗を記録
 ```
 
-`isukit benchprobe` はベンチマーカーバイナリが見つからないと自動的に `manual` 模式に切り替える。モードはいつでも手で変更可：
+`isukit benchprobe` はベンチマーカーバイナリが見つからないと自動的に `manual` モードに切り替える。モードはいつでも手で変更可：
 
 ```
 isukit benchmode manual      # auto ↔ manual に切替
 isukit benchmode             # 現在のモードを表示
 ```
 
-**なぜ重要か**：本番ではベンチマーカーはサーバー上に無く、ポータルから起動される。スコアを ssh で記録できるのは練習だけ。本番に向けての練習では `manual` 模式を試しておく。
+**なぜ重要か**：本番ではベンチマーカーはサーバー上に無く、ポータルから起動される。スコアを ssh で記録できるのは練習だけ。本番に向けての練習では `manual` モードを試しておく。
 
 ---
 
@@ -78,16 +71,32 @@ isukit benchmode             # 現在のモードを表示
 ### 2-1. 本番（ISUCON2026）
 
 - **日時：2026年10月31日（土）10:00–18:00 JST（8時間）**
-- チームは**最大3名**
+- チームは**最大3名**（このチームは2人）
 - **参加登録は2026年8月上旬に締切済み**（300/300/335の3回に分けて募集し全枠終了）
 - 今年の運営窓口はさくらインターネット（会場は大阪本社 Blooming Camp）。ただし**競技環境はさくらのクラウドではなくAWS**
-- レギュレーション：**選手が自分でAWSアカウントを用意し、競技開始後に運営が指定するAMIを自分のEC2で起動する**
+- レギュレーション（[原文](https://isucon.net/archives/59966826.html)）：「チームはAWSアカウントを各自で用意し、それを競技に利用する」「主催者より競技開始後に指定されたAMIを利用してAmazon EC2上にサーバーを起動」「**具体的なサーバー起動方法については当日マニュアルに記載される**」。インスタンスの種類・台数・リージョンは書かれていない
 
-つまり本番の環境構築は「運営がAMI IDを公開 → 自分のアカウントでEC2を起動 → 自分の鍵でSSH」。踏み台もVPNもない。**練習で作る手順がそのまま本番の手順になる。**
+**サーバーに SSH できるまでは、当日のマニュアルに従う。** isukit はそこには関わらず、SSH できた後（§3 の `go --new`）から使う。
 
-ログイン先は `ubuntu` ユーザー、そこから `sudo su - isucon`。
+**ISUCON14 の実例**（レギュレーションの文言は今年とほぼ同じ。同じ形になると考えて準備し、決めつけない）：
+
+- ポータルから**チームごとの CloudFormation のテンプレート**をダウンロード（共有厳禁）し、**東京リージョン**でスタックを作る。c5.large×3、EBS、EIP×3、VPC、セキュリティグループ、Lambda、IAM ロール×2 ができる
+- SSH は **`isucon` ユーザーと、GitHub に登録した鍵**（`ubuntu` や `.pem` ではない）。isukit には `isucon@<IP>` を渡す（GitHub の鍵がいつもの鍵なら `-i` は不要）
+- **事前の「AWS 環境チェック」が全選手に必須**（期限までにスタックを作って SSH を確認しないと失格）。今年の告知が出たらすぐやる
+- テンプレートで作られたもの（インスタンスタイプ、セキュリティグループ、`envcheck`）を変えると失格
+
+**会社のサンドボックスを使う場合の注意**（レギュレーション：「既存のリソースや設定に起因して発生する問題についてはサポートを行わない」）：
+
+- **IAM ロールの作成が禁止**されているとスタックが作れない。主催者のロールにアカウント内の他のリソースを読む権限を渡すことが、会社の規程上問題になる場合もある
+- 22番ポートを全世界に開けたセキュリティグループを**自動で閉じる仕組み**があると、**競技中に SSH が切れる**
+- vCPU（c5.large×3 = 6）と EIP（3つ）の上限
+- → 事前にサンドボックスの管理者に確認し、**予備のチーム用 AWS アカウント**も用意しておく
 
 ### 2-2. 練習（各自の AWS サンドボックスアカウント）
+
+> **ここは練習専用の手順。** 本番のテンプレートはチーム固有でポータルからしか手に入らないので、練習は過去問の AMI を `launch/` で自分で立てる。本番の起動は §2-1（当日のマニュアル）。`launch/` を本番で使うのは、マニュアルが「AMI X をタイプ T で N 台起動」とだけ言って起動方法を任せてきた場合だけ。
+>
+> ログインは `ubuntu` ユーザーと `.pem` の鍵で、必要なら `sudo su - isucon`。
 
 **ap-northeast-1（東京）固定。** ログインと、今どのアカウントにいるかの確認：
 
@@ -99,9 +108,9 @@ aws sts get-caller-identity        # 別アカウントに立てる事故がい�
 
 **本番と同じ流れを頭から最後まで一度通す手順は [`REHEARSAL.md`](REHEARSAL.md)**（3台＋ベンチ1台、確認項目と記録シート付き）。
 
-#### 推奨：`launch/` のスクリプトを使う（本番と同じ手順で練習する）
+#### 推奨：`launch/` のスクリプトを使う
 
-キット同梱の `launch/prestage.sh` / `launch/launch.sh` は本番当日に使うのと同じスクリプト。生のAWS CLIを手で組み立てるより、これで練習する方が当日の手順そのものになる。2026-09-28に実アカウント（`395103361978`）で end-to-end 検証済み：
+キット同梱の `launch/prestage.sh` / `launch/launch.sh` を使う。生のAWS CLIを手で組み立てるより速く、鍵・セキュリティグループ・ディスクの大きさの失敗が起きにくい。2026-09-28に実アカウント（`395103361978`）で end-to-end 検証済み：
 
 ```
 cd ~/personal-projects/isucon/isukit
@@ -121,7 +130,7 @@ launch/prestage.sh \
 `isukit.pem`（`--key-file` の実体）はチームへ別経路で配布する。`.gitignore` 済みなので、間違っても共有リポジトリには置かない。
 
 ```
-# ② launch — T+0、運営がAMIを発表してから
+# ② launch — 練習を始めるとき（AMI は過去問のもの。§2-2 の表）
 launch/launch.sh \
   --ami ami-0fcf9e8e8675a9ee4 \
   --type t3.small \
@@ -268,13 +277,16 @@ isucon13 は言語別に8つ、isucon12-qualify は19個の compose ファイル
 
 ## 3. 競技開始5分：自分たちのリポジトリを作る
 
-**3人で並行して触るための必須手順。** 競技開始の時点では、コードは配られたサーバーの上にしか無い。公開リポジトリ（`isucon/isucon13` など）は読む専用で、push できない。
+**2人で並行して触るための必須手順。** 競技開始の時点では、コードは配られたサーバーの上にしか無い。公開リポジトリ（`isucon/isucon13` など）は読む専用で、push できない。
 
 **1人（リポジトリ係）が1コマンドで作る：**
 
 ```
+# 本番（ISUCON14 の形なら isucon@ と GitHub の鍵。ベンチ用サーバーは渡さない＝ポータル）
+isukit go --new <team>/<private-repo> isucon@<app-host> --invite <相手のGitHub名>
+# 練習（launch/ で立てた台）
 isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i ~/.ssh/<鍵>.pem \
-  --invite n000r111,imaharu
+  --invite <相手のGitHub名>
 ```
 
 これで次のことを順番にやる：
@@ -287,10 +299,11 @@ isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i
 
 終わると、`main` に「コードのベースライン」「設定のベースライン」「CI」の3コミットがあり、手元は `work` ブランチにいる。**この2つが唯一の戻り先。** 作らずに走り出すと、スコアが落ちたときに戻る場所が無い。
 
-**残り2人は、できたリポジトリを渡すだけ：**
+**もう1人は、できたリポジトリを渡すだけ：**
 
 ```
-isukit go git@github.com:<team>/<private-repo>.git ubuntu@<app-host> [ubuntu@<bench-host>] -i ~/.ssh/<鍵>.pem
+isukit go git@github.com:<team>/<private-repo>.git isucon@<app-host>                            # 本番
+isukit go git@github.com:<team>/<private-repo>.git ubuntu@<app-host> -i ~/.ssh/<鍵>.pem          # 練習
 ```
 
 以後、設定の変更は手元の `etc/` を編集して `isukit deploy`（または `isukit etc push`）で反映する。サーバーの `/etc` を直接いじらない（repo に残らず、次の push で上書きされる）。
@@ -427,9 +440,14 @@ isukit unlock                           # 相手の番
 ### フェーズ0 — アクセス確認（クロック前）
 
 ```
-ssh <app-host> true && ssh <bench-host> true     # 今この瞬間に両方通ること
-chmod 600 ~/.ssh/<contest>.pem                    # 644 だと ssh が拒否する
+# 本番（ISUCON14 の形なら）：isucon ユーザー＋GitHub に登録した鍵
+ssh isucon@<app-host> true                        # 全台、今この瞬間に通ること
+# 練習：ubuntu ユーザー＋.pem
+ssh -i ~/.ssh/<practice>.pem ubuntu@<app-host> true
+chmod 600 ~/.ssh/<practice>.pem                   # 644 だと ssh が拒否する
 ```
+
+**本番ではベンチマーカーのサーバーに触らない**（SSH も禁止事項）。ベンチはポータルから流す（`manual` モード）。
 
 §3 のリポジトリ作成をここで終わらせる。そのあと `.isukit/manifest` をチームに読み上げる：**何台あるか、どのunitが動いているか、メモリ何GBか、データストアは何か**。それがその日の持ち札。
 

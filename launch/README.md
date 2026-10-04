@@ -1,11 +1,12 @@
-# launch — AWS instance bootstrap for contest day
+# launch — AWS instances for practice (and a plain-AMI contest fallback)
 
-Fallback tooling for the plain-AMI case: organizers publish an AMI id at
-contest start, teams launch their own EC2 instances from it. **If the
-organizers' manual gives its own launch procedure** (a CloudFormation
-template, a specific console flow, anything prescribed) **that wins — skip
-these scripts entirely.** They exist only for the case where the manual just
-says "launch N of instance type T from AMI X" and leaves the how to you.
+**Practice tooling first.** These scripts launch a past problem's AMI in your
+own AWS account so you can rehearse everything from the first SSH on
+(REHEARSAL.md). On contest day **the organizers' manual decides how servers
+come up** — ISUCON14 used a team-specific CloudFormation template, the `isucon`
+user and GitHub keys — **and that wins: skip these scripts entirely.** They
+are for the contest only if the manual just says "launch N of instance type T
+from AMI X" and leaves the how to you.
 
 ## Timeline
 
