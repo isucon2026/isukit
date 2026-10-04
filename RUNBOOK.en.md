@@ -5,35 +5,29 @@ a 3h mock and an 8h real run alike. The 8h column is just the arithmetic.
 
 ## What isukit is
 
-A bootstrap + measurement kit for ISUCON, at `~/personal-projects/isucon/isukit/`.
-One bash script, no dependencies. It does four things and nothing else:
+A bootstrap + measurement kit for ISUCON, at https://github.com/isucon2026/isukit.
+**One Go binary** (`go install github.com/isucon2026/isukit/cmd/isukit@<tag>`) that
+embeds the bash kit: laptop-side `lib/`, host-side `remote/` scripts shipped over ssh —
+nothing is installed on the servers. It does five things:
 
-1. **Bootstrap** — `isukit go <repo-url> <app-host> [bench-host]` clones the
-   problem repo, interrogates the server, installs `alp` + `pt-query-digest`,
-   and turns on LTSV nginx logging + `long_query_time=0`.
-2. **Discover** — `probe` asks the *running host* what the app is (systemd unit,
-   `WorkingDirectory`, `ExecStart`, env file, datastore) and writes
-   `.isukit/manifest`. It deliberately reads nothing from the repo, because no
-   part of ISUCON repo layout is stable across years — Go dir, build tool,
-   compose presence, unit naming, env file, env var names and bench flags all
-   differ. Interrogating systemd is the one trick that survives all of them.
-   When systemd finds nothing (isucon6-final, isucon8-final, or a local
-   `make up` dev stack all run under docker-compose), `probe` falls back to
-   `docker ps` and still fills in `WEB_SERVER`/`DB_SERVER`, setting
-   `STACK_IN_DOCKER=1`. `deploy` / `logs on` / `slow on` still only ever touch
-   host config, so they no-op on that box — edit the compose file / container
-   config directly, then `isukit restart`.
-3. **Measure** — `bench` records score + git sha per run; `alp` / `slow` /
-   `pprof` rank endpoints and queries by *summed* time; `score` is the history.
-4. **Ship** — `deploy` builds onto the exact path systemd already execs;
-   `finalize` runs the endgame (logs off → reboot → verify units → score).
+1. **Bootstrap** — `isukit go --new <team>/<repo> <app-host>` builds the team repo from
+   the server (code and config baselines, CI) at T+0; `isukit go <repo-url> <app-host>`
+   for everyone else. Both probe the server, install alp / pt-query-digest and turn on
+   LTSV nginx logging + `long_query_time=0`.
+2. **Discover** — `probe` asks every *running host* what the app is (systemd unit,
+   `WorkingDirectory`, `ExecStart`, env file, datastore) and writes the manifests. It
+   deliberately reads nothing from the repo, because no part of ISUCON repo layout is
+   stable across years. Roles (`host role`: app / web / db) say which box does what.
+3. **Measure** — `bench` saves each run (per-host CPU and top processes, alp, slow,
+   pprof; `show`), shares it on the `isukit-runs` branch and posts it to Discord;
+   `attribute` judges it against the latest run of main.
+4. **Ship** — `lock` takes the servers for your turn; `deploy` ships only committed
+   branches that contain main, plus `etc/` and env files; `ship` builds, then opens a PR.
+5. **Endgame** — `final check` / `final apply` turn off what still logs; `finalize`
+   reboots every host and checks units and HTTP before the last score.
 
-Per-contest state lives in `.isukit/` inside each cloned problem repo, so
-multiple contests coexist. The one thing it cannot discover is `BENCH_CMD`: the
-benchmarker's target flag differs every year, so that line is filled by hand.
-
-Architecture, the unit-picking heuristic, and the caveats (nginx-only `logs`,
-Go-only `deploy`, passwordless-`sudo` requirement) are in `README.md`.
+Getting a shell on the servers is **not** isukit's: on contest day follow the day's
+manual (see "Where the servers come from"); in practice, `launch/`.
 
 | Phase | % of clock | 8h | Rule |
 |---|---|---|---|
@@ -180,14 +174,30 @@ isukit os       # quick OS snapshot: uptime / vmstat / iostat / mpstat / free / 
 ### Production (ISUCON2026)
 
 - **Date: Saturday, 2026-10-31, 10:00–18:00 JST (8 hours)**
-- Teams are **up to 3 people**
+- Teams are **up to 3 people** (this team is two)
 - **Registration closed in early August 2026** (three rounds of 300/300/335 seats, all filled)
 - This year's organizer is Sakura Internet (venue: their Osaka HQ, Blooming Camp) — but **the contest environment runs on AWS, not Sakura's cloud**
-- Rule: **each competitor brings their own AWS account and launches the AMI the organizers announce, on their own EC2, after the contest starts**
+- The [regulation](https://isucon.net/archives/59966826.html): each team brings its own AWS account and launches EC2 from what the organizers specify after the start; **"the concrete launch procedure is in the day's manual"**. No instance type, count or region is stated.
 
-So the production setup is: organizers publish an AMI ID → you launch EC2 in your own account → you SSH in with your own key. No bastion, no VPN. **The procedure you build in practice is the procedure you use for real.**
+**Until you can SSH, follow the day's manual.** isukit starts after that (`go --new`).
 
-Login is the `ubuntu` user, then `sudo su - isucon`.
+**What ISUCON14 did** under the same regulation wording — prepare for it, don't assume it:
+
+- The portal gives each team **its own CloudFormation template** (never share it); you
+  create the stack in **ap-northeast-1** (3× c5.large, EBS, 3 EIPs, a VPC, a security
+  group, a Lambda, two IAM roles).
+- SSH is **`isucon`** with the key you registered on **GitHub** — not `ubuntu`, not a
+  `.pem`. Give isukit `isucon@<ip>`.
+- A **mandatory pre-contest AWS environment check** (create the stack, confirm SSH) had a
+  deadline; missing it disqualified. Do this year's as soon as it is announced.
+- Changing what the template created disqualifies.
+
+**On a company sandbox account** ("problems caused by resources or settings already in
+the AWS account are not supported"): IAM role creation may be forbidden (the stack
+fails), granting the organizers' role read access to the account may break company
+policy, security tooling may auto-close a world-open port 22 **mid-contest**, and vCPU (6)
+/ EIP (3) quotas may be short. Ask the sandbox's admins early and keep a spare team AWS
+account.
 
 ### Practice (each person's own AWS sandbox account)
 
@@ -199,9 +209,16 @@ export AWS_PROFILE=sandbox AWS_REGION=ap-northeast-1
 aws sts get-caller-identity        # launching into the wrong account is the single most common accident here
 ```
 
-#### Recommended: use the `launch/` scripts (practice the exact procedure you'll use for real)
+> **Practice only.** The contest template is team-specific and portal-only, so practice
+> launches a past problem's AMI with `launch/`. Contest day follows the manual (above);
+> `launch/` is for it only if the manual just says "launch N of type T from AMI X".
+> Login is `ubuntu` with the `.pem`, then `sudo su - isucon` when needed.
 
-The kit ships `launch/prestage.sh` / `launch/launch.sh` — the same scripts you'll use on contest day. Practicing with these, rather than hand-assembling raw AWS CLI calls, makes the practice run *be* the contest-day procedure. Verified end-to-end against a real account (`395103361978`) on 2026-09-28:
+#### Recommended: use the `launch/` scripts
+
+The kit ships `launch/prestage.sh` / `launch/launch.sh`: faster than hand-assembling
+AWS CLI calls, and the key, security group and disk size are hard to get wrong.
+Verified end-to-end against a real account (`395103361978`) on 2026-09-28:
 
 ```
 cd ~/personal-projects/isucon/isukit
@@ -221,7 +238,7 @@ launch/prestage.sh \
 `isukit.pem` (the file behind `--key-file`) gets distributed to the team out of band. It's already `.gitignore`d — never let it land in the shared repo.
 
 ```
-# ② launch — T+0, once the organizers announce the AMI
+# ② launch — when you start practicing (a past problem's AMI)
 launch/launch.sh \
   --ami ami-0fcf9e8e8675a9ee4 \
   --type t3.small \
@@ -367,15 +384,24 @@ isucon13 ships 8 compose files (one per language); isucon12-qualify ships 19. `i
 ## Phase 0 — Access (before the clock)
 
 ```
-ssh <app-host> true && ssh <bench-host> true     # both must succeed NOW
-chmod 600 ~/.ssh/<contest>.pem                    # ssh refuses 644
+# contest day (if it is ISUCON14-shaped): isucon + the key registered on GitHub
+ssh isucon@<app-host> true                        # every host, NOW
+# practice: ubuntu + the .pem
+ssh -i ~/.ssh/<practice>.pem ubuntu@<app-host> true
+chmod 600 ~/.ssh/<practice>.pem                   # ssh refuses 644
 ```
+
+**On contest day never touch the benchmarker's server** (SSH included is prohibited);
+the bench runs from the portal (`manual` mode).
 
 **No team repo yet (T+0)?** One person builds it in one command:
 
 ```
+# contest day (ISUCON14-shaped: isucon@ and your GitHub key; no bench host — the portal)
+isukit go --new <team>/<private-repo> isucon@<app-host> --invite <teammate>
+# practice (boxes from launch/)
 isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i ~/.ssh/<key>.pem \
-  --invite n000r111,imaharu
+  --invite <teammate>
 ```
 
 1. **Code baseline:** the probed webapp (`SRC_DIR`) is copied to the laptop,
@@ -397,10 +423,11 @@ isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i
 `main` ends up with three commits — code before any change, config before any
 change, CI — and you are on `work`. Those are the only places to roll back to.
 
-Everyone else hands `go` the new repo:
+The other person hands `go` the new repo:
 
 ```
-isukit go git@github.com:<team>/<private-repo>.git ubuntu@<app-host> [ubuntu@<bench-host>] -i ~/.ssh/<key>.pem
+isukit go git@github.com:<team>/<private-repo>.git isucon@<app-host>                     # contest day
+isukit go git@github.com:<team>/<private-repo>.git ubuntu@<app-host> -i ~/.ssh/<key>.pem   # practice
 ```
 
 From then on, change config by editing the local `etc/` and `isukit deploy` (or

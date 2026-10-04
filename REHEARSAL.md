@@ -38,7 +38,9 @@ launch/prestage.sh --key-name isukit --key-file ~/claude-workspace/isukit.pem \
 
 ---
 
-## 1. 起動（本番の T+0:00〜0:10 に相当）
+## 1. 起動（練習だけの手順。本番の T+0:00〜0:10 に相当する時間帯）
+
+> **本番はここが違う。** 本番は当日のマニュアルに従ってサーバーを用意する（ISUCON14 はチーム固有の CloudFormation のテンプレート、`isucon` ユーザー、GitHub の鍵。RUNBOOK §2-1）。この練習で `launch/` を使うのは、本番のテンプレートが手に入らないから。§2 以降（`go --new` から先）は、本番も同じ手順になる。
 
 ```
 launch/launch.sh --ami ami-0fcf9e8e8675a9ee4 --type c5.large --count 4 \
