@@ -13,8 +13,8 @@ jobs:
       # pinned image, same command as locally: no tool to install for the team
       - name: shellcheck
         run: |
-          docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 -S warning \
-            isukit install.sh launch/*.sh remote/*.sh test/*.sh test/e2e/*.sh \
+          docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 -x -S warning \
+            isukit lib/*.sh install.sh launch/*.sh remote/*.sh test/*.sh test/e2e/*.sh \
             test/bin/docker test/bin/sudo test/bin/supervisorctl test/bin/free test/bin/nproc
 
   test:
