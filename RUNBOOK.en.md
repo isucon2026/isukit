@@ -555,7 +555,18 @@ also runs `final check` first and warns about anything left.
 final scoring run happens on a machine that may have been restarted. If you have
 multiple instances, `finalize` reboots all of them and checks each host brings
 up what its roles need (the app on app hosts, nginx on web hosts, MySQL on db
-hosts); restart order is not guaranteed. Manually confirm each of these:
+hosts); restart order is not guaranteed.
+
+Active is not answering (500 with no DB, 502 with no upstream), so after the
+reboot it also asks over HTTP: every web host through nginx
+(`http://localhost/`), every app host directly (the port its unit's process
+listens on). 2xx-4xx is an answer; no answer or 5xx fails, with up to 60s of
+retries while services start. `FINAL_CHECK_PATH` in `.isukit/config` (default
+`/`) picks the path — **make it one that touches the DB** so the DB connection
+is checked too; `FINAL_APP_PORT` if the port is not discoverable. Fix any
+failure before enqueueing the final portal run.
+
+Manually confirm each of these:
 
 - [ ] Every service you depend on is **enabled**, not merely running:
       `systemctl is-enabled <unit>` for each unit in `.isukit/manifest`.

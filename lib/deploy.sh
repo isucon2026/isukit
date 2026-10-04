@@ -93,6 +93,20 @@ cmd_restart() {
 # Generalized reproducibility gate: the benchmark must pass after a cold boot.
 # Every year, a large fraction of teams FAIL here on settings they only ever
 # applied at runtime (SET GLOBAL, manual service starts, /tmp artefacts).
+finalize_http() { # print one "OK|url|code" / "FAIL|url|why" per web and app host
+  local h
+  for h in $(hosts_with web); do
+    { printf 'MODE=web\nPATH_=%q\nWAIT=%q\n' "${FINAL_CHECK_PATH:-/}" "${FINAL_HTTP_WAIT:-60}"; remote_script http-check.sh; } \
+      | rsh_stdin "$h" 2>/dev/null | sed "s|^|$h |" || echo "$h FAIL|nginx|could not run the check"
+  done
+  for h in $(hosts_with app); do
+    { printf 'MODE=app\nPATH_=%q\nAPP_UNIT=%q\nAPP_PORT=%q\nWAIT=%q\n' "${FINAL_CHECK_PATH:-/}" "${APP_UNIT:-}" "${FINAL_APP_PORT:-}" "${FINAL_HTTP_WAIT:-60}"
+      remote_script http-check.sh; } \
+      | rsh_stdin "$h" 2>/dev/null | sed "s|^|$h |" || echo "$h FAIL|${APP_UNIT:-app}|could not run the check"
+  done
+  return 0
+}
+
 cmd_finalize() {
   load
   local hosts
@@ -129,8 +143,21 @@ cmd_finalize() {
     rsh "$h" "systemctl is-active $want" \
       || warn "some units did not come up on their own on $h — enable them: ssh ${SSH_OPTS:-} $h sudo systemctl enable --now $want"
   done
+  # active is not answering: ask every web host through nginx and every app host
+  # directly, so a box that came back without its DB or upstream shows up now,
+  # not as a failed scoring run
+  local http bad
+  say "checking every web host (through nginx) and app host (directly) answers ${FINAL_CHECK_PATH:-/}"
+  http=$(finalize_http)
+  printf '%s\n' "$http" | awk '{ split($2, f, "|"); printf "    %-24s %-4s %s  %s\n", $1, f[1], f[2], f[3] }' >&2
+  bad=$(printf '%s\n' "$http" | grep -c ' FAIL|' || true)
+  if [ "$bad" != 0 ]; then
+    warn "$bad host(s) do not answer after the reboot — fix that before any scoring run (journalctl -u <unit>, is the DB reachable?)"
+    warn "FINAL_CHECK_PATH in $CONF picks a path that touches the DB; FINAL_APP_PORT if the app port is not discoverable"
+  fi
   say "4/4 scoring run"
   if [ "${BENCH_MODE:-auto}" = "manual" ]; then
+    [ "$bad" = 0 ] || warn "do NOT enqueue the portal run until every host answers"
     say "BENCH_MODE=manual — enqueue a run in the contest portal NOW, then record it:"
     say "    isukit bench --score <N> \"post-reboot verification\""
     warn "finalize is NOT complete until that run is recorded and passes"

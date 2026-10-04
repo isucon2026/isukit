@@ -9,7 +9,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 IMAGE="${E2E_IMAGE:-ubuntu:24.04}"
 command -v docker >/dev/null 2>&1 || { echo "FATAL: e2e needs docker" >&2; exit 2; }
 
-if [ "$#" -gt 0 ]; then names=("$@"); else names=(etc bench new alp final); fi
+if [ "$#" -gt 0 ]; then names=("$@"); else names=(etc bench new alp final http); fi
 TOTAL=0; PASSED=0; FAILED=""
 for n in "${names[@]}"; do
   [ -f "$HERE/$n.sh" ] || { echo "FATAL: no scenario $n" >&2; exit 2; }
