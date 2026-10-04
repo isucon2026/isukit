@@ -11,6 +11,10 @@ cmd_deploy() {
   if [ -d "$(local_repo_root)/etc" ] && [ -n "${ETC_REPO:-${SRC_DIR:-}}" ]; then
     cmd_etc_push --from-deploy || warn "etc push reported errors (above) — continuing with the app deploy"
   fi
+  # env files too: the restart below picks them up
+  if [ -d "$(local_repo_root)/hosts" ]; then
+    cmd_env_push --from-deploy || warn "env push reported errors (above) — continuing with the app deploy"
+  fi
   on_hosts app deploy_one "$force" || die "deploy failed on some app host (above) — not restarting a half-deployed fleet"
   # compose mode brings each host up itself; binary mode restarts once, everywhere
   [ "${APP_EXEC_RAW#*compose}" != "${APP_EXEC_RAW:-}" ] || cmd_restart

@@ -20,7 +20,7 @@ import (
 // registered so `isukit <cmd> ...` reaches bash with its argv as given.
 var Passthrough = []string{
 	"go", "init", "host", "probe", "benchprobe", "benchcmd", "benchmode", "unit",
-	"setup", "logs", "etc", "bench", "score", "show", "alp", "slow", "pprof", "os",
+	"setup", "logs", "etc", "env", "bench", "score", "show", "alp", "slow", "pprof", "os",
 	"doctor", "attribute", "ship", "revert", "deploy", "restart", "final", "finalize",
 }
 

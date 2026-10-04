@@ -21,7 +21,7 @@ func repoRoot(t *testing.T) string {
 func state(t *testing.T, files map[string]string) string {
 	dir := t.TempDir()
 	for name, body := range files {
-		p := filepath.Join(dir, ".isukit", name)
+		p := filepath.Join(dir, ".isukit", name) // "../x" puts x at the repo root
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -49,6 +49,10 @@ func TestHostsMatchesBash(t *testing.T) {
 			"manifest.isu3": "DB_SERVER=mysql\n", "hosts": "isu1 web,app\nisu2 app\nisu3 db\n"},
 		"no app host, probed host unlisted": {"config": cfg, "manifest": man, "hosts": "isu7 db\n"},
 		"extra units, no manifest yet":      {"config": "APP=isu1\nEXTRA_UNITS='mock.service  matcher.service'\n"},
+		"shared isukit.hosts beats .isukit/hosts": {"config": cfg, "manifest": man,
+			"hosts": "old web,app,db\n", "../isukit.hosts": "isu1 web,app\nisu2 app\nisu3 db\n"},
+		"shared isukit.conf, the laptop's config wins": {"config": "APP=isu1\nEXTRA_UNITS='mine.service'\n",
+			"manifest": man, "../isukit.conf": "EXTRA_UNITS='team.service'\nEXTRA_HOSTS='isu9'\n"},
 	}
 	root := repoRoot(t)
 	for name, files := range cases {

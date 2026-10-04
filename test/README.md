@@ -9,7 +9,7 @@ bash test/run-all.sh isucon8-final    # one fixture (the other suite says "skip"
 bash test/run-all.sh -v isucon13      # ...and dump the full probe output
 ```
 
-Current state: **70 fixtures, 70 passed, 0 failed** (17 probe + 13 bench + 11 etc + 24 hosts + 5 alp),
+Current state: **73 fixtures, 73 passed, 0 failed** (17 probe + 13 bench + 11 etc + 27 hosts + 5 alp),
 plus **6 e2e scenarios** (`test/e2e/`). CI (`.github/workflows/ci.yml`) runs shellcheck,
 this suite and the e2e scenarios on every PR.
 

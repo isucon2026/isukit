@@ -66,7 +66,7 @@ cd isu14-rehearsal-<日付>
 - [ ] GitHub の `main` に「baseline: …」と「etc: …」の2コミットがある
 - [ ] `ssh ubuntu@<pub1> readlink /etc/nginx/nginx.conf` が repo の `etc/` を指す
 - [ ] `.gitignore` に、ビルド済みのアプリと 10MB 超のファイルが入っている（大きなファイルを push していない）
-- [ ] `hosts/<台>/env.sh` に env ファイルの控えがある
+- [ ] `hosts/<台>/env.sh` に env ファイルがある（以後はこれが正）
 
 **ベンチの宛先を直す（isukit の不足 #1）**
 
@@ -86,7 +86,7 @@ isukit benchmode auto
 isukit go git@github.com:<team>/isu14-rehearsal-<日付>.git ubuntu@<pub1> ubuntu@<pub4> -i ~/…/isukit.pem
 ```
 
-- [ ] 3人とも `isukit hosts` の表示が同じ（**役割は各自の手元にしか保存されない**。isukit の不足 #3）
+- [ ] 3人とも `isukit hosts` の表示が同じ（役割は repo の `isukit.hosts`。`host role` のあと commit・push し、ほかの2人は pull する）
 
 ---
 
@@ -146,13 +146,15 @@ isukit host role ubuntu@<pub1> web,app
 isukit host role ubuntu@<pub2> app
 isukit host role ubuntu@<pub3> db
 isukit etc adopt                    # 2・3台目の設定も repo の etc/ に（台ごとに違うファイルがあれば止まって知らせる）
+isukit env pull                     # 2・3台目の env ファイルも hosts/<台>/ に
+git add isukit.hosts etc hosts && git commit -m "split: roles" && git push   # 残りの2人は pull
 isukit probe                        # 役割と実態の食い違いを警告する
 ```
 
 手で行う変更（それぞれ所要時間を記録する）：
 
 1. **db の台（`<pub3>`）**：`etc/` の mysqld.cnf で `bind-address = 0.0.0.0`。他の台から接続するユーザーを作る（`CREATE USER 'isucon'@'%' …; GRANT …`）
-2. **app の台（`<pub1>`・`<pub2>`）**：env ファイル（`.isukit/manifest` の `ENV_FILE`）の DB の接続先を `<priv3>` に。**この変更は git に残らない**（isukit の不足 #4）
+2. **app の台（`<pub1>`・`<pub2>`）**：repo の `hosts/<台>/env.sh`（無ければ `isukit env pull`）で DB の接続先を `<priv3>` にして commit。`isukit env push` で書き込む（下の deploy でも書き込まれる）
 3. **db 以外の台**：`sudo systemctl disable --now mysql`
 4. **web の台（`<pub1>`）**：`etc/` の nginx の upstream に `<priv1>`・`<priv2>` を並べる
 5. `isukit deploy`（設定の push と、全 app の台でのビルドと再起動）
@@ -248,8 +250,8 @@ aws ec2 delete-key-pair --key-name isukit
 |---|---|---|---|---|
 | 1 | `benchprobe` がベンチの宛先を常に `127.0.0.1` にする | 別の台のベンチが自分を叩く（練習のみ。本番はポータル） | `--target` 系のフラグに app の台の Private IP を入れる | 中 |
 | 2 | 構成の分割が手作業（bind-address・DB ユーザー・接続先・MySQL の停止・upstream） | 本番で最も時間を使い、ミスも出やすい（§5） | 役割に合わせて構成を変える段階2の機能 | **高** |
-| 3 | 役割（`.isukit/hosts`）・config が各自の手元にしかない | 3人で設定がずれる。1人が分割しても他の2人の isukit は古い構成のまま | `.isukit/hosts` を repo に入れて共有する（例：`isukit.hosts`） | **高** |
-| 4 | env ファイル（`DB_HOST` など）を git で管理していない | 接続先の変更が記録に残らず、戻せない・他の人に見えない | `hosts/<台>/env.sh` を正にして、台ごとに push する | **高** |
+| 3 | ~~役割・config が各自の手元にしかない~~ | — | **対応済み**：役割は `isukit.hosts`、チーム共通の設定は `isukit.conf`（どちらも repo） | — |
+| 4 | ~~env ファイルを git で管理していない~~ | — | **対応済み**：`hosts/<台>/` が正、`isukit env push`（deploy でも）で書き込む | — |
 | 5 | スコアと計測の記録（`scores.tsv`・`runs/`）が、ベンチを流した人の手元にしかない | 他の2人が `show` / `attribute` を見られない | 記録を repo（別ブランチなど）に push して共有する | 中 |
 | 6 | `launch.sh` の最後の案内が古い（`go <repo-url>` / `host add`） | 当日の手順を間違える | `go --new` / `host role` を案内する | 低（すぐ直せる） |
 | 7 | 凍結（タグ）の手順が決まっていない | 当日に main の最新を入れて壊れる | 1週間前にタグを打つ手順を RUNBOOK に | 中（すぐ決められる） |

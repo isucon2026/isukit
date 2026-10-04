@@ -57,6 +57,8 @@ ISUKIT_LIB="$(kit_dir)/lib"
 . "$ISUKIT_LIB/doctor.sh"
 # shellcheck source=lib/final.sh
 . "$ISUKIT_LIB/final.sh"
+# shellcheck source=lib/env.sh
+. "$ISUKIT_LIB/env.sh"
 
 usage() { cat >&2 <<'EOF'
 isukit — repo-agnostic ISUCON bootstrap + measurement loop
@@ -120,6 +122,11 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          /etc is linked)
     isukit etc pull                     server etc/ -> local etc/ (isukit's own logging
                                          edits stripped)
+    isukit env status|pull|push         each host's env file (DB_HOST, ...) as
+                                         hosts/<host>/<file> in the repo: push writes
+                                         changed ones to their host and restarts the
+                                         app there (deploy pushes them too); pull
+                                         never overwrites an unsaved local edit
     isukit bench [note] [--score N] [--fail]
                                          auto mode: run BENCH_CMD, record score+sha;
                                          while logs are on it also empties the logs,
@@ -195,6 +202,10 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                    touches the DB. FINAL_APP_PORT if the app's port is not discoverable
     PPROF_PORT     pprof listener on app hosts (default 6060); PPROF_SEC (30) and
                    PPROF_DELAY (5) shape the profile bench takes during the load
+    isukit.conf    (repo root, committed) team-wide settings, read before .isukit/config
+                   so a laptop can still override: FINAL_CHECK_PATH, ALP_MATCHES, ...
+    isukit.hosts   (repo root, committed) the roles, so every laptop targets the same
+                   boxes; an older .isukit/hosts moves there on the next host role
     ETC_REPO       server dir whose etc/ holds linked configs (default: git root of
                    the probed SRC_DIR, else SRC_DIR)
 
@@ -235,6 +246,7 @@ main() {
     setup)    cmd_setup ;;
     logs)     cmd_logs "$@" ;;
     etc)      cmd_etc "$@" ;;
+    env)      cmd_env "$@" ;;
     bench)    cmd_bench "$@" ;;
     score)    cmd_score ;;
     show)     cmd_show "$@" ;;

@@ -16,7 +16,7 @@ func write(t *testing.T, dir, name, body string) {
 }
 
 func TestPreRolesLayout(t *testing.T) {
-	s, err := Load(t.TempDir(), config.Values{"APP": "isu1", "EXTRA_HOSTS": " isu2  isu3 "})
+	s, err := Load(t.TempDir(), t.TempDir(), config.Values{"APP": "isu1", "EXTRA_HOSTS": " isu2  isu3 "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,13 +35,27 @@ func TestPreRolesLayout(t *testing.T) {
 	}
 }
 
+func TestSharedFileWins(t *testing.T) {
+	repo, state := t.TempDir(), t.TempDir()
+	write(t, state, "hosts", "old web,app,db\n")
+	s, _ := Load(repo, state, config.Values{"APP": "old"})
+	if s.List[0].Target != "old" || s.File == SharedFile {
+		t.Errorf("a lone .isukit/hosts must still be read, got %v (%s)", s.List, s.File)
+	}
+	write(t, repo, SharedFile, "isu1 web,app\nisu3 db\n")
+	s, _ = Load(repo, state, config.Values{"APP": "isu1"})
+	if len(s.List) != 2 || s.List[0].Target != "isu1" || s.File != SharedFile {
+		t.Errorf("isukit.hosts must win over .isukit/hosts, got %v (%s)", s.List, s.File)
+	}
+}
+
 func TestRolesFileAndFacts(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "hosts", "# comment\nisu1 web,app\n\nisu2\nisu3 db\n")
 	write(t, dir, "manifest", "WEB_SERVER=nginx\nDB_SERVER=''\n")
 	write(t, dir, "manifest.isu1", "WEB_SERVER=nginx\nDB_SERVER=''\n")
 	write(t, dir, "manifest.isu3", "DB_SERVER=mysql\n")
-	s, err := Load(dir, config.Values{"APP": "isu1"})
+	s, err := Load(t.TempDir(), dir, config.Values{"APP": "isu1"}) // a lone .isukit/hosts
 	if err != nil {
 		t.Fatal(err)
 	}

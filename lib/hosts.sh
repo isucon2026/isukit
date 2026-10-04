@@ -8,7 +8,24 @@
 #   db   runs mysql               -> slow log, slow
 # Without the file, the pre-roles layout holds: $APP does all three and every
 # EXTRA_HOSTS entry is an app instance. $APP stays the host probe reads.
-HOSTS_FILE="$STATE/hosts"
+# The roles live in the team repo (isukit.hosts, committed), so everyone's
+# isukit sends commands to the same boxes. A .isukit/hosts from before that is
+# still read while it is the only one, and moved on the next `host role`.
+SHARED_HOSTS_FILE="isukit.hosts"
+resolve_hosts_file() {
+  if [ -f "$STATE/hosts" ] && [ ! -f "$SHARED_HOSTS_FILE" ]; then
+    HOSTS_FILE="$STATE/hosts"
+  else
+    HOSTS_FILE="$SHARED_HOSTS_FILE"
+  fi
+}
+migrate_hosts_file() {
+  [ "$HOSTS_FILE" = "$STATE/hosts" ] || return 0
+  mv "$STATE/hosts" "$SHARED_HOSTS_FILE" || return 0
+  HOSTS_FILE="$SHARED_HOSTS_FILE"
+  say "moved $STATE/hosts to $SHARED_HOSTS_FILE — commit it so the whole team uses the same roles"
+}
+resolve_hosts_file
 KNOWN_ROLES="app web db"
 host_lines() { # "<target> <roles>" per host
   local h
@@ -80,6 +97,7 @@ on_hosts() { # on_hosts <role|all> <fn> [args...] -- run fn once per matching ho
 
 cmd_host() {
   need_state
+  resolve_hosts_file
   local role="${1:-}" target="${2:-}" opts=""
   [ "$#" -gt 2 ] && { shift 2; opts="$*"; }
   # If go's per-host ssh_config is in play (SSH_OPTS carries -F) and the caller isn't
@@ -122,6 +140,7 @@ cmd_host() {
     bench) sed -i.bak "s|^BENCH=.*|BENCH=$target|" "$CONF"; rm -f "$CONF.bak" ;;
     add)
       [ -n "$target" ] || die "usage: isukit host add <ssh-target>"
+      migrate_hosts_file
       if [ -f "$HOSTS_FILE" ]; then
         # roles file in charge: an added host is an app instance unless told otherwise
         awk -v h="$target" '$1 == h { found = 1 } END { exit !found }' "$HOSTS_FILE" \
@@ -150,6 +169,7 @@ cmd_host() {
         case " $KNOWN_ROLES " in *" $r "*) ;; *) die "unknown role '$r' — roles are: $KNOWN_ROLES" ;; esac
       done
       load
+      migrate_hosts_file
       # first use: write the implied pre-roles layout down, so nothing is dropped
       if [ ! -f "$HOSTS_FILE" ]; then
         local seed   # read before the redirect creates the file host_lines would see
@@ -159,7 +179,7 @@ cmd_host() {
       awk -v h="$target" '$1 != h' "$HOSTS_FILE" > "$HOSTS_FILE.tmp"
       printf '%s %s\n' "$target" "$roles" >> "$HOSTS_FILE.tmp"
       mv "$HOSTS_FILE.tmp" "$HOSTS_FILE"
-      say "$target = $roles"
+      say "$target = $roles   (commit $HOSTS_FILE so the team gets it)"
       cmd_hosts
       return 0 ;;
     *) die "usage: isukit host {app|bench|add|role} <ssh-target|local> [ssh opts... | roles]" ;;
