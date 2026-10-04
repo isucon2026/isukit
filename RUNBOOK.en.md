@@ -275,7 +275,46 @@ isucon13 ships 8 compose files (one per language); isucon12-qualify ships 19. `i
 ```
 ssh <app-host> true && ssh <bench-host> true     # both must succeed NOW
 chmod 600 ~/.ssh/<contest>.pem                    # ssh refuses 644
-./isukit go <repo-url> <app-host> <bench-host>
+```
+
+**No team repo yet (T+0)?** One person builds it in one command:
+
+```
+isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i ~/.ssh/<key>.pem \
+  --invite n000r111,imaharu
+```
+
+1. **Code baseline:** the probed webapp (`SRC_DIR`) is copied to the laptop,
+   committed, and pushed as a private repo with `gh repo create`; `--invite`
+   users get push access. GitHub credentials stay on the laptop. Left out (and
+   listed in `.gitignore`, kept on the server): `node_modules`, logs, the built
+   app systemd runs, and any file over 10MB (DB dumps, big images).
+2. **Config baseline:** nginx / mysql / app-unit config moves into the repo's
+   `etc/` and `/etc` symlinks to it (same as `isukit etc adopt`: replaced files
+   backed up under `/etc/isukit-orig/`, AppArmor rule for mysqld). Each host's
+   env file is *copied* to `hosts/<host>/` as a record — env differs per host,
+   so it is not linked. Committed and pushed as a second commit.
+3. Then the usual `go`: tools, logging on, BENCH_CMD.
+
+`main` ends up with two commits — code before any change, config before any
+change — and you are on `work`. Those are the only places to roll back to.
+
+Everyone else hands `go` the new repo:
+
+```
+isukit go git@github.com:<team>/<private-repo>.git ubuntu@<app-host> [ubuntu@<bench-host>] -i ~/.ssh/<key>.pem
+```
+
+From then on, change config by editing the local `etc/` and `isukit deploy` (or
+`isukit etc push`); never edit `/etc` on the server directly.
+
+With several instances, register them with roles now (all hosts start from the
+same AMI; re-assign when you split in phase 3):
+
+```
+isukit host role ubuntu@<ip1> web,app,db
+isukit host role ubuntu@<ip2> app
+isukit hosts
 ```
 
 **Repo already cloned?** `init` adopts an existing directory instead of cloning
@@ -366,9 +405,16 @@ ssh <app-host> 'journalctl -u <APP_UNIT> -n 200 --no-pager'   # unit name is in 
 ```
 isukit logs on
 isukit bench "instrumented — do not compare to baseline"
-isukit alp
-isukit slow
+isukit show                     # this run: per-host CPU and processes, alp, slow, pprof
 ```
+
+While logs are on, each `bench` is one measured run saved to
+`.isukit/runs/<when>/`. **Read the hosts part of `show` first:** the host and
+process that was pinned is the bottleneck, and it says what to open next —
+`mysqld` on the db host → slow; the app on an app host → pprof
+(`go tool pprof -http=: <run>/cpu.pprof`); `nginx` → static files, keepalive,
+workers; everything idle but the score flat → lock waits, external calls, app
+errors.
 
 **Read `alp` by summed response time, never by mean or count.** A 3ms endpoint
 hit 40,000 times outranks a 900ms one hit twice. The kit sorts that way by
@@ -404,8 +450,9 @@ before doing it — this is a checklist of where to look, not a list of answers.
 - [ ] **The web server's own limits** — worker count, `keepalive` to upstream,
       open file limits. Cheap, but only after the app stops being the bottleneck.
 
-After each one: `isukit deploy` → `isukit bench "<what you changed>"`. Keep or
-revert on the number alone.
+After each one: `isukit deploy` → `isukit bench "<what you changed>"` →
+`isukit show`. Keep or revert on the number alone; `isukit show 2` is the run
+before, for comparison.
 
 Benchmark scores jitter run-to-run, so small deltas are not meaningful. Use
 `isukit attribute` to compare the last two runs; it returns KEEP / REVERT /
@@ -429,11 +476,19 @@ network latency.
 
 Typical progression, contest-independent:
 
-1. Move the datastore to a second instance. Update the app's connection config —
-   it comes from the env file (`ENV_FILE` in `.isukit/manifest`), not from code.
-2. Confirm the DB actually accepts remote connections and the app reconnects.
-3. `isukit bench` — this can *lose* score if the app was never DB-bound. Revert
-   if so.
+1. Re-assign roles, e.g. `web,app` / `app` / `db` with `isukit host role`.
+   deploy / restart then go to app hosts, nginx logs and alp to web hosts, the
+   slow log and slow to db hosts.
+2. Change the layout by hand (roles only route isukit): on the db host, let
+   MySQL accept remote connections (`bind-address` in `etc/`'s mysqld.cnf, a
+   remote user); on app hosts, point the app at the db host — the connection
+   config is in the env file (`ENV_FILE` in `.isukit/manifest`; the original is
+   in `hosts/<host>/`), not in code; on every non-db host,
+   `sudo systemctl disable --now mysql` (stopping alone comes back on reboot);
+   on the web host, list the app hosts in nginx's upstream (`etc/`).
+3. `isukit deploy` → `isukit bench` → `isukit show` — this can *lose* score if
+   the app was never DB-bound; revert if so. Check in `show` that the load
+   moved to the host you meant.
 4. Put a second app instance behind the web server, load-balanced.
 
 Every distribution step adds a new thing that must survive a reboot. Note each
@@ -473,8 +528,9 @@ isukit finalize          # logs off -> reboot ALL hosts -> verify units -> scori
 
 `finalize` exists because runtime-only state evaporates on reboot, and the
 final scoring run happens on a machine that may have been restarted. If you have
-multiple instances (set via `isukit host add`), `finalize` reboots all of them,
-though restart order is not guaranteed. Manually confirm each of these:
+multiple instances, `finalize` reboots all of them and checks each host brings
+up what its roles need (the app on app hosts, nginx on web hosts, MySQL on db
+hosts); restart order is not guaranteed. Manually confirm each of these:
 
 - [ ] Every service you depend on is **enabled**, not merely running:
       `systemctl is-enabled <unit>` for each unit in `.isukit/manifest`.
@@ -485,6 +541,9 @@ though restart order is not guaranteed. Manually confirm each of these:
       `long_query_time=0` it can fill the disk.
 - [ ] Disk has free space: `df -h`.
 - [ ] The app starts from cold with no manual step.
+- [ ] MySQL stays **stopped** on every non-db host (forgetting `disable` brings
+      it back on reboot, eating memory and CPU).
+- [ ] Every app host reaches the db host, even when the db host comes up last.
 
 Then run the benchmark two or three more times. Scores vary run to run; you want
 to know your *reliable* number, not your luckiest one. If a late run fails, you
@@ -530,6 +589,10 @@ These are the generic ways teams lose everything, independent of the year's prob
 ## Quick reference
 
 ```
+isukit go --new <team>/<repo> <host> -i <key> [--invite u1,u2]
+                            # no repo yet: build it from the server (code + config baselines)
+isukit host role <t> <roles> # app / web / db, comma-separated (.isukit/hosts)
+isukit hosts                # hosts, roles, and the units each must run
 isukit doctor               # diagnose + auto-repair config, connectivity, bench mode
 isukit os                   # server snapshot: uptime / vmstat / iostat / mpstat / free / df
 isukit probe                # re-read the server after any infra change
@@ -541,7 +604,7 @@ isukit alp                  # endpoints by summed response time
 isukit slow                 # queries by total time
 isukit pprof 30             # Go CPU profile -> .isukit/cpu.pprof
 isukit deploy               # rsync + build onto the systemd ExecStart path + restart
-isukit restart              # restart discovered app units (+ EXTRA_HOSTS)
+isukit restart              # restart the app units on every app host
 isukit logs on|off          # nginx LTSV + mysql slow log
 isukit etc adopt|status|push|pull  # nginx/mysql/unit config into the repo's etc/, symlinked from /etc
 isukit ship "note"          # new branch -> commit -> push -> draft PR

@@ -17,6 +17,12 @@ this is also a genuine one-liner from zero to a probed, instrumented host:
 
     ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port]
 
+No team repo yet (T+0)? `--new` builds one: the server's webapp as the code
+baseline, `/etc` config and env files as the config baseline, pushed as a
+private repo (RUNBOOK, phase 0):
+
+    ./isukit go --new <team>/<repo> <app-ssh-target> [bench-ssh-target] -i keyfile [--invite user1,user2]
+
 That clones, probes the server, installs `alp` + `pt-query-digest`, turns on
 LTSV nginx logging + `long_query_time=0`, and composes `BENCH_CMD` by reading
 the benchmarker binary's own `--help`. Sanity-check that line, then you're in
