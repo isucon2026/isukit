@@ -31,7 +31,7 @@ the loop.
 ## The loop
 
     isukit bench "baseline"     # runs BENCH_CMD on the bench host, records score+git sha
-    isukit alp                  # endpoints ranked by SUMMED response time
+    isukit alp                  # endpoints ranked by SUMMED response time (URI groups derived from the log; --patterns shows them)
     isukit slow                 # queries ranked by total time
     isukit pprof 30             # Go CPU profile, if pprof is wired in
     isukit attribute            # compare last two runs; KEEP / REVERT / INCONCLUSIVE

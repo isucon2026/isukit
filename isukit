@@ -1430,7 +1430,15 @@ cmd_score() {
 }
 
 # ---------------------------------------------------------------- analysis
-cmd_alp() { load; on_hosts web alp_one; }
+cmd_alp() { # alp [--patterns]
+  load
+  case "${1:-}" in
+    --patterns) ALP_PRINT=1 ;;
+    "") ;;
+    *) die "usage: isukit alp [--patterns]" ;;
+  esac
+  on_hosts web alp_one
+}
 alp_one() { # alp_one [log] -- default: this host's live isukit.log
   local log="${1:-/var/log/nginx/isukit.log}"
   rsh "$APP" "command -v alp >/dev/null" || {
@@ -1440,9 +1448,15 @@ alp_one() { # alp_one [log] -- default: this host's live isukit.log
   }
   rsh "$APP" "sudo -n test -s '$log' 2>/dev/null" || \
     die "no requests in $log — run: isukit logs on, then a bench"
-  say "alp (sorted by summed response time — the only ranking that matters)"
-  rsh "$APP" "sudo -n alp ltsv --file='$log' --sort=sum -r --limit=30 \
-    -m '/api/[^/]+/[0-9a-zA-Z-]+,/[0-9a-zA-Z-]{20,}' 2>&1 | head -50"
+  # grouping regexes come from the log itself (remote/alp.sh); ALP_MATCHES in
+  # the config replaces them with your own when the derived ones are wrong
+  if [ "${ALP_PRINT:-0}" = 1 ]; then
+    say "alp groups on $APP ($([ -n "${ALP_MATCHES:-}" ] && echo "ALP_MATCHES from config" || echo "derived from the log"))"
+  else
+    say "alp (sorted by summed response time — the only ranking that matters)"
+  fi
+  { printf 'LOG=%q\nMATCHES=%q\nTHRESH=%q\nPRINT_MATCHES=%q\n' "$log" "${ALP_MATCHES:-}" "${ALP_THRESH:-20}" "${ALP_PRINT:-0}"
+    remote_script alp.sh; } | rsh_stdin "$APP"
 }
 
 cmd_slow() { load; on_hosts db slow_one; }
@@ -2207,7 +2221,11 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          while the load was on, alp, slow, pprof.
                                          1 = latest (default), 2 = the one before.
                                          bench saves these while logs are on
-    isukit alp                          top endpoints by SUMMED response time
+    isukit alp [--patterns]             top endpoints by SUMMED response time.
+                                         URIs are grouped by regexes derived from
+                                         the log (ids, high fan-out segments);
+                                         --patterns prints them. ALP_MATCHES in the
+                                         config replaces them with your own
     isukit slow                         top queries by total time
     isukit pprof [sec] [port]           pull a Go CPU profile
     isukit deploy [--force]             rsync source up, build/compose, restart
@@ -2243,6 +2261,8 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     EXTRA_UNITS    space-separated extra units 'restart'/'finalize' also restart
     EXTRA_HOSTS    space-separated extra app instances (used until .isukit/hosts exists)
     BENCH_MODE     auto (ssh + BENCH_CMD) or manual (portal, paste the score)
+    ALP_MATCHES    comma-separated alp -m regexes to use instead of derived ones;
+                   ALP_THRESH (20) = fan-out at which a path segment becomes a group
     PPROF_PORT     pprof listener on app hosts (default 6060); PPROF_SEC (30) and
                    PPROF_DELAY (5) shape the profile bench takes during the load
     ETC_REPO       server dir whose etc/ holds linked configs (default: git root of

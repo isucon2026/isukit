@@ -31,6 +31,7 @@ rsh_stdin() { # record "<host> stdin:" + the VAR= lines the caller prepended
   body=$(cat)
   local tag=""
   case "$body" in *"Closes the measurement window"*) tag="run-stop " ;; esac
+  case "$body" in *"sent by \`isukit alp\`"*) tag="alp-script " ;; esac
   printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE)=' | tr '\n' ' ')" >> "$CALLS"
   return 0
 }
@@ -116,7 +117,7 @@ t_alp_slow_route() {
   setup_state isu1 "" "$ROLES"
   load
   cmd_alp
-  check "$(hosts_called 'alp ltsv')" = "isu1"
+  check "$(hosts_called 'stdin: alp-script')" = "isu1"
   : > "$CALLS"
   cmd_slow
   check "$(hosts_called 'pt-query-digest --limit')" = "isu3"
@@ -196,7 +197,7 @@ t_bench_measures_run() {
   check -n "$(grep '^isu2 stdin: RESET_NGINX=0 RESET_MYSQL=0 SAMPLE=1' "$CALLS")"
   check -n "$(grep '^isu3 stdin: RESET_NGINX=0 RESET_MYSQL=1 SAMPLE=1' "$CALLS")"
   check "$(hosts_called 'stdin: run-stop')" = "isu1 isu2 isu3"
-  check "$(hosts_called 'alp ltsv')" = "isu1"
+  check "$(hosts_called 'stdin: alp-script')" = "isu1"
   check "$(hosts_called 'pt-query-digest --limit')" = "isu3"
   # the bench ran between opening and closing the window
   local open bench close
@@ -222,7 +223,7 @@ t_bench_clean_when_logs_off() {
   # logs_are_on also asks mysql; make that read "off" too
   rsh() { printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"; case "$*" in *00-isukit.conf*) return 1 ;; esac; return 0; }
   cmd_bench "final" >/dev/null 2>&1
-  check -z "$(grep -E 'SAMPLE=|run-stop|alp ltsv|pt-query-digest' "$CALLS")"
+  check -z "$(grep -E 'SAMPLE=|run-stop|alp-script|pt-query-digest' "$CALLS")"
   check -n "$(grep '^bench ./bench' "$CALLS")"
 }
 
@@ -232,7 +233,7 @@ t_manual_score_collects_run() {
   cmd_bench --score 1234 "portal run" </dev/null >/dev/null 2>&1
   # no window was opened (no prompt), but this run's logs are still collected
   check -z "$(grep 'SAMPLE=1' "$CALLS")"
-  check "$(hosts_called 'alp ltsv')" = "isu1"
+  check "$(hosts_called 'stdin: alp-script')" = "isu1"
   check "$(hosts_called 'pt-query-digest --limit')" = "isu3"
   check "$(grep -c 'SAMPLE=0' "$CALLS")" = 3
   check -n "$(awk -F'\t' '$3 == 1234 && $4 == "portal run"' .isukit/scores.tsv)"

@@ -416,6 +416,12 @@ process that was pinned is the bottleneck, and it says what to open next —
 workers; everything idle but the score flat → lock waits, external calls, app
 errors.
 
+alp's URI groups are derived from the log (ids, UUIDs, long tokens, and
+segments with very many distinct values like user names collapse; a far busier
+sibling such as `/api/user/me` stays its own row). If the grouping looks wrong,
+check it with `isukit alp --patterns` and put your own comma-separated regexes
+in `ALP_MATCHES` in `.isukit/config`.
+
 **Read `alp` by summed response time, never by mean or count.** A 3ms endpoint
 hit 40,000 times outranks a 900ms one hit twice. The kit sorts that way by
 default. Same for `pt-query-digest`, which already ranks by total time.

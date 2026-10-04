@@ -9,7 +9,11 @@ bash test/run-all.sh isucon8-final    # one fixture (the other suite says "skip"
 bash test/run-all.sh -v isucon13      # ...and dump the full probe output
 ```
 
-Current state: **60 fixtures, 60 passed, 0 failed** (17 probe + 13 bench + 11 etc + 19 hosts).
+Current state: **65 fixtures, 65 passed, 0 failed** (17 probe + 13 bench + 11 etc + 19 hosts + 5 alp).
+
+`run-alp-tests.sh` feeds `remote/alp.sh` synthetic LTSV logs shaped like past contests
+and asserts the alp groups it derives (ids and high fan-out segments collapse, a far
+busier sibling like `/api/user/me` stays literal, every regex anchored).
 
 `run-hosts-tests.sh` sources `isukit` (`ISUKIT_SOURCED=1` skips `main`), swaps the ssh
 transport for a recorder and asserts which host each command reaches, with and
