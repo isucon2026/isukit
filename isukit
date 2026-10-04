@@ -95,13 +95,31 @@ hosts_with() { # hosts_with <role>[|<role>...] -- hosts holding any of them
     for (i = 1; i <= n; i++) for (j = 1; j <= m; j++) if (r[i] == w[j]) { print $1; next }
   }'
 }
+host_manifest() { printf '%s/manifest.%s\n' "$STATE" "$(printf '%s' "$1" | tr '/' '_')"; }
+host_fact() { # host_fact <host> <KEY> -- that host's probed value; else the first any host reported
+  # The fleet runs one web server and one datastore kind, but only the hosts that
+  # still run them report them: after mysql is stopped on the probed host, its
+  # own manifest says DB_SERVER=''. Never let that erase the db host's checks.
+  local f v
+  f=$(host_manifest "$1")
+  if [ -f "$f" ]; then
+    v=$( . "$f" 2>/dev/null; eval "printf '%s' \"\${$2:-}\"" )
+    [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
+  fi
+  for f in "$STATE/manifest" "$STATE"/manifest.*; do
+    [ -f "$f" ] || continue
+    v=$( . "$f" 2>/dev/null; eval "printf '%s' \"\${$2:-}\"" )
+    [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
+  done
+  return 0
+}
 role_units() { # units a host must be running, from its roles
   local r u=""
   for r in $(host_roles "$1" | tr , ' '); do
     case "$r" in
       app) u="$u ${APP_UNIT:-} ${EXTRA_UNITS:-}" ;;
-      web) u="$u ${WEB_SERVER:-}" ;;
-      db)  u="$u ${DB_SERVER:-}" ;;
+      web) u="$u $(host_fact "$1" WEB_SERVER)" ;;
+      db)  u="$u $(host_fact "$1" DB_SERVER)" ;;
     esac
   done
   printf '%s\n' $u | awk 'NF && !seen[$0]++' | tr '\n' ' ' | sed 's/ *$//'
@@ -577,12 +595,68 @@ cmd_probe() {
   [ "${PROC_MANAGER:-systemd}" = "supervisor" ] && warn "app is under supervisord, not systemd — '$APP_UNIT' restarts ALL of it; per-program: supervisorctl restart <${SUPERVISOR_PROGRAMS:-name}>"
   [ "${MYSQL_OK:-0}" != "1" ] && warn "cannot reach mysql as root over socket — slow-log automation is off"
   say "manifest written to $STATE/manifest"
+  cp "$STATE/manifest" "$(host_manifest "$APP")"
+  probe_fleet "$override"
   # subshell: benchprobe's failure path is `die`, i.e. exit(1) of the whole
   # script. The app manifest above is already written and useful on its own, so
   # a bench host we cannot reach must not discard it — nor abort `isukit go`
   # before setup/logs have run. benchprobe only writes files, so losing its
   # shell state costs nothing.
   ( cmd_benchprobe ) || warn "benchprobe failed — set the bench path by hand: isukit benchmode manual (portal), or isukit benchcmd '<command>'"
+}
+
+probe_fleet() { # probe_fleet <unit-override> -- every other host into manifest.<host>, then compare
+  local override="$1" h f
+  local primary="$APP"
+  for h in $(hosts_all); do
+    [ "$h" = "$primary" ] && continue
+    f=$(host_manifest "$h")
+    say "probing $h ($(host_roles "$h"))"
+    if printf 'APP_UNIT_OVERRIDE=%s\n%s\n' "$override" "$PROBE_SCRIPT" | rsh_stdin "$h" > "$f.tmp" 2>/dev/null && [ -s "$f.tmp" ]; then
+      mv "$f.tmp" "$f"
+    else
+      rm -f "$f.tmp"; warn "could not probe $h — its checks fall back to what other hosts report"
+    fi
+  done
+  [ "$(hosts_all | wc -l | tr -d ' ')" -gt 1 ] || return 0
+  # what the roles promise vs what each box is actually running
+  local roles v pv db_unit
+  db_unit=$(host_fact "$primary" DB_SERVER)
+  for h in $(hosts_all); do
+    f=$(host_manifest "$h"); [ -f "$f" ] || continue
+    roles=",$(host_roles "$h"),"
+    case "$roles" in *,app,*)
+      for v in APP_UNIT SRC_DIR GO_DIR; do
+        pv=$( . "$STATE/manifest" 2>/dev/null; eval "printf '%s' \"\${$v:-}\"" )
+        local hv; hv=$( . "$f" 2>/dev/null; eval "printf '%s' \"\${$v:-}\"" )
+        [ "$hv" = "$pv" ] || warn "$h: $v is '${hv:-none}' but '${pv:-none}' on $primary — deploy/restart assume app hosts match the probed one"
+      done ;;
+    esac
+    local hdb; hdb=$( . "$f" 2>/dev/null; printf '%s' "${DB_SERVER:-}" )
+    case "$roles" in
+      *,db,*) [ -n "$hdb" ] || warn "$h has role db but no running mysql/mariadb/postgresql was found on it" ;;
+      *)      [ -z "$hdb" ] || warn "$h has no db role but $hdb is running there — once the split is done: ssh $h sudo systemctl disable --now $hdb" ;;
+    esac
+    case "$roles" in *,web,*)
+      local hweb; hweb=$( . "$f" 2>/dev/null; printf '%s' "${WEB_SERVER:-}" )
+      [ -n "$hweb" ] || warn "$h has role web but no running web server was found on it" ;;
+    esac
+  done
+  [ -n "$db_unit" ] || [ -z "$(hosts_with db)" ] || [ -n "$(host_fact "$(hosts_with db | head -1)" DB_SERVER)" ] \
+    || warn "no host reports a datastore — finalize/doctor cannot check the db role"
+  return 0
+}
+
+db_left_enabled() { # print each non-db host where the fleet's DB unit is still enabled (comes back on reboot)
+  local h u
+  [ -f "$HOSTS_FILE" ] || return 0
+  u=$(host_fact "$(hosts_with db | head -1)" DB_SERVER)
+  [ -n "$u" ] || return 0
+  for h in $(hosts_all); do
+    case ",$(host_roles "$h")," in *,db,*) continue ;; esac
+    [ "$(rsh "$h" "systemctl is-enabled '$u' 2>/dev/null" 2>/dev/null)" = enabled ] && printf '%s %s\n' "$h" "$u"
+  done
+  return 0
 }
 
 cmd_hosts() {
@@ -771,8 +845,8 @@ cmd_benchmode() {
 # ---------------------------------------------------------------- tools
 cmd_setup() { load; on_hosts all setup_one; }
 setup_one() { # alp on web hosts, percona-toolkit on db hosts, sysstat (pidstat) everywhere
-  local roles=",$(host_roles "$APP"),"
-  local web=0 db=0
+  local roles web=0 db=0
+  roles=",$(host_roles "$APP"),"
   case "$roles" in *,web,*) web=1 ;; esac
   case "$roles" in *,db,*) db=1 ;; esac
   say "installing tools on $APP ($(host_roles "$APP"))"
@@ -1610,6 +1684,11 @@ cmd_finalize() {
   hosts="$(hosts_all | tr '\n' ' ' | sed 's/^ *//;s/ *$//')"
   local h
   [ "$(printf '%s\n' $hosts | wc -l | tr -d ' ')" -gt 1 ] && warn "multiple hosts ($hosts) — reboot/return order across them is NOT guaranteed, never assume cross-host startup dependencies"
+  local left
+  left=$(db_left_enabled)
+  [ -z "$left" ] || printf '%s\n' "$left" | while read -r h u; do
+    warn "$h has no db role but $u is still ENABLED — it comes back on this reboot: ssh $h sudo systemctl disable --now $u"
+  done
   say "1/4 turning measurement logging OFF (it costs real score)"
   cmd_logs off
   say "2/4 rebooting: $hosts"
@@ -2069,6 +2148,14 @@ cmd_doctor() {
     doctor_warn "APP_UNIT_CONFIDENCE=${APP_UNIT_CONFIDENCE:-unknown} — candidates: ${APP_CANDIDATES:-none} — fix: isukit unit <name>"
   else
     doctor_ok "APP_UNIT_CONFIDENCE=${APP_UNIT_CONFIDENCE:-n/a}"
+  fi
+
+  local left
+  left=$(db_left_enabled)
+  if [ -n "$left" ]; then
+    printf '%s\n' "$left" | while read -r h u; do
+      doctor_warn "$h: $u is enabled but the host has no db role — it starts on every reboot: ssh $h sudo systemctl disable --now $u"
+    done
   fi
 
   local missing=0
