@@ -97,6 +97,8 @@ export AWS_PROFILE=sandbox AWS_REGION=ap-northeast-1
 aws sts get-caller-identity        # 別アカウントに立てる事故がいちばん多い
 ```
 
+**本番と同じ流れを頭から最後まで一度通す手順は [`REHEARSAL.md`](REHEARSAL.md)**（3台＋ベンチ1台、確認項目と記録シート付き）。
+
 #### 推奨：`launch/` のスクリプトを使う（本番と同じ手順で練習する）
 
 キット同梱の `launch/prestage.sh` / `launch/launch.sh` は本番当日に使うのと同じスクリプト。生のAWS CLIを手で組み立てるより、これで練習する方が当日の手順そのものになる。2026-09-28に実アカウント（`395103361978`）で end-to-end 検証済み：
