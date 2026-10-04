@@ -77,6 +77,32 @@ isukit version                           # everyone shows the same v1.0.x
 If `go install` does not see a new tag yet, the module proxy is catching up
 (minutes); `GOPROXY=direct go install ...` skips it.
 
+## Discord (channels and notifications)
+
+Keep where people talk apart from where isukit and GitHub post, or the
+discussion scrolls away under the notifications.
+
+| Channel | Written by | What |
+|---|---|---|
+| **#plan** | people | discussion, decisions, what's next. Pin the manual's essentials (score formula, disqualifications, what's forbidden) and the values you settle on (`FINAL_CHECK_PATH`, ...) |
+| **#bench** | isukit | bench results: score, delta and verdict vs main, branch / who / what changed, PR, the pinned host, alp top 3 — **the score history, top to bottom** |
+| **#servers** | isukit | lock / unlock (whose turn), deploy (who shipped which branch), final apply and finalize results |
+| **#git** | GitHub | PRs opened / merged, pushes to main, CI failures |
+| voice | people | open all contest long |
+
+**Before the day:** create a webhook in #bench and #servers (channel settings
+→ Integrations → Webhooks) and put the URLs in **each** laptop's
+`.isukit/config` — anyone with the URL can post, so never in the repo
+(`isukit.conf` included):
+
+```
+DISCORD_WEBHOOK_BENCH='https://discord.com/api/webhooks/...'   # #bench
+DISCORD_WEBHOOK_OPS='https://discord.com/api/webhooks/...'     # #servers
+# one hook for both: DISCORD_WEBHOOK
+```
+
+Unset means nothing is sent. A post gives up after 5s and a failure only warns.
+
 ## Team rules — agree to these before the clock starts
 
 **Both of you develop; the servers take turns.** Branches run in parallel, but

@@ -192,6 +192,10 @@ without main, and records what it deployed on the server; every bench is shared
 on the `isukit-runs` branch, and attribute compares against main's latest run
 (RUNBOOK, team rules).
 
+Discord: with `DISCORD_WEBHOOK_BENCH` (bench results) and `DISCORD_WEBHOOK_OPS`
+(lock / unlock, deploy, final, finalize) in `.isukit/config`, isukit posts to
+them (channel layout: RUNBOOK, Discord).
+
 Team sharing: roles (`isukit.hosts`), team-wide settings (`isukit.conf`),
 each host's env file (`hosts/<host>/`) and config (`etc/`) are committed, so all
 three laptops act on the same picture. Only ssh targets / keys
