@@ -2,3 +2,4 @@
 *.key
 launch/prestage.env
 .isukit/
+.e2e-bin/

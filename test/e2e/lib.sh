@@ -8,7 +8,7 @@
 set -u
 K=/k                     # the repo, mounted read-only by run.sh
 # shellcheck disable=SC2034  # used by the scenarios that source this file
-I="$K/isukit"
+I="${ISUKIT_BIN:-$K/isukit}"   # run.sh with E2E_GO=1 points this at the Go binary
 FAILS=0
 
 pkgs() { apt-get update -qq >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" >/dev/null 2>&1; }
