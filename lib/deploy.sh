@@ -104,6 +104,7 @@ cmd_finalize() {
   [ -z "$left" ] || printf '%s\n' "$left" | while read -r h u; do
     warn "$h has no db role but $u is still ENABLED — it comes back on this reboot: ssh $h sudo systemctl disable --now $u"
   done
+  cmd_final_check || warn "the final check found things that still cost score (above) — isukit final apply, bench, then finalize"
   say "1/4 turning measurement logging OFF (it costs real score)"
   cmd_logs off
   say "2/4 rebooting: $hosts"

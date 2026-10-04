@@ -16,6 +16,9 @@ apt_get() { sudo DEBIAN_FRONTEND=noninteractive apt-get "$@"; }
 command -v pidstat >/dev/null || {
   apt_get update -qq && apt_get install -y -qq sysstat >/dev/null && echo "sysstat installed"
 } || echo "sysstat install failed (non-fatal — bench runs lose per-process CPU)"
+# Ubuntu turns sysstat's background collectors on at install; isukit only runs
+# pidstat during a bench, and a collector firing mid-run costs score
+sudo systemctl disable --now sysstat sysstat-collect.timer sysstat-summary.timer >/dev/null 2>&1 || true
 [ "$WANT_ALP" = 1 ] && ! command -v alp >/dev/null && {
   V=1.0.21; A=$(uname -m); case "$A" in x86_64) A=amd64;; aarch64) A=arm64;; esac
   cd /tmp && curl -fsSL -o alp.tar.gz "https://github.com/tkuchiki/alp/releases/download/v${V}/alp_linux_${A}.tar.gz" \

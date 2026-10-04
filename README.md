@@ -56,6 +56,8 @@
 
 終盤：
 
+    isukit final check           # スコアを削る出力（access_log・スローログ・ロガー・pprof・計測の残り）の一覧
+    isukit final apply           # 設定で止められるものを etc/ の差分として止め、全台を片付ける
     isukit finalize              # ログOFF → 全ホスト再起動 → unit確認 → スコア計測
 
 ## なぜリポジトリを読まずにサーバーに聞くのか
