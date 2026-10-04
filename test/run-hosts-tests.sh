@@ -324,6 +324,47 @@ t_show_out_of_range() {
   check -n "$(cmd_show 2 2>/dev/null | grep 'runs/20260101-000000')"
 }
 
+t_db_checks_survive_reprobe() {
+  setup_state isu1 "" "$ROLES"
+  # after the split, mysql is stopped on the probed host: its manifest says no DB
+  sed -i.bak 's/^DB_SERVER=mysql/DB_SERVER=/' .isukit/manifest && rm -f .isukit/manifest.bak
+  cp .isukit/manifest .isukit/manifest.isu1
+  printf 'DB_SERVER=mysql\n' > .isukit/manifest.isu3
+  load
+  check "$(role_units isu3)" = "mysql"           # the db host's own report wins
+  rm .isukit/manifest.isu3
+  printf 'DB_SERVER=mysql\n' > .isukit/manifest.isu2
+  check "$(role_units isu3)" = "mysql"           # unprobed db host: any host's report
+}
+
+t_probe_fleet_compares_hosts() {
+  setup_state isu1 "" "$ROLES"
+  load
+  rsh_stdin() { # each host answers the probe with its own facts
+    cat >/dev/null
+    case "$1" in
+      isu2) printf 'APP_UNIT=other.service\nSRC_DIR=/home/isucon/webapp\nGO_DIR=\nWEB_SERVER=nginx\nDB_SERVER=mysql\n' ;;
+      isu3) printf 'APP_UNIT=isu-go.service\nSRC_DIR=/home/isucon/webapp\nGO_DIR=\nWEB_SERVER=\nDB_SERVER=mysql\n' ;;
+    esac
+  }
+  printf 'SRC_DIR=/home/isucon/webapp\nGO_DIR=\n' >> .isukit/manifest
+  cp .isukit/manifest .isukit/manifest.isu1
+  probe_fleet ""
+  check -f .isukit/manifest.isu2
+  check -f .isukit/manifest.isu3
+  check -n "$(grep "warn: isu2: APP_UNIT is 'other.service'" "$CALLS")"
+  check -n "$(grep 'warn: isu2 has no db role but mysql is running there' "$CALLS")"
+  check -z "$(grep 'warn: isu3' "$CALLS")"
+}
+
+t_db_left_enabled_reported() {
+  setup_state isu1 "" "$ROLES"
+  load
+  rsh() { printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"; case "$1 $*" in "isu2 "*is-enabled*) echo enabled ;; *is-enabled*) echo disabled ;; esac; return 0; }
+  check "$(db_left_enabled)" = "isu2 mysql"
+  check -z "$(grep '^isu3 .*is-enabled' "$CALLS")"   # the db host itself is not asked
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -343,6 +384,9 @@ case_ catchall-follows-app-key        t_catchall_follows_app_key
 case_ bench-records-score-on-failure  t_bench_records_score_when_collection_fails
 case_ stale-pprof-never-saved         t_stale_pprof_never_saved
 case_ show-out-of-range-errors        t_show_out_of_range
+case_ db-checks-survive-reprobe       t_db_checks_survive_reprobe
+case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts
+case_ db-left-enabled-reported        t_db_left_enabled_reported
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]

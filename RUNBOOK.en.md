@@ -486,10 +486,13 @@ Typical progression, contest-independent:
    in `hosts/<host>/`), not in code; on every non-db host,
    `sudo systemctl disable --now mysql` (stopping alone comes back on reboot);
    on the web host, list the app hosts in nginx's upstream (`etc/`).
-3. `isukit deploy` → `isukit bench` → `isukit show` — this can *lose* score if
+3. `isukit probe` again: it probes every host and warns where roles and reality
+   disagree (no MySQL on the db host, MySQL still running on a non-db host, app
+   hosts with a different unit or source dir).
+4. `isukit deploy` → `isukit bench` → `isukit show` — this can *lose* score if
    the app was never DB-bound; revert if so. Check in `show` that the load
    moved to the host you meant.
-4. Put a second app instance behind the web server, load-balanced.
+5. Put a second app instance behind the web server, load-balanced.
 
 Every distribution step adds a new thing that must survive a reboot. Note each
 one; phase 5 checks them.
