@@ -46,6 +46,37 @@ Go-only `deploy`, passwordless-`sudo` requirement) are in `README.md`.
 
 ---
 
+## Freezing isukit (one week before)
+
+On contest day everyone installs **the frozen tag, not main as of that
+morning**, so a last-minute merge can't hand the whole team a broken kit.
+
+**One week before (2026-10-24):** stop merging features and tag a main whose
+CI is green. It is a Go module, so the tag is semver: `v1.0.0`.
+
+```
+git switch main && git pull
+gh run list --branch main --limit 1     # the latest must be success
+git tag -a v1.0.0 -m "ISUCON2026 freeze"
+git push origin v1.0.0
+```
+
+**After the freeze:** only fixes for things that would hurt on the day — PR,
+green CI, merge, then `v1.0.1`, `v1.0.2`, ... **Tell the team the last tag the
+day before.**
+
+**On the day** (everyone):
+
+```
+go install github.com/isucon2026/isukit/cmd/isukit@v1.0.x
+# without Go:
+curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | ISUKIT_REF=v1.0.x bash
+isukit version                           # everyone shows the same v1.0.x
+```
+
+If `go install` does not see a new tag yet, the module proxy is catching up
+(minutes); `GOPROXY=direct go install ...` skips it.
+
 ## Team rules — agree to these before the clock starts
 
 - **One bench owner.** Only one benchmark runs at a time, and one person queues

@@ -317,6 +317,34 @@ isukit init <repo-url> <既にあるディレクトリ名>
 
 ---
 
+## 3.5. isukit の凍結（本番1週間前）
+
+本番当日に全員が入れるのは **main の最新ではなく、凍結したタグ**。前日の変更で壊れた isukit を、当日に全員が入れる事故を防ぐ。
+
+**1週間前（2026-10-24）**：main への機能追加を止め、CI が通っている main にタグを打つ（Go のモジュールとして扱われるので、タグは `v1.0.0` の形）。
+
+```
+git switch main && git pull
+gh run list --branch main --limit 1     # 最新が success であること
+git tag -a v1.0.0 -m "ISUCON2026 freeze"
+git push origin v1.0.0
+```
+
+**凍結のあと**：直すのは、本番で困るバグだけ。PR → CI が通る → マージ → `v1.0.1`、`v1.0.2` … とタグを進める。**前日に最後のタグをチームに伝える。**
+
+**当日の入れ方**（全員）：
+
+```
+go install github.com/isucon2026/isukit/cmd/isukit@v1.0.x
+# Go が無い場合：
+curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | ISUKIT_REF=v1.0.x bash
+isukit version                           # 全員の表示が同じ v1.0.x であること
+```
+
+`go install` で新しいタグが見つからないときは、Go のモジュールプロキシの反映待ち（数分）。急ぐなら `GOPROXY=direct go install …`。
+
+---
+
 ## 4. チームルール（クロック開始前に合意する）
 
 - **ベンチ係は1人。** ベンチは同時に1本だけ。2本走ると全部の数字が無意味になる。キューイングも1人が持つ。

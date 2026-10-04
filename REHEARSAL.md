@@ -15,7 +15,7 @@
 
 ```
 go install github.com/isucon2026/isukit/cmd/isukit@latest
-isukit version              # 全員で表示を突き合わせる（本番は凍結タグを指定する）
+isukit version              # 全員で表示を突き合わせる（本番は凍結タグを指定する。RUNBOOK §3.5）
 gh auth status              # リポジトリ係は必須（go --new が gh で作る）
 ```
 
@@ -49,7 +49,7 @@ launch/launch.sh --ami ami-0fcf9e8e8675a9ee4 --type c5.large --count 4 \
 - [ ] 4台とも Public IP がついている
 - [ ] 全員が `ssh -i isukit.pem ubuntu@<pub1> true` できる
 
-> `launch.sh` が最後に出す案内（`isukit go <repo-url>` / `host add`）は古い。下の §2 に従う。
+> `launch.sh` は最後に、次に打つコマンド（`go --new`・`go`・`host role`）と各台の Private IP を表示する。
 
 ---
 
@@ -68,15 +68,19 @@ cd isu14-rehearsal-<日付>
 - [ ] `.gitignore` に、ビルド済みのアプリと 10MB 超のファイルが入っている（大きなファイルを push していない）
 - [ ] `hosts/<台>/env.sh` に env ファイルがある（以後はこれが正）
 
-**ベンチの宛先を直す（isukit の不足 #1）**
+**ベンチのコマンドを確かめる**
 
-`benchprobe` は宛先を `127.0.0.1` で組み立てるので、別の台で動くベンチは自分自身を叩いてしまう。ベンチマーカーの `--help`（`.isukit/bench-help.txt`）を見て、宛先を **`<priv1>`** にして設定し直す：
+ベンチマーカーが別の台にあるとき、`benchprobe` は宛先を app の台の Private IP（`<priv1>`）にして組み立てる。ただし組み立ては `--help` から推測したものなので、必ず目で確かめる：
 
 ```
-cat .isukit/bench-help.txt
-isukit benchcmd 'sudo -iu isucon sh -c "cd <ベンチのディレクトリ> && ./<bench> <宛先フラグ> <priv1>..."'
+isukit benchcmd                      # 組み立てたコマンドを表示
+cat .isukit/bench-help.txt           # ベンチマーカーのフラグ一覧
+# 違っていれば直す：
+isukit benchcmd 'sudo -iu isucon sh -c "cd <ベンチのディレクトリ> && ./<bench> ..."'
 isukit benchmode auto
 ```
+
+- [ ] 宛先が `<priv1>` になっている（`127.0.0.1` ではない）
 
 - [ ] `isukit doctor` が全部 OK（ベンチ用の台にも届く）
 
@@ -248,11 +252,11 @@ aws ec2 delete-key-pair --key-name isukit
 
 | # | 足りないもの | 本番での影響 | 対応案 | 優先度 |
 |---|---|---|---|---|
-| 1 | `benchprobe` がベンチの宛先を常に `127.0.0.1` にする | 別の台のベンチが自分を叩く（練習のみ。本番はポータル） | `--target` 系のフラグに app の台の Private IP を入れる | 中 |
+| 1 | ~~`benchprobe` がベンチの宛先を常に `127.0.0.1` にする~~ | — | **対応済み**：別の台なら app の台の Private IP を宛先にする | — |
 | 2 | 構成の分割が手作業（bind-address・DB ユーザー・接続先・MySQL の停止・upstream） | 本番で最も時間を使い、ミスも出やすい（§5） | 役割に合わせて構成を変える段階2の機能 | **高** |
 | 3 | ~~役割・config が各自の手元にしかない~~ | — | **対応済み**：役割は `isukit.hosts`、チーム共通の設定は `isukit.conf`（どちらも repo） | — |
 | 4 | ~~env ファイルを git で管理していない~~ | — | **対応済み**：`hosts/<台>/` が正、`isukit env push`（deploy でも）で書き込む | — |
 | 5 | スコアと計測の記録（`scores.tsv`・`runs/`）が、ベンチを流した人の手元にしかない | 他の2人が `show` / `attribute` を見られない | 記録を repo（別ブランチなど）に push して共有する | 中 |
-| 6 | `launch.sh` の最後の案内が古い（`go <repo-url>` / `host add`） | 当日の手順を間違える | `go --new` / `host role` を案内する | 低（すぐ直せる） |
-| 7 | 凍結（タグ）の手順が決まっていない | 当日に main の最新を入れて壊れる | 1週間前にタグを打つ手順を RUNBOOK に | 中（すぐ決められる） |
+| 6 | ~~`launch.sh` の最後の案内が古い~~ | — | **対応済み**：`go --new` / `go` / `host role` と各台の Private IP を案内する | — |
+| 7 | ~~凍結（タグ）の手順が決まっていない~~ | — | **対応済み**：RUNBOOK §3.5（`v1.0.0` を打ち、当日は `@v1.0.x` / `ISUKIT_REF=v1.0.x`） | — |
 | 8 | 複数の app の台でファイルを共有する仕組みがない（画像をローカルに保存するアプリなど） | 台を増やすと一部のリクエストが失敗する | 問題次第。RUNBOOK に注意として書く | 低 |
