@@ -22,15 +22,13 @@ for a in "$@"; do
 done
 
 TAIL_SCRIPT="$(awk '
-  /^BENCH_PROBE_SCRIPT='"'"'$/ { grab=1; next }
-  grab && /^S\(\) \{/ { print; next }
-  grab && /^has_tok\(\) \{/ { tail=1 }
-  grab && /^'"'"'$/ { exit }
-  grab && tail { print }
-' "$ISUKIT")"
+  /^S\(\) \{/ { print; next }
+  /^has_tok\(\) \{/ { tail=1 }
+  tail { print }
+' "$(dirname "$ISUKIT")/remote/bench-probe.sh")"
 
 if [ -z "$TAIL_SCRIPT" ]; then
-  echo "FATAL: could not extract the has_tok tail of BENCH_PROBE_SCRIPT from $ISUKIT" >&2
+  echo "FATAL: could not extract the has_tok tail from remote/bench-probe.sh" >&2
   exit 2
 fi
 

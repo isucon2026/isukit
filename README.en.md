@@ -164,6 +164,12 @@ is low-confidence. Sanity-check that line; fix a wrong pick with
 All git-ignored. `.isukit/` lives inside each cloned problem repo, so multiple
 contests coexist without stepping on each other.
 
+Development: `bash test/run-all.sh` (offline suites), `bash test/e2e/run.sh` (the
+real isukit end to end in docker), and shellcheck (command in
+[`test/README.md`](test/README.md)); CI runs all three on every PR. Everything
+that runs on a host lives as a plain script in `remote/`; isukit only ships it
+over ssh.
+
 Subdirectories: [`launch/`](launch/README.md) holds AWS pre-contest staging and
 instance bootstrap scripts; [`skills/isucon/`](skills/isucon/SKILL.md) is a Claude
 skill for the measure → diagnose → fix → ship → re-measure loop; [`test/`](test/)

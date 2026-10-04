@@ -1,6 +1,6 @@
 #!/bin/bash
-# Runs remote/etc-adopt.sh and remote/etc-status.sh as-is, plus LOGS_SCRIPT
-# (extracted verbatim from ../isukit), against a throwaway /etc tree and asserts
+# Runs remote/etc-adopt.sh, remote/etc-status.sh and remote/logs.sh as-is
+# against a throwaway /etc tree and asserts
 # the symlink-management
 # contract: adopt moves configs into <repo>/etc and links them back, is idempotent,
 # rolls back a tier that fails its check, lets the repo win on a fresh box, and
@@ -8,21 +8,13 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ISUKIT="$HERE/../isukit"
 ADOPT_SH="$HERE/../remote/etc-adopt.sh"
 STATUS_SH="$HERE/../remote/etc-status.sh"
 VERBOSE=0
 for a in "$@"; do [ "$a" = "-v" ] && VERBOSE=1; done
 
-extract() { # extract <VAR> -- the body of a VAR='...' heredoc-style assignment
-  awk -v v="$1" '
-    $0 == v "='"'"'" { grab=1; next }
-    grab && /^'"'"'$/ { exit }
-    grab { print }
-  ' "$ISUKIT"
-}
-LOGS="$(extract LOGS_SCRIPT)"
-[ -n "$LOGS" ] || { echo "FATAL: could not extract LOGS_SCRIPT from $ISUKIT" >&2; exit 2; }
+LOGS="$(cat "$HERE/../remote/logs.sh" 2>/dev/null)"
+[ -n "$LOGS" ] || { echo "FATAL: could not read remote/logs.sh" >&2; exit 2; }
 for f in "$ADOPT_SH" "$STATUS_SH"; do
   [ -f "$f" ] || { echo "FATAL: missing $f" >&2; exit 2; }
 done

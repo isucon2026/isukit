@@ -108,6 +108,8 @@ ISUCONのリポジトリ構成は何ひとつ安定していない。isucon9, 10
 
 全部git-ignore済み。`.isukit/` はcloneした各問題リポジトリの中に入るので、複数のコンテストが互いに干渉せず同居できる。
 
+開発：`bash test/run-all.sh`（オフラインのテスト）、`bash test/e2e/run.sh`（Docker の中で isukit を通しで動かす）、shellcheck（コマンドは [`test/README.md`](test/README.md)）。3つとも PR ごとに CI で回る。サーバー側で動く処理は `remote/` に普通のスクリプトとして置き、isukit は ssh で送るだけ。
+
 サブディレクトリ：[`launch/`](launch/README.md) はAWSでの競技前ステージングとインスタンス起動スクリプト。[`skills/isucon/`](skills/isucon/SKILL.md) は計測 → 診断 → 修正 → ship → 再計測ループ用のClaude skill。[`test/`](test/) は過去の全ISUCONの実際のsystemd unitと設定を使って発見ロジックをオフライン検証するフィクスチャ集。
 
 ## 注意点

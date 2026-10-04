@@ -9,7 +9,37 @@ bash test/run-all.sh isucon8-final    # one fixture (the other suite says "skip"
 bash test/run-all.sh -v isucon13      # ...and dump the full probe output
 ```
 
-Current state: **68 fixtures, 68 passed, 0 failed** (17 probe + 13 bench + 11 etc + 22 hosts + 5 alp).
+Current state: **68 fixtures, 68 passed, 0 failed** (17 probe + 13 bench + 11 etc + 22 hosts + 5 alp),
+plus **4 e2e scenarios** (`test/e2e/`). CI (`.github/workflows/ci.yml`) runs shellcheck,
+this suite and the e2e scenarios on every PR.
+
+## e2e (`test/e2e/`, needs docker)
+
+```
+bash test/e2e/run.sh            # etc, bench, new, alp — each in its own ubuntu:24.04 container
+bash test/e2e/run.sh bench      # one
+```
+
+Each scenario runs the real `isukit` with `APP=local` inside a throwaway container,
+so it can rewrite `/etc`, install sysstat / rsync / git and start real samplers. Only
+the services are stubbed (`systemctl`, `nginx`, `mysql`, `sudo`, and `gh`, which
+pushes to a local bare repo) — see `test/e2e/lib.sh`. `etc`: adopt → status → push →
+pull guards → logs on/off through the links. `bench`: one measured run with real
+vmstat/pidstat and a pprof stand-in. `new`: `go --new` builds both baselines. `alp`:
+the real alp binary reading the derived groups (downloads alp v1.0.21).
+
+## Lint
+
+```
+docker run --rm -v "$PWD:/mnt" koalaman/shellcheck:v0.10.0 -S warning \
+  isukit install.sh launch/*.sh remote/*.sh test/*.sh test/e2e/*.sh \
+  test/bin/docker test/bin/sudo test/bin/supervisorctl test/bin/free test/bin/nproc
+```
+
+Pinned by image tag, the same command CI runs — nothing to install. `.shellcheckrc`
+disables only SC1090 (runtime-path `source`s); every other exception is a commented
+directive at the line. Host-side scripts live as files in `remote/` precisely so
+shellcheck can see them.
 
 `run-alp-tests.sh` feeds `remote/alp.sh` synthetic LTSV logs shaped like past contests
 and asserts the alp groups it derives (ids and high fan-out segments collapse, a far
