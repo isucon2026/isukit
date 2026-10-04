@@ -20,7 +20,7 @@ gh auth status              # リポジトリ係は必須（go --new が gh で�
 ```
 
 - [ ] 全員の `isukit version` が同じ
-- [ ] Discord に #作戦・#ベンチ・#サーバー・#git を作り、#ベンチ・#サーバーの Webhook を各自の `.isukit/config` に書いた（RUNBOOK §3.6）
+- [ ] Discord に #作戦・#ベンチ・#サーバー・#git を作り、3つの Webhook を各自のシェルの設定に `export` した（RUNBOOK §3.6）
 - [ ] 鍵ファイル（`isukit.pem`）を受け取り、`chmod 600` 済み
 
 **リポジトリ係（AWS 担当）**
@@ -64,7 +64,8 @@ isukit go --new <team>/isu14-rehearsal-<日付> ubuntu@<pub1> ubuntu@<pub4> \
 cd isu14-rehearsal-<日付>
 ```
 
-- [ ] GitHub の `main` に「baseline: …」と「etc: …」の2コミットがある
+- [ ] GitHub の `main` に「baseline: …」「etc: …」「ci: …」の3コミットがあり、Actions の CI が緑
+- [ ] #git に push と CI の結果が流れている
 - [ ] `ssh ubuntu@<pub1> readlink /etc/nginx/nginx.conf` が repo の `etc/` を指す
 - [ ] `.gitignore` に、ビルド済みのアプリと 10MB 超のファイルが入っている（大きなファイルを push していない）
 - [ ] `hosts/<台>/env.sh` に env ファイルがある（以後はこれが正）
