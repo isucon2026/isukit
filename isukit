@@ -225,7 +225,8 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                    webhooks: bench results / lock, deploy, final, finalize. DISCORD_WEBHOOK
                    = both. unset = nothing is sent; a failed post only warns.
                    DISCORD_WEBHOOK_GIT: go --new (or isukit notify github) makes GitHub
-                   post pushes, PRs and CI results there
+                   post pushes, PRs and CI results there. Every post starts with
+                   [<repo>] (NOTIFY_TAG overrides)
     FINAL_CHECK_PATH  path finalize requests after the reboot (default /); pick one that
                    touches the DB. FINAL_APP_PORT if the app's port is not discoverable
     PPROF_PORT     pprof listener on app hosts (default 6060); PPROF_SEC (30) and
