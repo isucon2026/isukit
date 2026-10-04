@@ -19,6 +19,9 @@ check "status: all linked"                   "$I" etc status >/dev/null 2>&1
 
 echo "etc push"
 sed -i 's/max_connections = 1000/max_connections = 2000/' etc/mysql/mysql.conf.d/mysqld.cnf
+# same size, same mtime as the server copy: what a quick edit within the second
+# of the last sync looks like — rsync's size+mtime check alone would skip it
+touch -r /home/isucon/webapp/etc/mysql/mysql.conf.d/mysqld.cnf etc/mysql/mysql.conf.d/mysqld.cnf
 "$I" etc push >/tmp/out 2>&1
 check "live /etc sees the laptop edit"       grep -q 2000 /etc/mysql/mysql.conf.d/mysqld.cnf
 check "only mysql restarted"                 grep -q 'restarting the DB' /tmp/out

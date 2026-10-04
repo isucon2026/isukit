@@ -702,10 +702,13 @@ logs_are_on() { # on this host: nginx carries isukit logging, or mysql logs to i
 etc_rsync() { # etc_rsync <src> <dst> [rsync opts...] -- one side is $APP:..., the other local
   local src="$1" dst="$2" rp="--rsync-path=sudo -n rsync"
   shift 2
+  # -c: compare content, not size+mtime. A same-size edit (1000 -> 2000) within
+  # the second of the last sync looks unchanged to rsync's quick check, and the
+  # push silently copies nothing. The files are small; checksums are cheap.
   if [ "$APP" = "local" ]; then
-    sudo -n rsync -rlt "$@" "${src#local:}" "${dst#local:}"
+    sudo -n rsync -rltc "$@" "${src#local:}" "${dst#local:}"
   else
-    rsync -rlt "$@" "$rp" -e "ssh ${SSH_OPTS:-}" "$src" "$dst"
+    rsync -rltc "$@" "$rp" -e "ssh ${SSH_OPTS:-}" "$src" "$dst"
   fi
 }
 
