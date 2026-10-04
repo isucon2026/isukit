@@ -126,6 +126,11 @@ deployed() { # "sha branch" the servers run: the deploy record, else this checko
 
 # --- shared runs: a branch of the team repo, one directory per run
 shared_dir() { printf '%s/%s/shared\n' "$(local_repo_root)" "$STATE"; }
+shared_git() { # git in the runs worktree; its commits are isukit's records, authored as the runner
+  local who
+  who=$(who_am_i)
+  git -C "$(shared_dir)" -c user.name="$who" -c user.email="$who@isukit" "$@"
+}
 shared_ready() { # make .isukit/shared a worktree of the runs branch, up to date; false if there is no remote
   local root d
   root=$(local_repo_root); d=$(shared_dir)
@@ -140,10 +145,10 @@ shared_ready() { # make .isukit/shared a worktree of the runs branch, up to date
       git -C "$d" checkout -q --orphan "$SHARED_RUNS_BRANCH" && git -C "$d" rm -rqf . >/dev/null 2>&1
       git -C "$d" clean -fdq >/dev/null 2>&1
       printf '# isukit runs\n\nOne directory per `isukit bench`, published by whoever ran it.\n' > "$d/README.md"
-      git -C "$d" add README.md && git -C "$d" commit -q -m "isukit runs" || return 1
+      shared_git add README.md && shared_git commit -q -m "isukit runs" || return 1
     fi
   else
-    git -C "$d" pull -q --rebase origin "$SHARED_RUNS_BRANCH" >/dev/null 2>&1 || true
+    shared_git pull -q --rebase origin "$SHARED_RUNS_BRANCH" >/dev/null 2>&1 || true
   fi
 }
 runs_publish() { # runs_publish <run-dir> -- copy the run into the shared branch and push it
@@ -159,11 +164,11 @@ runs_publish() { # runs_publish <run-dir> -- copy the run into the shared branch
     cp "$f" "$d/runs/$name/"
   done
   [ -f "$run/bench.log" ] && tail -200 "$run/bench.log" > "$d/runs/$name/bench.log"
-  git -C "$d" add "runs/$name" && git -C "$d" commit -q -m "run $name: $(sed -n 's/^score=//p' "$run/meta" 2>/dev/null)" || return 0
+  shared_git add "runs/$name" && shared_git commit -q -m "run $name: $(sed -n 's/^score=//p' "$run/meta" 2>/dev/null)" || return 0
   # one directory per run: a rebase onto someone else's run never conflicts
   for _ in 1 2 3; do
     git -C "$d" push -q origin "$SHARED_RUNS_BRANCH" >/dev/null 2>&1 && { say "run shared: $SHARED_RUNS_BRANCH/runs/$name"; return 0; }
-    git -C "$d" pull -q --rebase origin "$SHARED_RUNS_BRANCH" >/dev/null 2>&1 || true
+    shared_git pull -q --rebase origin "$SHARED_RUNS_BRANCH" >/dev/null 2>&1 || true
   done
   warn "could not push $SHARED_RUNS_BRANCH — the run is committed in $d; push it later: git -C $d push origin $SHARED_RUNS_BRANCH"
 }
