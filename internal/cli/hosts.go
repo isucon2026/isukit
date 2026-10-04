@@ -34,7 +34,7 @@ func hostsCmd() *cobra.Command {
 func listHosts(a *app.App) error {
 	hs := a.Hosts
 	if !hs.FromFile {
-		a.Say("no %s/hosts — pre-roles layout (%s does everything). set roles: isukit host role <target> <roles>", app.State, hs.Primary)
+		a.Say("no %s — pre-roles layout (%s does everything). set roles: isukit host role <target> <roles>", hs.File, hs.Primary)
 	}
 	for _, h := range hs.List {
 		units := strings.Join(hs.Units(h, a.Get("APP_UNIT"), a.Get("EXTRA_UNITS")), " ")
@@ -53,7 +53,7 @@ func listHosts(a *app.App) error {
 		a.Warn("no host has role app — deploy/restart have nowhere to go")
 	}
 	if !hs.Has(hs.Primary) {
-		a.Warn("APP=%s (the probed host) is not listed in %s/hosts", hs.Primary, app.State)
+		a.Warn("APP=%s (the probed host) is not listed in %s", hs.Primary, hs.File)
 	}
 	return nil
 }

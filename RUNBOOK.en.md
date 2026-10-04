@@ -323,8 +323,9 @@ isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i
 2. **Config baseline:** nginx / mysql / app-unit config moves into the repo's
    `etc/` and `/etc` symlinks to it (same as `isukit etc adopt`: replaced files
    backed up under `/etc/isukit-orig/`, AppArmor rule for mysqld). Each host's
-   env file is *copied* to `hosts/<host>/` as a record — env differs per host,
-   so it is not linked. Committed and pushed as a second commit.
+   env file is copied to `hosts/<host>/` — env differs per host, so it is not
+   linked; from then on that repo copy is the truth, written to the host by
+   `isukit env push` (or deploy). Committed and pushed as a second commit.
 3. Then the usual `go`: tools, logging on, BENCH_CMD.
 
 `main` ends up with two commits — code before any change, config before any
@@ -519,8 +520,9 @@ Typical progression, contest-independent:
 2. Change the layout by hand (roles only route isukit): on the db host, let
    MySQL accept remote connections (`bind-address` in `etc/`'s mysqld.cnf, a
    remote user); on app hosts, point the app at the db host — the connection
-   config is in the env file (`ENV_FILE` in `.isukit/manifest`; the original is
-   in `hosts/<host>/`), not in code; on every non-db host,
+   config is in the env file, not in code: edit the repo's
+   `hosts/<host>/env.sh` (`isukit env pull` if missing), commit it, and
+   `isukit env push` (or deploy) — never edit it on the box; on every non-db host,
    `sudo systemctl disable --now mysql` (stopping alone comes back on reboot);
    on the web host, list the app hosts in nginx's upstream (`etc/`).
 3. `isukit probe` again: it probes every host and warns where roles and reality
@@ -674,6 +676,7 @@ isukit deploy               # rsync + build onto the systemd ExecStart path + re
 isukit restart              # restart the app units on every app host
 isukit logs on|off          # nginx LTSV + mysql slow log
 isukit etc adopt|status|push|pull  # nginx/mysql/unit config into the repo's etc/, symlinked from /etc
+isukit env status|pull|push         # each host's env file kept as hosts/<host>/ in the repo, written to it
 isukit ship "note"          # new branch -> commit -> push -> draft PR
 isukit revert [sha]         # git revert to undo a change
 isukit finalize             # the endgame sequence (all hosts)

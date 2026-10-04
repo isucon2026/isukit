@@ -186,6 +186,11 @@ it in `internal/cli`, drop it from `Passthrough`, and add a test holding its
 output identical to the bash one (`TestHostsMatchesBash` is the pattern).
 `version` and `hosts` are native today.
 
+Team sharing: roles (`isukit.hosts`), team-wide settings (`isukit.conf`),
+each host's env file (`hosts/<host>/`) and config (`etc/`) are committed, so all
+three laptops act on the same picture. Only ssh targets / keys
+(`.isukit/config`) and probe results / run records (`.isukit/`) stay local.
+
 Layout: `isukit` is only the entry point (config, loading `lib/`, help,
 dispatch). Laptop-side code lives in `lib/` by feature (core, hosts, probe,
 logs, etc, runs, analyze, deploy, repo, go, doctor); everything that runs on a

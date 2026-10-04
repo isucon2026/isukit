@@ -281,7 +281,7 @@ isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i
 
 1. **コードのベースライン。** probe で見つけたサーバーの webapp（`SRC_DIR`）を手元に持ってきて、`git init` → コミット → `gh repo create --private` → push。`--invite` の人を Collaborator（push 権限）に招待する。GitHub の認証は手元の `gh` だけを使い、サーバーには何も置かない
    - 入れないもの：`node_modules`・ログ・ビルド済みのアプリ（systemd が動かしているバイナリ）・10MB を超えるファイル（DB のダンプや大きな画像など）。どれも `.gitignore` に書かれ、サーバー側には残る
-2. **設定のベースライン。** `/etc` の nginx・MySQL・アプリの unit ファイルを repo の `etc/` に移して、`/etc` からシンボリックリンクを張る（`isukit etc adopt` と同じ。置き換えたファイルは `/etc/isukit-orig/` にバックアップ、MySQL の AppArmor 許可も追加）。各台の env ファイル（`/home/isucon/env.sh` など）は `hosts/<台>/` に**控えとして**コピーする（台ごとに中身が違うのでリンクはしない）。ここまでを2つ目のコミットにして push
+2. **設定のベースライン。** `/etc` の nginx・MySQL・アプリの unit ファイルを repo の `etc/` に移して、`/etc` からシンボリックリンクを張る（`isukit etc adopt` と同じ。置き換えたファイルは `/etc/isukit-orig/` にバックアップ、MySQL の AppArmor 許可も追加）。各台の env ファイル（`/home/isucon/env.sh` など）は `hosts/<台>/` にコピーする（台ごとに中身が違うのでリンクはしない）。以後はこの repo のコピーが正で、編集して `isukit env push`（または `deploy`）で各台に書き込む。ここまでを2つ目のコミットにして push
 3. **いつもの `go` の続き。** ツールのインストール → 計測ログ on → ベンチコマンドの組み立て
 
 終わると、`main` に「コードのベースライン」「設定のベースライン」の2コミットがあり、手元は `work` ブランチにいる。**この2つが唯一の戻り先。** 作らずに走り出すと、スコアが落ちたときに戻る場所が無い。
@@ -475,7 +475,7 @@ isukit attribute 5         # 閾値を ±5% に設定
 1. **役割を付け直す。** 例：`isukit host role <ip1> web,app` / `isukit host role <ip2> app` / `isukit host role <ip3> db`。以後 `deploy` / `restart` は app の台、nginx のログと alp は web の台、スロークエリと slow は db の台に行く（§2 の「複数インスタンス」）
 2. **構成は手で変える**（isukit は役割に合わせて送り先を変えるだけ）：
    - db の台：MySQL が他の台から接続を受けるようにする（`etc/` の `mysqld.cnf` の `bind-address`、接続用ユーザーの作成）
-   - app の台：アプリの接続先を db の台に向ける。接続設定は**コードではなく env ファイル**（`.isukit/manifest` の `ENV_FILE`、元の中身は `hosts/<台>/` に控えがある）
+   - app の台：アプリの接続先を db の台に向ける。接続設定は**コードではなく env ファイル**にある。repo の `hosts/<台>/env.sh`（無ければ `isukit env pull` で取り込む）を編集して commit し、`isukit env push`（または `deploy`）で書き込む。サーバーの上で直接編集しない
    - db 以外の台：MySQL を止めて自動起動も切る（`sudo systemctl disable --now mysql`）。止めるだけだと `finalize` の再起動で復活する
    - web の台：nginx の upstream に app の台を並べる（`etc/` の nginx 設定）
 3. `isukit probe` をし直す。全台を調べて、役割と実際に動いているものが食い違っていれば警告する（db の台で MySQL が動いていない、db 以外の台で MySQL がまだ動いている、app の台どうしで unit 名や置き場所が違う、など）
@@ -617,6 +617,7 @@ isukit benchmode [auto|manual] # ベンチモードを表示または変更
 isukit unit <unit名>           # probe のunit選択を手で上書き
 isukit logs on|off             # nginx LTSV ＋ MySQLスローログ
 isukit etc adopt|status|push|pull  # nginx/MySQL/unit 設定を repo の etc/ に移して /etc からリンク・反映
+isukit env status|pull|push    # 各台の env ファイルを repo の hosts/<台>/ で管理して書き込む
 isukit doctor                  # config / 接続 / manifest / unit / ツール / ログ / ディスク / ベンチモードを診断・修復
 isukit os                      # サーバーのスナップショット（uptime / vmstat / iostat / mpstat / free / df）
 isukit bench "メモ"            # スコア＋git sha を .isukit/scores.tsv に記録 (manual モード: --score N / --fail)
@@ -633,7 +634,7 @@ isukit revert [<sha>]          # git revert で変更を打ち消す
 isukit finalize                # 終盤の締め処理一式（全ホスト再起動）
 ```
 
-**repo に入るもの**：`etc/`（`/etc` からリンクされている設定の実体）、`hosts/<台>/`（各台の env ファイルの控え）
+**repo に入るもの（チームで共有する）**：`etc/`（`/etc` からリンクされている設定の実体）、`hosts/<台>/`（各台の env ファイル。`env push` で書き込む）、`isukit.hosts`（台ごとの役割）、`isukit.conf`（チーム共通の設定。`FINAL_CHECK_PATH`・`ALP_MATCHES` など。各自の `.isukit/config` が後に読まれて優先される）
 
 **ファイル**（全部 git-ignore 済み、各リポジトリの `.isukit/` の中）
 

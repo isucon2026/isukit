@@ -55,7 +55,11 @@ looks_like_keyfile() { # looks_like_keyfile <path> -- existing, readable, and na
 need_state() { [ -f "$CONF" ] || die "no $CONF here. cd into the problem repo, or run: isukit init <repo-url>"; }
 
 load() {
-  need_state; . "$CONF"; [ -f "$STATE/manifest" ] && . "$STATE/manifest" || true
+  need_state
+  # team-wide settings (committed) first, then this laptop's own: yours win
+  [ -f isukit.conf ] && . ./isukit.conf
+  . "$CONF"; [ -f "$STATE/manifest" ] && . "$STATE/manifest" || true
+  resolve_hosts_file
   # shellcheck disable=SC2034  # PRIMARY is read by the roles code in lib/hosts.sh
   PRIMARY="$APP"                                  # the host probe reads the manifest from
   [ -n "${HOST_OVERRIDE:-}" ] && APP="$HOST_OVERRIDE"  # on_hosts: this run targets one host

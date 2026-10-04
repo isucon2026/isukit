@@ -23,4 +23,13 @@ check "ETC_REPO pinned to the webapp"        grep -qx "ETC_REPO='/home/isucon/we
 check "config baseline has no log markers"   bash -c '! git show main:etc/nginx/nginx.conf | grep -q isukit'
 check "collaborators invited"                [ "$(grep -c 'collaborators/' /tmp/gh.calls)" = 2 ]
 check "left on the work branch"              [ "$(git branch --show-current)" = work ]
+
+echo "team sharing: roles and env files in the repo"
+"$I" host role local web,app,db >/dev/null 2>&1
+check "roles written to the shared isukit.hosts" [ -f isukit.hosts ] && [ ! -f .isukit/hosts ]
+sed -i 's/127.0.0.1/10.0.1.13/' hosts/local/env.sh
+"$I" env push >/tmp/env.out 2>&1
+check "env push writes the host's env file"   grep -q 'MYSQL_HOST=10.0.1.13' /home/isucon/env.sh
+check "and restarts the app"                  grep -q 'restarting the app' /tmp/env.out
+check "env status: same"                      bash -c '"$0" env status 2>/dev/null | grep -q " same$"' "$I"
 finish

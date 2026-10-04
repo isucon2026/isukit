@@ -40,7 +40,7 @@ say()  { :; }
 warn() { printf 'warn: %s\n' "$*" >> "$CALLS"; }
 
 setup_state() { # setup_state <APP> <EXTRA_HOSTS> [hosts-file-content]
-  rm -rf .isukit; mkdir -p .isukit
+  rm -rf .isukit isukit.hosts isukit.conf hosts; mkdir -p .isukit
   cat > .isukit/config <<EOF
 APP=$1
 BENCH=bench
@@ -136,13 +136,15 @@ t_host_role_seeds_file() {
   setup_state isu1 "isu2"
   load
   cmd_host role isu3 db >/dev/null 2>&1
-  check -f .isukit/hosts
-  check "$(awk '!/^#/' .isukit/hosts | tr '\n' ';')" = "isu1 web,app,db;isu2 app;isu3 db;"
+  # roles go to the committed, shared file
+  check -f isukit.hosts
+  check ! -f .isukit/hosts
+  check "$(awk '!/^#/' isukit.hosts | tr '\n' ';')" = "isu1 web,app,db;isu2 app;isu3 db;"
   cmd_host role isu1 web,app >/dev/null 2>&1
-  check "$(awk '$1=="isu1"{print $2}' .isukit/hosts)" = "web,app"
-  check "$(grep -c '^isu1 ' .isukit/hosts)" = 1
+  check "$(awk '$1=="isu1"{print $2}' isukit.hosts)" = "web,app"
+  check "$(grep -c '^isu1 ' isukit.hosts)" = 1
   cmd_host add isu4 >/dev/null 2>&1
-  check "$(awk '$1=="isu4"{print $2}' .isukit/hosts)" = "app"
+  check "$(awk '$1=="isu4"{print $2}' isukit.hosts)" = "app"
   ( cmd_host role isu5 cache ) >/dev/null 2>&1
   check "$?" != 0
 }
@@ -273,7 +275,7 @@ t_etc_pull_leaves_out_disagreeing_files() {
 t_host_app_moves_hosts_line() {
   setup_state isu1 "" "$ROLES"
   cmd_host app isu9 >/dev/null 2>&1
-  check "$(awk '$1=="isu9"{print $2}' .isukit/hosts)" = "web,app"
+  check "$(awk '$1=="isu9"{print $2}' .isukit/hosts)" = "web,app"   # a lone legacy file is still edited in place
   check -z "$(awk '$1=="isu1"' .isukit/hosts)"
 }
 
@@ -399,6 +401,57 @@ t_finalize_http_per_role() {
   check -z "$(grep '^isu3 ' "$CALLS")"
 }
 
+t_legacy_hosts_moves_to_shared() {
+  setup_state isu1 "" "$ROLES"                       # a .isukit/hosts from before sharing
+  load
+  check "$(hosts_with db)" = "isu3"                  # still read while it is the only one
+  cmd_host role isu2 app,db >/dev/null 2>&1
+  check -f isukit.hosts
+  check ! -f .isukit/hosts
+  check "$(awk '$1=="isu3"{print $2}' isukit.hosts)" = "db"    # nothing dropped in the move
+  check "$(awk '$1=="isu2"{print $2}' isukit.hosts)" = "app,db"
+  # once both exist, the shared one wins
+  printf 'stale web,app,db\n' > .isukit/hosts
+  load
+  check -z "$(hosts_all | grep stale)"
+}
+
+t_shared_conf_under_laptop() {
+  setup_state isu1 "" "$ROLES"
+  printf "FINAL_CHECK_PATH='/api/team'\nALP_THRESH=7\n" > isukit.conf
+  printf "ALP_THRESH=9\n" >> .isukit/config
+  load
+  check "$FINAL_CHECK_PATH" = "/api/team"            # the team's setting reaches everyone
+  check "$ALP_THRESH" = 9                            # a laptop can still override
+}
+
+t_env_push_changed_hosts_only() {
+  setup_state isu1 "" "$ROLES"
+  printf 'ENV_FILE=/home/isucon/env.sh\n' >> .isukit/manifest
+  load
+  local_repo_root() { printf '%s\n' "$WORK"; }
+  mkdir -p hosts/isu1 hosts/isu2 hosts/isu3
+  printf 'DB_HOST=10.0.1.13\n' > hosts/isu1/env.sh
+  printf 'DB_HOST=10.0.1.13\n' > hosts/isu2/env.sh
+  printf 'DB_HOST=127.0.0.1\n' > hosts/isu3/env.sh
+  rsh() { # isu3 already has what the repo says; isu1 / isu2 still point at localhost
+    printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"
+    case "$1 $*" in
+      *cksum*) if [ "$1" = isu3 ]; then cksum < hosts/isu3/env.sh; else printf 'DB_HOST=127.0.0.1\n' | cksum; fi ;;
+      *tee*)   cat > "$WORK/written.$1" ;;
+    esac
+    return 0
+  }
+  cmd_env_push >/dev/null 2>&1
+  check "$(cat written.isu1 2>/dev/null)" = "DB_HOST=10.0.1.13"
+  check "$(cat written.isu2 2>/dev/null)" = "DB_HOST=10.0.1.13"
+  check ! -f written.isu3                            # unchanged: not written
+  check "$(hosts_called 'systemctl restart')" = "isu1 isu2"    # the app re-reads its env
+  rm -f written.*; : > "$CALLS"
+  cmd_env_push --from-deploy >/dev/null 2>&1
+  check -z "$(grep 'systemctl restart' "$CALLS")"    # deploy restarts right after
+}
+
 bench_case() { # bench_case <app ips> <bench ips> <target flag> -- the BENCH_CMD benchprobe composes
   setup_state isu1 "" "$ROLES"
   sed -i.bak "s|^BENCH_MODE=manual|BENCH_MODE=auto|" .isukit/config && rm -f .isukit/config.bak
@@ -463,6 +516,9 @@ case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts
 case_ db-left-enabled-reported        t_db_left_enabled_reported
 case_ final-check-per-role            t_final_check_per_role
 case_ finalize-http-per-role          t_finalize_http_per_role
+case_ legacy-hosts-moves-to-shared    t_legacy_hosts_moves_to_shared
+case_ shared-conf-under-laptop        t_shared_conf_under_laptop
+case_ env-push-changed-hosts-only     t_env_push_changed_hosts_only
 case_ bench-target-separate-box       t_bench_target_separate_box
 case_ bench-target-same-box           t_bench_target_same_box
 

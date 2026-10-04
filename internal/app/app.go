@@ -19,6 +19,9 @@ import (
 // State is the per-contest dir inside the problem repo.
 const State = ".isukit"
 
+// SharedConfig holds team-wide settings, committed at the repo root.
+const SharedConfig = "isukit.conf"
+
 // App is one invocation's view of the world.
 type App struct {
 	Dir      string // the problem repo (the working dir)
@@ -39,6 +42,20 @@ func Load(dir string, out, errw io.Writer) (*App, error) {
 		}
 		return nil, err
 	}
+	// team-wide settings (isukit.conf, committed) under this laptop's own
+	shared, err := config.ReadFile(filepath.Join(dir, SharedConfig))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	for k, v := range cfg {
+		if shared == nil {
+			shared = config.Values{}
+		}
+		shared[k] = v
+	}
+	if shared != nil {
+		cfg = shared
+	}
 	man, err := config.ReadFile(filepath.Join(state, "manifest"))
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
@@ -46,7 +63,7 @@ func Load(dir string, out, errw io.Writer) (*App, error) {
 	if man == nil {
 		man = config.Values{}
 	}
-	hs, err := hosts.Load(state, cfg)
+	hs, err := hosts.Load(dir, state, cfg)
 	if err != nil {
 		return nil, err
 	}

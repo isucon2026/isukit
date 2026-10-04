@@ -1,9 +1,10 @@
 // Package hosts is the Go side of lib/hosts.sh: which hosts there are, which
 // roles each holds, and what each one's probe reported.
 //
-// .isukit/hosts has one "<ssh-target> <role,role...>" per line. Without it the
-// pre-roles layout holds: the probed host ($APP) does web, app and db, and
-// every EXTRA_HOSTS entry is an app host.
+// isukit.hosts (repo root, committed so the team shares it) has one
+// "<ssh-target> <role,role...>" per line; an older .isukit/hosts is read while
+// it is the only one. Without either, the pre-roles layout holds: the probed
+// host ($APP) does web, app and db, and every EXTRA_HOSTS entry is an app host.
 package hosts
 
 import (
@@ -42,12 +43,28 @@ type Set struct {
 	List    []Host
 	// FromFile is false for the implied pre-roles layout.
 	FromFile bool
+	// File is the roles file as the bash side names it (relative to the repo).
+	File string
 }
 
-// Load reads <state>/hosts, or derives the pre-roles layout from the config.
-func Load(state string, cfg config.Values) (*Set, error) {
-	s := &Set{State: state, Primary: cfg.Get("APP")}
-	f, err := os.Open(filepath.Join(state, "hosts"))
+// SharedFile is the committed roles file at the repo root.
+const SharedFile = "isukit.hosts"
+
+// Load reads the roles file under dir (the repo) — isukit.hosts, else a
+// lone <state>/hosts — or derives the pre-roles layout from the config.
+func Load(dir, state string, cfg config.Values) (*Set, error) {
+	s := &Set{State: state, Primary: cfg.Get("APP"), File: SharedFile}
+	path := filepath.Join(dir, SharedFile)
+	legacy := filepath.Join(state, "hosts")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if _, err := os.Stat(legacy); err == nil {
+			path = legacy
+			if rel, err := filepath.Rel(dir, legacy); err == nil {
+				s.File = rel
+			}
+		}
+	}
+	f, err := os.Open(path)
 	switch {
 	case err == nil:
 		defer f.Close()
