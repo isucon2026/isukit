@@ -61,6 +61,8 @@ ISUKIT_LIB="$(kit_dir)/lib"
 . "$ISUKIT_LIB/env.sh"
 # shellcheck source=lib/team.sh
 . "$ISUKIT_LIB/team.sh"
+# shellcheck source=lib/notify.sh
+. "$ISUKIT_LIB/notify.sh"
 
 usage() { cat >&2 <<'EOF'
 isukit — repo-agnostic ISUCON bootstrap + measurement loop
@@ -216,6 +218,9 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     BENCH_MODE     auto (ssh + BENCH_CMD) or manual (portal, paste the score)
     ALP_MATCHES    comma-separated alp -m regexes to use instead of derived ones;
                    ALP_THRESH (20) = fan-out at which a path segment becomes a group
+    DISCORD_WEBHOOK_BENCH / DISCORD_WEBHOOK_OPS  (here, never in isukit.conf) Discord
+                   webhooks: bench results / lock, deploy, final, finalize. DISCORD_WEBHOOK
+                   = both. unset = nothing is sent; a failed post only warns
     FINAL_CHECK_PATH  path finalize requests after the reboot (default /); pick one that
                    touches the DB. FINAL_APP_PORT if the app's port is not discoverable
     PPROF_PORT     pprof listener on app hosts (default 6060); PPROF_SEC (30) and

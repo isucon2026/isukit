@@ -21,6 +21,9 @@ cmd_deploy() {
   # compose mode brings each host up itself; binary mode restarts once, everywhere
   [ "${APP_EXEC_RAW#*compose}" != "${APP_EXEC_RAW:-}" ] || cmd_restart
   deploy_record
+  local d_sha d_branch
+  read -r d_sha d_branch <<< "$(deployed)"
+  printf '🚀 %s deployed %s `%s` to %s app host(s)\n' "$(who_am_i)" "$d_branch" "$d_sha" "$(hosts_with app | wc -l | tr -d ' ')" | notify ops
 }
 
 deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it there
@@ -143,14 +146,14 @@ cmd_finalize() {
       sleep 5
     done
   done
-  local want
+  local want units_bad=0
   for h in $hosts; do
     # with roles, each host must bring up what its roles need; without, every
     # host is assumed to be a copy of the probed one.
     if [ -f "$HOSTS_FILE" ]; then want=$(role_units "$h"); else want="${UNITS_ACTIVE:-}"; fi
     [ -n "$want" ] || continue
     rsh "$h" "systemctl is-active $want" \
-      || warn "some units did not come up on their own on $h — enable them: ssh ${SSH_OPTS:-} $h sudo systemctl enable --now $want"
+      || { units_bad=$((units_bad + 1)); warn "some units did not come up on their own on $h — enable them: ssh ${SSH_OPTS:-} $h sudo systemctl enable --now $want"; }
   done
   # active is not answering: ask every web host through nginx and every app host
   # directly, so a box that came back without its DB or upstream shows up now,
@@ -164,6 +167,10 @@ cmd_finalize() {
     warn "$bad host(s) do not answer after the reboot — fix that before any scoring run (journalctl -u <unit>, is the DB reachable?)"
     warn "FINAL_CHECK_PATH in $CONF picks a path that touches the DB; FINAL_APP_PORT if the app port is not discoverable"
   fi
+  printf '🏁 %s ran finalize — reboot: every host back; units: %s; HTTP: %s%s\n' "$(who_am_i)" \
+    "$([ "$units_bad" = 0 ] && echo "all up" || echo "$units_bad host(s) missing some")" \
+    "$([ "$bad" = 0 ] && echo "every host answers" || echo "$bad host(s) do NOT answer")" \
+    "$([ "$bad" = 0 ] && [ "$units_bad" = 0 ] || echo " — fix before the final run")" | notify ops
   say "4/4 scoring run"
   if [ "${BENCH_MODE:-auto}" = "manual" ]; then
     [ "$bad" = 0 ] || warn "do NOT enqueue the portal run until every host answers"

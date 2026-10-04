@@ -126,7 +126,12 @@ cmd_final_apply() {
       || warn "cleanup on $h reported problems"
   done
   say "4/4 what is left"
+  local left_hosts left_code
+  left_hosts=$(final_host_findings | grep -c . || true)
+  left_code=$(final_code_findings | grep -c . || true)
   cmd_final_check || true
+  printf '🧹 %s ran final apply — left: %s on the hosts, %s in the app code%s\n' "$(who_am_i)" "$left_hosts" "$left_code" \
+    "$([ "$left_code" != 0 ] && printf ' (pprof / loggers to remove by hand)')" | notify ops
   say "next: isukit bench \"final: logging off\" (compare with isukit score), then isukit ship \"final: logging off\""
   git -C "$root" status --short -- etc 2>/dev/null || true
 }

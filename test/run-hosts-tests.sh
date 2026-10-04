@@ -587,6 +587,61 @@ t_ship_build_check() {
   ( cd "$WORK/app" && ship_build_check ) >/dev/null 2>&1; check "$?" = 0
 }
 
+fake_discord() { # curl stand-in: keep each payload (the -d argument) as a file; FAIL_POST=1 fails
+  rm -rf "$WORK/posts"; mkdir -p "$WORK/posts"
+  curl() {
+    local a prev="" url=""
+    local n
+    n=$(cat "$WORK/posts/.n" 2>/dev/null || echo 0)
+    for a in "$@"; do [ "$prev" = -d ] && printf '%s' "$a" > "$WORK/posts/$n"; prev="$a"; url="$a"; done
+    echo $((n + 1)) > "$WORK/posts/.n"
+    printf '%s\n' "$url" >> "$WORK/posts/urls"
+    [ "${FAIL_POST:-0}" = 1 ] && return 7
+    return 0
+  }
+}
+post_text() { # the content of post #n, decoded
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["content"])' "$WORK/posts/$1"
+}
+
+t_notify_bench_message() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  setup_state isu1 "" "$ROLES"
+  load; fake_discord
+  DISCORD_WEBHOOK_BENCH=https://discord.test/bench
+  mkdir -p .isukit/runs/a .isukit/runs/b
+  printf 'when=20261031-1000\nsha=m1\nscore=1000\nnote=main\nbranch=main\nwho=alice\n' > .isukit/runs/a/meta
+  printf 'when=20261031-1010\nsha=x1\nscore=1150\nnote=add "idx" on users\tname\nbranch=isukit/idx\nwho=bob\n' > .isukit/runs/b/meta
+  printf 'isu1 (web,app)\n  cpu    avg 94%%  max 100%%\n  procs  isuride 142%%  nginx 31%%\n\nisu3 (db)\n  cpu    avg 22%%\n' > .isukit/runs/b/hosts.txt
+  printf '+---+\n| COUNT | METHOD | URI | MIN | MAX | SUM |\n| 40 | GET | ^/api/user/[^/]+/icon$ | 0.2 | 0.2 | 8.000 |\n| 400 | GET | /api/user/me | 0 | 0 | 2.000 |\n' > .isukit/runs/b/alp.txt
+  notify_bench .isukit/runs/b
+  local msg
+  msg=$(post_text 0)                                  # also proves the payload is valid JSON
+  check -n "$(printf '%s\n' "$msg" | grep -F '📊 **1150**  (+15.0% vs main 1000  KEEP)')"
+  check -n "$(printf '%s\n' "$msg" | grep -F 'isukit/idx by bob — "add "idx" on users')"   # quotes and a tab survive
+  check -n "$(printf '%s\n' "$msg" | grep -F '· isu1 cpu 94% (isuride 142%)')"
+  check -n "$(printf '%s\n' "$msg" | grep -F '· GET ^/api/user/[^/]+/icon$  8.000s')"
+  check "$(cat "$WORK/posts/urls")" = "https://discord.test/bench"
+}
+
+t_notify_ops_and_silence() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  setup_state isu1 "" "$ROLES"
+  load; local_server; fake_discord
+  DISCORD_WEBHOOK=https://discord.test/all              # one hook: ops goes there too
+  ISUKIT_WHO=alice cmd_lock >/dev/null 2>&1
+  check "$(post_text 0)" = "🔒 alice has the servers"
+  ( ISUKIT_WHO=bob cmd_unlock --force ) >/dev/null 2>&1
+  check -n "$(post_text 1 | grep -F '🔓 bob force-released alice: turn')"
+  # Discord down: the command still succeeds
+  FAIL_POST=1; ( ISUKIT_WHO=alice cmd_lock ) >/dev/null 2>&1; check "$?" = 0; FAIL_POST=0
+  ( ISUKIT_WHO=alice cmd_unlock ) >/dev/null 2>&1
+  # no webhook: nothing is sent at all
+  unset DISCORD_WEBHOOK; fake_discord
+  ( ISUKIT_WHO=alice cmd_lock; ISUKIT_WHO=alice cmd_unlock ) >/dev/null 2>&1
+  check ! -s "$WORK/posts/urls"
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -619,6 +674,8 @@ case_ deploy-guard                    t_deploy_guard
 case_ attribute-against-main          t_attribute_against_main
 case_ runs-shared-between-laptops     t_runs_shared_between_laptops
 case_ ship-build-check                t_ship_build_check
+case_ notify-bench-message           t_notify_bench_message
+case_ notify-ops-and-silence          t_notify_ops_and_silence
 case_ bench-target-separate-box       t_bench_target_separate_box
 case_ bench-target-same-box           t_bench_target_same_box
 

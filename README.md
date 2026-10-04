@@ -123,6 +123,8 @@ Go への移行：`cmd/isukit` が入口（cobra）。まだ移していない�
 
 複数人での作業：2人ともブランチで開発し、サーバーは `isukit lock` / `unlock` で交代で使う。`deploy` は未コミットの変更や main を含まないブランチを止め、deploy したものをサーバーに記録する。ベンチの記録は `isukit-runs` ブランチで共有され、`attribute` は main の最新の回と比べる（RUNBOOK §4）。
 
+Discord への通知：`.isukit/config` に `DISCORD_WEBHOOK_BENCH`（bench の結果）と `DISCORD_WEBHOOK_OPS`（lock / unlock・deploy・final・finalize）を書くと、isukit が流す（チャンネルの構成は RUNBOOK §3.6）。
+
 チームでの共有：役割（`isukit.hosts`）・チーム共通の設定（`isukit.conf`）・各台の env ファイル（`hosts/<台>/`）・設定（`etc/`）は repo に commit して3人で共有する。各自の手元に残るのは ssh 先や鍵（`.isukit/config`）と、probe の結果・計測の記録（`.isukit/`）だけ。
 
 コードの置き場所：`isukit` は入口だけ（設定・`lib/` の読み込み・ヘルプ・コマンドの振り分け）。手元で動く処理は `lib/` に機能ごと（`core`・`hosts`・`probe`・`logs`・`etc`・`runs`・`analyze`・`deploy`・`repo`・`go`・`doctor`）、サーバー側で動く処理は `remote/` に普通のスクリプトとして置き、isukit は ssh で送るだけ。

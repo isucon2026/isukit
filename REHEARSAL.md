@@ -20,6 +20,7 @@ gh auth status              # リポジトリ係は必須（go --new が gh で�
 ```
 
 - [ ] 全員の `isukit version` が同じ
+- [ ] Discord に #作戦・#ベンチ・#サーバー・#git を作り、#ベンチ・#サーバーの Webhook を各自の `.isukit/config` に書いた（RUNBOOK §3.6）
 - [ ] 鍵ファイル（`isukit.pem`）を受け取り、`chmod 600` 済み
 
 **リポジトリ係（AWS 担当）**
@@ -120,6 +121,7 @@ isukit alp --patterns              # URL のまとめ方がおかしくないか
 - [ ] 相手が `lock` している間、自分の `deploy` / `bench` が「busy — 相手の名前」で止まる
 - [ ] `attribute` が、相手のブランチの回ではなく **main の最新の回**と比べている
 - [ ] 相手のベンチの記録が、自分の `isukit score` にも出る
+- [ ] #ベンチにスコアと判定が、#サーバーに lock / unlock と deploy が流れる
 - [ ] main を取り込んでいないブランチの `deploy` が止まる
 
 ```

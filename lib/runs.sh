@@ -202,6 +202,7 @@ cmd_bench() {
   run_record "$run" "$ts" "$sha" "$score" "${note:-}" "$branch"
   [ "$measure" = 1 ] && run_collect "$run" 1
   runs_publish "$run"
+  notify_bench "$run"
   say "score=$score  sha=$sha ($branch)  rc=$rc  run=$run"
   [ "$score" = "?" ] && warn "could not parse a score — read $raw, then fix the line in $STATE/scores.tsv by hand"
   [ "$measure" = 1 ] && run_summary "$run"
@@ -237,6 +238,7 @@ cmd_bench_manual() {
     run_record "$run" "$ts" "$sha" "FAIL" "${note:-}" "$branch"
     [ "$measure" = 1 ] && run_collect "$run" 0
     runs_publish "$run"
+    notify_bench "$run"
     say "score=FAIL  sha=$sha  (recorded via --fail)"
     return 0
   fi
@@ -274,6 +276,7 @@ cmd_bench_manual() {
   run_record "$run" "$ts" "$sha" "$score" "${note:-}" "$branch"
   [ "$measure" = 1 ] && run_collect "$run" "$sampled"
   runs_publish "$run"
+  notify_bench "$run"
   say "score=$score  sha=$sha  (recorded from portal)  run=$run"
   [ "$measure" = 1 ] && run_summary "$run"
   return 0

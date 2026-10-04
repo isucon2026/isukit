@@ -77,6 +77,7 @@ cmd_lock() { # lock [status] -- take the servers for your turn (deploy, bench, .
        say "the servers are yours ($(who_am_i)) until: isukit unlock" ;;
     *) die "the servers are busy — $(lock_describe "$(lock_read)")" ;;
   esac
+  printf '🔒 %s has the servers\n' "$(who_am_i)" | notify ops
 }
 
 cmd_unlock() { # unlock [--force] -- hand the servers back
@@ -88,6 +89,11 @@ cmd_unlock() { # unlock [--force] -- hand the servers back
     die "held by someone else — $(lock_describe "$cur"). only if they are gone: isukit unlock --force"
   fi
   rsh "$(lock_host)" "sudo -n rm -f $LOCK_FILE" && say "the servers are free"
+  if [ "${cur%%|*}" = "$(who_am_i)" ]; then
+    printf '🔓 %s handed the servers back\n' "$(who_am_i)" | notify ops
+  else
+    printf '🔓 %s force-released %s\n' "$(who_am_i)" "$(lock_describe "$cur")" | notify ops
+  fi
 }
 
 # --- deploy: never roll back merged work; record what was deployed
