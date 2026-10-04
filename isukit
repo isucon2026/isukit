@@ -71,6 +71,9 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     isukit go <repo-url> <app-host> [bench-host] [-i keyfile] [-p port] [--ssh-opts 'raw']
                                          clone, probe, install tools, enable logs
     isukit go --new <owner/repo> <app-host> [bench-host] [-i keyfile] [--invite u1,u2]
+                                         (also commits a CI workflow — go build on main
+                                         and PRs — and, with DISCORD_WEBHOOK_GIT, wires
+                                         GitHub's pushes / PRs / CI results to #git)
                                          no team repo yet (T+0): copy the server's
                                          webapp here, commit it as the baseline,
                                          create the private repo with gh and push,
@@ -220,7 +223,9 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                    ALP_THRESH (20) = fan-out at which a path segment becomes a group
     DISCORD_WEBHOOK_BENCH / DISCORD_WEBHOOK_OPS  (here, never in isukit.conf) Discord
                    webhooks: bench results / lock, deploy, final, finalize. DISCORD_WEBHOOK
-                   = both. unset = nothing is sent; a failed post only warns
+                   = both. unset = nothing is sent; a failed post only warns.
+                   DISCORD_WEBHOOK_GIT: go --new (or isukit notify github) makes GitHub
+                   post pushes, PRs and CI results there
     FINAL_CHECK_PATH  path finalize requests after the reboot (default /); pick one that
                    touches the DB. FINAL_APP_PORT if the app's port is not discoverable
     PPROF_PORT     pprof listener on app hosts (default 6060); PPROF_SEC (30) and
@@ -271,6 +276,7 @@ main() {
     etc)      cmd_etc "$@" ;;
     env)      cmd_env "$@" ;;
     lock)     cmd_lock "$@" ;;
+    notify)   cmd_notify "$@" ;;
     unlock)   cmd_unlock "$@" ;;
     bench)    cmd_bench "$@" ;;
     score)    cmd_score ;;

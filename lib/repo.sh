@@ -158,8 +158,70 @@ repo_new_baseline() { # repo_new_baseline <owner/repo> <invite,list>
   if git commit -q -m "etc: middleware config and env as handed out, before any change"; then
     git push -q origin main || warn "push of the config baseline failed — push by hand: git push origin main"
   fi
+  # a third commit, so both baselines stay exactly as handed out
+  if repo_new_ci; then
+    git add .github && git commit -q -m "ci: build the Go app on every push to main and every PR" \
+      && { git push -q origin main || warn "push of the CI workflow failed — push by hand: git push origin main"; }
+  fi
+  github_discord_hook "$slug"
   git switch -q -c work
   say "repo ready: $(git remote get-url origin)  (baseline on main, you are on work)"
+}
+
+repo_new_ci() { # .github/workflows/isukit-ci.yml: does main still build? (true if written)
+  local rel
+  [ -n "${GO_DIR:-}" ] && [ "${GO_DIR#"$SRC_DIR"/}" != "$GO_DIR" ] || { warn "no Go module inside $SRC_DIR — no CI workflow written"; return 1; }
+  rel="${GO_DIR#"$SRC_DIR"/}"
+  mkdir -p .github/workflows
+  cat > .github/workflows/isukit-ci.yml <<YML
+# written by isukit go --new: a merge that breaks the build shows up here (and
+# in #git), not as a failed deploy. vet is reported, never blocking — the code
+# as handed out may not pass it.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: $rel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: $rel/go.mod
+      - run: go build ./...
+      - run: go vet ./...
+        continue-on-error: true
+YML
+  say "CI: .github/workflows/isukit-ci.yml (go build in $rel; vet reported, not blocking)"
+}
+
+# github_discord_hook [owner/repo] -- GitHub posts PRs, pushes and CI results
+# to #git through Discord's GitHub-compatible endpoint (<webhook>/github).
+github_discord_hook() {
+  local slug="${1:-}" url="${DISCORD_WEBHOOK_GIT:-}"
+  [ -n "$url" ] || return 0
+  command -v gh >/dev/null 2>&1 || { warn "no gh — add the #git webhook by hand: repo Settings > Webhooks > $url/github"; return 0; }
+  [ -n "$slug" ] || slug=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
+  [ -n "$slug" ] || { warn "cannot tell which GitHub repo this is"; return 0; }
+  if gh api "repos/$slug/hooks" -f name=web -f "config[url]=${url%/}/github" -f "config[content_type]=json" \
+       -F active=true -f "events[]=push" -f "events[]=pull_request" -f "events[]=check_suite" >/dev/null 2>&1; then
+    say "#git: GitHub posts pushes, PRs and CI results for $slug to Discord"
+  else
+    warn "could not add the #git webhook to $slug (admin rights?) — by hand: repo Settings > Webhooks > ${url%/}/github"
+  fi
+}
+
+cmd_notify() { # notify github -- (re)wire #git for this repo
+  load
+  case "${1:-}" in
+    github) [ -n "${DISCORD_WEBHOOK_GIT:-}" ] || die "set DISCORD_WEBHOOK_GIT in $CONF first"; github_discord_hook ;;
+    *) die "usage: isukit notify github" ;;
+  esac
 }
 
 repo_record_env() { # hosts/<host>/<envfile>: a per-host record, not linked — env differs per host
@@ -185,8 +247,10 @@ ship_build_check() { # the Go app must build and vet here before it reaches a PR
   [ -n "$mod" ] || return 0
   dir=$(dirname "$mod")
   say "build check: go build + go vet in $dir"
-  ( cd "$dir" && go build ./... && go vet ./... ) \
+  ( cd "$dir" && go build ./... ) \
     || die "the app does not build — fix it before shipping (isukit ship --no-check to ship anyway)"
+  # the code as handed out may not pass vet: report, never block
+  ( cd "$dir" && go vet ./... ) || warn "go vet reports the above — worth a look, not blocking"
 }
 
 cmd_ship() {

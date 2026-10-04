@@ -282,9 +282,10 @@ isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i
 1. **コードのベースライン。** probe で見つけたサーバーの webapp（`SRC_DIR`）を手元に持ってきて、`git init` → コミット → `gh repo create --private` → push。`--invite` の人を Collaborator（push 権限）に招待する。GitHub の認証は手元の `gh` だけを使い、サーバーには何も置かない
    - 入れないもの：`node_modules`・ログ・ビルド済みのアプリ（systemd が動かしているバイナリ）・10MB を超えるファイル（DB のダンプや大きな画像など）。どれも `.gitignore` に書かれ、サーバー側には残る
 2. **設定のベースライン。** `/etc` の nginx・MySQL・アプリの unit ファイルを repo の `etc/` に移して、`/etc` からシンボリックリンクを張る（`isukit etc adopt` と同じ。置き換えたファイルは `/etc/isukit-orig/` にバックアップ、MySQL の AppArmor 許可も追加）。各台の env ファイル（`/home/isucon/env.sh` など）は `hosts/<台>/` にコピーする（台ごとに中身が違うのでリンクはしない）。以後はこの repo のコピーが正で、編集して `isukit env push`（または `deploy`）で各台に書き込む。ここまでを2つ目のコミットにして push
-3. **いつもの `go` の続き。** ツールのインストール → 計測ログ on → ベンチコマンドの組み立て
+3. **CI。** main と PR で `go build` を回す最小の CI（`.github/workflows/isukit-ci.yml`、`go vet` は表示だけで止めない）を3つ目のコミットとして push。`DISCORD_WEBHOOK_GIT` があれば、GitHub から #git への通知も設定する
+4. **いつもの `go` の続き。** ツールのインストール → 計測ログ on → ベンチコマンドの組み立て
 
-終わると、`main` に「コードのベースライン」「設定のベースライン」の2コミットがあり、手元は `work` ブランチにいる。**この2つが唯一の戻り先。** 作らずに走り出すと、スコアが落ちたときに戻る場所が無い。
+終わると、`main` に「コードのベースライン」「設定のベースライン」「CI」の3コミットがあり、手元は `work` ブランチにいる。**この2つが唯一の戻り先。** 作らずに走り出すと、スコアが落ちたときに戻る場所が無い。
 
 **残り2人は、できたリポジトリを渡すだけ：**
 
@@ -357,13 +358,16 @@ isukit version                           # 全員の表示が同じ v1.0.x で�
 | **#git** | GitHub | PR の作成・マージ、main への push、CI の失敗 |
 | ボイス | 人 | 競技中はつなぎっぱなし。「今から lock する」「KEEP だからマージする」を声で |
 
-**準備（前日まで）**：#ベンチ・#サーバーにそれぞれ Webhook を作り（チャンネルの設定 → 連携サービス → ウェブフック）、URL を**各自の** `.isukit/config` に書く。URL を知っていれば誰でも投稿できるので、repo（`isukit.conf` を含む）には入れない。
+**準備（前日まで）**：#ベンチ・#サーバー・#git にそれぞれ Webhook を作り（チャンネルの設定 → 連携サービス → ウェブフック）、URL を**各自のシェルの設定**（`~/.zshrc` など）に書く。こうすると、競技当日に作る repo でも最初から効く（`.isukit/config` に書いてもよい）。URL を知っていれば誰でも投稿できるので、repo（`isukit.conf` を含む）には入れない。
 
 ```
-DISCORD_WEBHOOK_BENCH='https://discord.com/api/webhooks/…'   # #ベンチ
-DISCORD_WEBHOOK_OPS='https://discord.com/api/webhooks/…'     # #サーバー
+export DISCORD_WEBHOOK_BENCH='https://discord.com/api/webhooks/…'   # #ベンチ
+export DISCORD_WEBHOOK_OPS='https://discord.com/api/webhooks/…'     # #サーバー
+export DISCORD_WEBHOOK_GIT='https://discord.com/api/webhooks/…'     # #git
 # 片方だけなら DISCORD_WEBHOOK に書けば全部そこへ
 ```
+
+**#git は GitHub が書く。** `isukit go --new` が repo を作るときに、`DISCORD_WEBHOOK_GIT` を GitHub の repo の Webhook（Discord の `/github` 宛て）に登録し、push・PR・CI の結果が流れるようにする。あとから設定するときは `isukit notify github`。
 
 設定が無ければ何も送らない。送信は最大5秒で、失敗しても警告だけで処理は止まらない（Discord の障害で計測が止まらないように）。
 

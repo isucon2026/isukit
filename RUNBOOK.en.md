@@ -90,16 +90,23 @@ discussion scrolls away under the notifications.
 | **#git** | GitHub | PRs opened / merged, pushes to main, CI failures |
 | voice | people | open all contest long |
 
-**Before the day:** create a webhook in #bench and #servers (channel settings
-→ Integrations → Webhooks) and put the URLs in **each** laptop's
-`.isukit/config` — anyone with the URL can post, so never in the repo
-(`isukit.conf` included):
+**Before the day:** create a webhook in #bench, #servers and #git (channel
+settings → Integrations → Webhooks) and export the URLs in **each** person's
+shell profile, so they work in the repo created on the day too
+(`.isukit/config` also works) — anyone with the URL can post, so never in the
+repo (`isukit.conf` included):
 
 ```
-DISCORD_WEBHOOK_BENCH='https://discord.com/api/webhooks/...'   # #bench
-DISCORD_WEBHOOK_OPS='https://discord.com/api/webhooks/...'     # #servers
-# one hook for both: DISCORD_WEBHOOK
+export DISCORD_WEBHOOK_BENCH='https://discord.com/api/webhooks/...'   # #bench
+export DISCORD_WEBHOOK_OPS='https://discord.com/api/webhooks/...'     # #servers
+export DISCORD_WEBHOOK_GIT='https://discord.com/api/webhooks/...'     # #git
+# one hook for bench and ops: DISCORD_WEBHOOK
 ```
+
+**#git is written by GitHub.** `isukit go --new` registers
+`DISCORD_WEBHOOK_GIT` (Discord's `/github` endpoint) as the new repo's GitHub
+webhook for pushes, PRs and CI results; for an existing repo:
+`isukit notify github`.
 
 Unset means nothing is sent. A post gives up after 5s and a failure only warns.
 
@@ -372,10 +379,13 @@ isukit go --new <team>/<private-repo> ubuntu@<app-host> [ubuntu@<bench-host>] -i
    env file is copied to `hosts/<host>/` — env differs per host, so it is not
    linked; from then on that repo copy is the truth, written to the host by
    `isukit env push` (or deploy). Committed and pushed as a second commit.
-3. Then the usual `go`: tools, logging on, BENCH_CMD.
+3. **CI:** a minimal workflow (`.github/workflows/isukit-ci.yml`: go build on
+   main and PRs, go vet reported but never blocking) as a third commit; with
+   `DISCORD_WEBHOOK_GIT`, GitHub's notifications to #git are wired too.
+4. Then the usual `go`: tools, logging on, BENCH_CMD.
 
-`main` ends up with two commits — code before any change, config before any
-change — and you are on `work`. Those are the only places to roll back to.
+`main` ends up with three commits — code before any change, config before any
+change, CI — and you are on `work`. Those are the only places to roll back to.
 
 Everyone else hands `go` the new repo:
 
