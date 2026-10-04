@@ -448,8 +448,9 @@ isukit attribute 5         # 閾値を ±5% に設定
    - app の台：アプリの接続先を db の台に向ける。接続設定は**コードではなく env ファイル**（`.isukit/manifest` の `ENV_FILE`、元の中身は `hosts/<台>/` に控えがある）
    - db 以外の台：MySQL を止めて自動起動も切る（`sudo systemctl disable --now mysql`）。止めるだけだと `finalize` の再起動で復活する
    - web の台：nginx の upstream に app の台を並べる（`etc/` の nginx 設定）
-3. `isukit deploy` → `isukit bench` → `isukit show`。**DBがボトルネックでなかった場合ここでスコアが落ちる。** 落ちたら戻す。`show` の hosts 欄で、負荷が狙いどおりの台に移ったかを見る
-4. webサーバーの後ろにアプリ2台目を置いてロードバランス
+3. `isukit probe` をし直す。全台を調べて、役割と実際に動いているものが食い違っていれば警告する（db の台で MySQL が動いていない、db 以外の台で MySQL がまだ動いている、app の台どうしで unit 名や置き場所が違う、など）
+4. `isukit deploy` → `isukit bench` → `isukit show`。**DBがボトルネックでなかった場合ここでスコアが落ちる。** 落ちたら戻す。`show` の hosts 欄で、負荷が狙いどおりの台に移ったかを見る
+5. webサーバーの後ろにアプリ2台目を置いてロードバランス
 
 分散のステップは毎回「再起動後に生き残らないと困るもの」を増やす。何を増やしたか書いておく。フェーズ5で確認する。
 
