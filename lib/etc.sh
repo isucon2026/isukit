@@ -49,6 +49,7 @@ etc_flags_reset() { rm -rf "$ETC_FLAGS"; }
 
 cmd_etc_adopt() {
   load
+  lock_guard "etc adopt"
   local rc=0
   etc_flags_reset
   on_hosts all etc_adopt_one "$@" || rc=1
@@ -164,6 +165,7 @@ cmd_etc_pull() { # every host's repo etc/ -> local repo etc/, minus isukit's own
 
 cmd_etc_push() { # local repo etc/ -> every host's repo etc/ (i.e. live /etc), then reload what changed
   load
+  lock_guard "etc push"
   local from_deploy=0 rc=0
   [ "${1:-}" = "--from-deploy" ] && from_deploy=1
   etc_flags_reset

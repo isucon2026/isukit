@@ -6,6 +6,8 @@ cmd_deploy() {
   load
   local force=0
   [ "${1:-}" = "--force" ] && force=1
+  lock_guard deploy
+  [ "$force" = 1 ] || deploy_guard
   # configs first: once /etc links into the repo, the repo's etc/ is what runs.
   # (hosts that do not link /etc yet are skipped inside the push)
   if [ -d "$(local_repo_root)/etc" ] && [ -n "${ETC_REPO:-${SRC_DIR:-}}" ]; then
@@ -18,6 +20,7 @@ cmd_deploy() {
   on_hosts app deploy_one "$force" || die "deploy failed on some app host (above) — not restarting a half-deployed fleet"
   # compose mode brings each host up itself; binary mode restarts once, everywhere
   [ "${APP_EXEC_RAW#*compose}" != "${APP_EXEC_RAW:-}" ] || cmd_restart
+  deploy_record
 }
 
 deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it there
@@ -77,6 +80,7 @@ deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it 
 
 cmd_restart() {
   load
+  lock_guard restart
   local units="${APP_UNIT:-} ${EXTRA_UNITS:-}"
   units="$(printf '%s' "$units" | sed 's/^ *//;s/ *$//')"
   [ -n "$units" ] || die "no APP_UNIT in manifest — run: isukit probe"
@@ -113,6 +117,7 @@ finalize_http() { # print one "OK|url|code" / "FAIL|url|why" per web and app hos
 
 cmd_finalize() {
   load
+  lock_guard finalize
   local hosts
   hosts="$(hosts_all | tr '\n' ' ' | sed 's/^ *//;s/ *$//')"
   local h

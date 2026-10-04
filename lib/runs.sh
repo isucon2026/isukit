@@ -116,9 +116,11 @@ run_collect() { # run_collect <run-dir> <sampled 0|1> -- run_end, isolated: its 
   return 0
 }
 
-run_record() { # run_record <run-dir> <when> <sha> <score> <note> -- scores.tsv + meta
-  printf '%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$1" >> "$STATE/scores.tsv"
-  printf 'when=%s\nsha=%s\nscore=%s\nnote=%s\n' "$2" "$3" "$4" "$5" > "$1/meta"
+run_record() { # run_record <run-dir> <when> <sha> <score> <note> <branch> -- scores.tsv + meta
+  local who
+  who=$(who_am_i)
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$1" "${6:-?}" "$who" >> "$STATE/scores.tsv"
+  printf 'when=%s\nsha=%s\nscore=%s\nnote=%s\nbranch=%s\nwho=%s\n' "$2" "$3" "$4" "$5" "${6:-?}" "$who" > "$1/meta"
 }
 
 run_summary() { # run_summary <run-dir> -- the short view printed after a run and by `show`
@@ -136,25 +138,27 @@ run_summary() { # run_summary <run-dir> -- the short view printed after a run an
   return 0
 }
 
-cmd_show() { # show [n | when] -- a saved run; default the latest, 2 = the one before
+cmd_show() { # show [n | when] -- a saved run (everyone's, when shared); 1 = the latest, 2 = the one before
   need_state
-  local sel="${1:-1}" run
-  [ -d "$RUNS" ] || die "no saved runs yet — they are written by isukit bench while logs are on"
+  local sel="${1:-1}" run view count
+  shared_ready >/dev/null 2>&1 || true
+  view=$(runs_view | awk -F'\t' '$5 != "" { print $1 "\t" $5 }')
+  [ -n "$view" ] || die "no saved runs yet — they are written by isukit bench"
+  count=$(printf '%s\n' "$view" | wc -l | tr -d ' ')
   case "$sel" in
-    ''|*[!0-9]*) run=$(ls -1d "$RUNS"/*"$sel"* 2>/dev/null | tail -1) ;;
+    ''|*[!0-9]*) run=$(printf '%s\n' "$view" | awk -F'\t' -v s="$sel" 'index($1, s) || index($2, s) { r = $2 } END { print r }') ;;
     *)
-      local count
-      count=$(ls -1d "$RUNS"/* 2>/dev/null | wc -l | tr -d ' ')
       [ "$sel" -ge 1 ] && [ "$sel" -le "$count" ] || die "only $count saved run(s) — show takes 1..$count"
-      run=$(ls -1d "$RUNS"/* 2>/dev/null | tail -n "$sel" | head -1) ;;
+      run=$(printf '%s\n' "$view" | tail -n "$sel" | head -1 | cut -f2) ;;
   esac
-  [ -n "$run" ] && [ -d "$run" ] || die "no run matches '$sel' — see: ls $RUNS"
+  [ -n "$run" ] && [ -d "$run" ] || die "no run matches '$sel' — see: isukit score"
   echo "run: $run"
   run_summary "$run"
 }
 
 cmd_bench() {
   load
+  lock_guard bench
   local mode="${BENCH_MODE:-auto}"
 
   if [ "$mode" = "manual" ]; then
@@ -176,8 +180,8 @@ cmd_bench() {
     [ -n "${BENCH_CMD:-}" ] || die "BENCH_CMD is still empty after benchprobe — set it by hand: isukit benchcmd '<command>', or switch to the portal: isukit benchmode manual"
   fi
   local note="${*:-}"
-  local sha ts run raw measure=0
-  sha=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
+  local sha branch ts run raw measure=0
+  read -r sha branch <<< "$(deployed)"   # what the servers run, not just this checkout
   ts=$(date +%Y%m%d-%H%M%S)
   run="$RUNS/$ts"; mkdir -p "$run"
   raw="$run/bench.log"
@@ -195,9 +199,10 @@ cmd_bench() {
   local score
   score=$(grep -oiE '"?(total[ _-]?)?score"?[^0-9-]{0,12}-?[0-9]+' "$raw" | tail -1 | grep -oE '\-?[0-9]+$' || true)
   [ -n "$score" ] || score="?"
-  run_record "$run" "$ts" "$sha" "$score" "${note:-}"
+  run_record "$run" "$ts" "$sha" "$score" "${note:-}" "$branch"
   [ "$measure" = 1 ] && run_collect "$run" 1
-  say "score=$score  sha=$sha  rc=$rc  run=$run"
+  runs_publish "$run"
+  say "score=$score  sha=$sha ($branch)  rc=$rc  run=$run"
   [ "$score" = "?" ] && warn "could not parse a score — read $raw, then fix the line in $STATE/scores.tsv by hand"
   [ "$measure" = 1 ] && run_summary "$run"
   return 0
@@ -221,16 +226,17 @@ cmd_bench_manual() {
     esac
   done
   local note="${args[*]:-}"
-  local sha ts run measure=0 sampled=0
-  sha=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
+  local sha branch ts run measure=0 sampled=0
+  read -r sha branch <<< "$(deployed)"
   ts=$(date +%Y%m%d-%H%M%S)
   run="$RUNS/$ts"
   run_measuring && measure=1
 
   if [ "$fail_flag" = 1 ]; then
     mkdir -p "$run"
-    run_record "$run" "$ts" "$sha" "FAIL" "${note:-}"
+    run_record "$run" "$ts" "$sha" "FAIL" "${note:-}" "$branch"
     [ "$measure" = 1 ] && run_collect "$run" 0
+    runs_publish "$run"
     say "score=FAIL  sha=$sha  (recorded via --fail)"
     return 0
   fi
@@ -265,41 +271,68 @@ cmd_bench_manual() {
   mkdir -p "$run"
   # --score without the prompt still gets this run's alp / slow: the logs were
   # emptied when the previous run was collected
-  run_record "$run" "$ts" "$sha" "$score" "${note:-}"
+  run_record "$run" "$ts" "$sha" "$score" "${note:-}" "$branch"
   [ "$measure" = 1 ] && run_collect "$run" "$sampled"
+  runs_publish "$run"
   say "score=$score  sha=$sha  (recorded from portal)  run=$run"
   [ "$measure" = 1 ] && run_summary "$run"
   return 0
 }
 
-cmd_score() {
+cmd_score() { # every run (everyone's, when shared), oldest first
   need_state
-  [ -f "$STATE/scores.tsv" ] || die "no runs yet — run: isukit bench"
-  { printf 'WHEN\tSHA\tSCORE\tNOTE\tLOG\n'; cat "$STATE/scores.tsv"; } | column -t -s $'\t'
+  local view
+  shared_ready >/dev/null 2>&1 || true
+  view=$(runs_view)
+  [ -n "$view" ] || die "no runs yet — run: isukit bench"
+  { printf 'WHEN\tSHA\tSCORE\tBRANCH\tWHO\tNOTE\n'
+    printf '%s\n' "$view" | awk -F'\t' '{ printf "%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, ($6 == "" ? "-" : $6), ($7 == "" ? "-" : $7), ($4 == "" ? "-" : $4) }'
+  } | align_tsv
 }
 
-cmd_attribute() {
+align_tsv() { # column -t -s TAB without column (absent on minimal Linux): pad every field but the last
+  awk -F'\t' '{ n[NR] = NF; for (i = 1; i <= NF; i++) { c[NR, i] = $i; if (length($i) > w[i]) w[i] = length($i) } }
+    END { for (r = 1; r <= NR; r++) { line = ""
+            for (i = 1; i <= n[r]; i++) line = line (i < n[r] ? sprintf("%-" w[i] "s  ", c[r, i]) : c[r, i])
+            print line } }'
+}
+
+cmd_attribute() { # attribute [noise_pct] [--last2] -- the latest run vs the latest run deployed from main
   need_state
-  [ -f "$STATE/scores.tsv" ] || die "no runs yet — run: isukit bench"
-  local noise="${1:-10}"
-
-  local rows n
-  rows=$(awk -F'\t' '$3 ~ /^-?[0-9]+$/' "$STATE/scores.tsv" | tail -2)
-  n=$(printf '%s\n' "$rows" | grep -c . || true)
-  [ "$n" -ge 2 ] || die "need at least two numeric-score runs to compare (have $n) — run: isukit bench again. rows scored ? or FAIL don't count"
-
-  printf '%s\n' "$rows" | awk -F'\t' -v noise="$noise" '
-    NR==1 { pts=$1; psha=$2; pscore=$3; pnote=$4 }
-    NR==2 { cts=$1; csha=$2; cscore=$3; cnote=$4 }
+  local noise=10 mode=main a rows cur base
+  for a in "$@"; do
+    case "$a" in
+      --last2) mode=last2 ;;
+      *[!0-9]*|'') die "usage: isukit attribute [noise_pct] [--last2]" ;;
+      *) noise="$a" ;;
+    esac
+  done
+  shared_ready >/dev/null 2>&1 || true
+  rows=$(runs_view | awk -F'\t' '$3 ~ /^-?[0-9]+$/')
+  [ "$(printf '%s\n' "$rows" | grep -c .)" -ge 2 ] || die "need at least two numeric-score runs to compare — run: isukit bench again. rows scored ? or FAIL don't count"
+  cur=$(printf '%s\n' "$rows" | tail -1)
+  # two people take turns on the servers: "the last two runs" can be two
+  # different branches. A change is judged against main as it was measured.
+  if [ "$mode" = main ]; then
+    base=$(printf '%s\n' "$rows" | sed '$d' | awk -F'\t' '$6 == "main"' | tail -1)
+    if [ -z "$base" ]; then
+      warn "no earlier run was deployed from main — comparing the last two runs instead"
+      mode=last2
+    fi
+  fi
+  [ "$mode" = last2 ] && base=$(printf '%s\n' "$rows" | tail -2 | head -1)
+  printf '%s\n%s\n' "$base" "$cur" | awk -F'\t' -v noise="$noise" -v mode="$mode" '
+    function who(i) { return (b[i] == "" ? "" : sprintf("  [%s by %s]", b[i], w[i])) }
+    { t[NR] = $1; h[NR] = $2; s[NR] = $3; n[NR] = $4; b[NR] = $6; w[NR] = $7 }
     END {
-      printf "prev  %s  sha=%s  score=%s  note=%s\n", pts, psha, pscore, pnote
-      printf "cur   %s  sha=%s  score=%s  note=%s\n", cts, csha, cscore, cnote
-      if (pscore == 0) { print "prev score is 0 — cannot compute a percent delta"; exit 0 }
-      denom = pscore < 0 ? -pscore : pscore
-      delta = (cscore - pscore) / denom * 100
+      printf "%s %s  sha=%s  score=%s  note=%s%s\n", (mode == "main" ? "main " : "prev "), t[1], h[1], s[1], n[1], who(1)
+      printf "cur   %s  sha=%s  score=%s  note=%s%s\n", t[2], h[2], s[2], n[2], who(2)
+      if (s[1] == 0) { print "base score is 0 — cannot compute a percent delta"; exit 0 }
+      denom = s[1] < 0 ? -s[1] : s[1]
+      delta = (s[2] - s[1]) / denom * 100
       printf "delta %.1f%%  (noise threshold +/-%s%%)\n", delta, noise
-      if (delta > noise)       print "\033[32mKEEP\033[0m — improvement clears the noise floor"
-      else if (delta < -noise) print "\033[31mREVERT\033[0m — regression clears the noise floor: isukit revert " csha
+      if (delta > noise)       print "\033[32mKEEP\033[0m — improvement clears the noise floor: merge it"
+      else if (delta < -noise) print "\033[31mREVERT\033[0m — regression clears the noise floor: do not merge; isukit deploy main again"
       else                     print "\033[33mINCONCLUSIVE\033[0m — inside noise; repeat this run 2-3x before deciding. stacking another change now makes BOTH runs unattributable"
     }'
 }

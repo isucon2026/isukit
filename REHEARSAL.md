@@ -5,7 +5,7 @@
 - 題材：isucon14（matsuu の AMI `ami-0fcf9e8e8675a9ee4`、2026-09-28 検証済み。アプリ・nginx・MySQL・ベンチマーカーが入っている）
 - 構成：競技用 3台（c5.large）＋ ベンチ用 1台。本番と同じ形
 - 所要：4〜5時間（AWS 料金はおよそ c5.large × 4台 × 5時間）
-- 役割分担：**リポジトリ係**（§2 のリポジトリ作成）、**ベンチ係**（ベンチを流すのは1人だけ）、**記録係**（時刻と詰まった点を書く）
+- 進め方：2人ともブランチで開発し、サーバーは `isukit lock` / `unlock` で交代で使う（RUNBOOK §4）。§2 のリポジトリ作成は1人（リポジトリ係）、時刻と詰まった点の記録はもう1人
 
 ---
 
@@ -115,7 +115,12 @@ isukit alp --patterns              # URL のまとめ方がおかしくないか
 
 ## 4. 改善のループを2周（T+1:00〜2:00）
 
-1周目は **設定**、2周目は **コード** を変える。どちらも `deploy → bench → show → attribute → ship` を通す。
+1周目は **設定**、2周目は **コード** を変える。**2人で別々のブランチを作り、交代で測る**（RUNBOOK §4 の手順：`rebase origin/main → lock → deploy → bench → show → attribute → マージ or 戻す → unlock`）。
+
+- [ ] 相手が `lock` している間、自分の `deploy` / `bench` が「busy — 相手の名前」で止まる
+- [ ] `attribute` が、相手のブランチの回ではなく **main の最新の回**と比べている
+- [ ] 相手のベンチの記録が、自分の `isukit score` にも出る
+- [ ] main を取り込んでいないブランチの `deploy` が止まる
 
 ```
 # 1周目：etc/mysql/... の mysqld.cnf を編集（例：innodb_buffer_pool_size）
@@ -256,7 +261,7 @@ aws ec2 delete-key-pair --key-name isukit
 | 2 | 構成の分割が手作業（bind-address・DB ユーザー・接続先・MySQL の停止・upstream） | 本番で最も時間を使い、ミスも出やすい（§5） | 役割に合わせて構成を変える段階2の機能 | **高** |
 | 3 | ~~役割・config が各自の手元にしかない~~ | — | **対応済み**：役割は `isukit.hosts`、チーム共通の設定は `isukit.conf`（どちらも repo） | — |
 | 4 | ~~env ファイルを git で管理していない~~ | — | **対応済み**：`hosts/<台>/` が正、`isukit env push`（deploy でも）で書き込む | — |
-| 5 | スコアと計測の記録（`scores.tsv`・`runs/`）が、ベンチを流した人の手元にしかない | 他の2人が `show` / `attribute` を見られない | 記録を repo（別ブランチなど）に push して共有する | 中 |
+| 5 | ~~スコアと計測の記録が、ベンチを流した人の手元にしかない~~ | — | **対応済み**：`isukit-runs` ブランチで共有。`score` / `show` / `attribute` は全員の記録を見る | — |
 | 6 | ~~`launch.sh` の最後の案内が古い~~ | — | **対応済み**：`go --new` / `go` / `host role` と各台の Private IP を案内する | — |
 | 7 | ~~凍結（タグ）の手順が決まっていない~~ | — | **対応済み**：RUNBOOK §3.5（`v1.0.0` を打ち、当日は `@v1.0.x` / `ISUKIT_REF=v1.0.x`） | — |
 | 8 | 複数の app の台でファイルを共有する仕組みがない（画像をローカルに保存するアプリなど） | 台を増やすと一部のリクエストが失敗する | 問題次第。RUNBOOK に注意として書く | 低 |

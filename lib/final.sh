@@ -106,6 +106,7 @@ final_edit_etc() { # final_edit_etc <local etc dir> -- access_log off, mysql log
 
 cmd_final_apply() {
   load
+  lock_guard "final apply"
   local root h roles wm
   root=$(local_repo_root)
   say "1/4 isukit measurement off"

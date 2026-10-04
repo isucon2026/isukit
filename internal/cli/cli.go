@@ -22,6 +22,7 @@ var Passthrough = []string{
 	"go", "init", "host", "probe", "benchprobe", "benchcmd", "benchmode", "unit",
 	"setup", "logs", "etc", "env", "bench", "score", "show", "alp", "slow", "pprof", "os",
 	"doctor", "attribute", "ship", "revert", "deploy", "restart", "final", "finalize",
+	"lock", "unlock",
 }
 
 type exitCode int

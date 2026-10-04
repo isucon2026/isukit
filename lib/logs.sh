@@ -35,6 +35,7 @@ EOS
 
 cmd_logs() {
   load
+  lock_guard "logs ${1:-}"
   local mode="${1:-}"
   case "$mode" in on|off) ;; *) die "usage: isukit logs {on|off}" ;; esac
   local h roles wn wm any_db=0 rc=0

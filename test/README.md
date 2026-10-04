@@ -9,8 +9,8 @@ bash test/run-all.sh isucon8-final    # one fixture (the other suite says "skip"
 bash test/run-all.sh -v isucon13      # ...and dump the full probe output
 ```
 
-Current state: **75 fixtures, 75 passed, 0 failed** (17 probe + 13 bench + 11 etc + 29 hosts + 5 alp),
-plus **6 e2e scenarios** (`test/e2e/`). CI (`.github/workflows/ci.yml`) runs shellcheck,
+Current state: **80 fixtures, 80 passed, 0 failed** (17 probe + 13 bench + 11 etc + 34 hosts + 5 alp),
+plus **7 e2e scenarios** (`test/e2e/`). CI (`.github/workflows/ci.yml`) runs shellcheck,
 this suite and the e2e scenarios on every PR.
 
 ## Go (`go test ./...`)
@@ -23,7 +23,7 @@ command the Go CLI neither passes through nor implements.
 ## e2e (`test/e2e/`, needs docker)
 
 ```
-bash test/e2e/run.sh            # etc, bench, new, alp, final, http — each in its own ubuntu:24.04 container
+bash test/e2e/run.sh            # etc, bench, new, alp, final, http, team — each in its own ubuntu:24.04 container
 bash test/e2e/run.sh bench      # one
 ```
 

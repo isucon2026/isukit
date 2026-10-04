@@ -79,25 +79,45 @@ If `go install` does not see a new tag yet, the module proxy is catching up
 
 ## Team rules — agree to these before the clock starts
 
-- **One bench owner.** Only one benchmark runs at a time, and one person queues
-  them. Two concurrent runs make every number meaningless.
-- **One branch, small commits.** `isukit` records the git sha with every score;
-  that's only useful if a sha means one change. Use `isukit ship "<note>"` to
-  automate this: creates a new `isukit/<slug>` branch, commits, pushes, and opens
-  a draft PR — one commit per meaningful change, so it's revertable.
-- **One change per bench run.** Two changes and a score move tells you nothing
-  about which one did it.
-- **Score drops → revert immediately.** Don't debug a regression during the
-  contest. `isukit revert` undoes the last commit (or any commit by sha), then
-  re-bench to confirm you're back and move on.
-- **30-minute timebox.** A change that hasn't moved the score in 30 minutes gets
-  dropped, not pushed harder.
-- **Say the number out loud.** Every bench result gets announced. Nobody
-  optimises against a stale mental model of the score.
+**Both of you develop; the servers take turns.** Branches run in parallel, but
+there is one set of servers and one bench at a time (the portal too). So the
+measuring turn rotates:
 
-Suggested split for three people: one on infra/measurement (owns `isukit`,
-alp/slow output, deploys, the score log), one on DB (schema, indexes, queries),
-one on app code. The infra person is also the bench owner.
+```
+# your turn
+git fetch && git rebase origin/main     # measure main as of now + your one change
+isukit lock                             # the servers are yours (their deploy / bench stop)
+isukit deploy
+isukit bench "what changed"
+isukit show                             # per-host CPU, alp, slow, pprof
+isukit attribute                        # against the latest run of main, not their branch
+# KEEP: merge the PR (gh pr merge) / REVERT: deploy main again
+isukit unlock                           # their turn
+```
+
+- **Server-changing commands need the lock.** deploy, bench, etc / env push,
+  logs, final, finalize and restart stop with "busy — <who>: <what> for Nm"
+  while the other person holds it (each also locks for its own run). A lock left
+  by someone who walked away: `isukit unlock --force`.
+- **Deploy only a committed branch that contains origin/main.** Uncommitted
+  changes, or a branch without main, are refused — deploying one rolls back what
+  the other person merged. `--force` overrides, but nobody can reproduce that run.
+- **The server remembers what was deployed.** bench records the deployed
+  branch and commit, not your local HEAD.
+- **One shared record.** Every bench is pushed to the repo's `isukit-runs`
+  branch; both of you see the same `isukit score` / `show` / `attribute`.
+- **One branch, one change.** `isukit ship "<note>"` runs go build / go vet
+  first, then commits on a new `isukit/<slug>` branch, pushes, opens a draft PR.
+- **Merge what you keep, right away.** Unmerged keeps make the other branch stale.
+- **Split the areas.** E.g. one on the DB (schema, indexes, queries, MySQL
+  config), one on the app (logic, caching, nginx). Don't both edit the same
+  files, `etc/` especially.
+- **Never edit on the servers.** Config goes in `etc/`, connection settings in
+  `hosts/<host>/env.sh`, schema changes in the problem's init SQL in the repo.
+  Reading over ssh (logs, top, EXPLAIN) is fine.
+- **Score drops → revert immediately.** On REVERT, deploy main again, move on.
+- **30-minute timebox.** A change that hasn't moved the score in 30 minutes gets dropped.
+- **Say the number out loud.** The record is shared, but tell each other every result.
 
 ---
 
@@ -677,6 +697,7 @@ isukit restart              # restart the app units on every app host
 isukit logs on|off          # nginx LTSV + mysql slow log
 isukit etc adopt|status|push|pull  # nginx/mysql/unit config into the repo's etc/, symlinked from /etc
 isukit env status|pull|push         # each host's env file kept as hosts/<host>/ in the repo, written to it
+isukit lock [status] / unlock       # take the servers for your turn / hand them back
 isukit ship "note"          # new branch -> commit -> push -> draft PR
 isukit revert [sha]         # git revert to undo a change
 isukit finalize             # the endgame sequence (all hosts)

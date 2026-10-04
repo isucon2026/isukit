@@ -59,6 +59,8 @@ ISUKIT_LIB="$(kit_dir)/lib"
 . "$ISUKIT_LIB/final.sh"
 # shellcheck source=lib/env.sh
 . "$ISUKIT_LIB/env.sh"
+# shellcheck source=lib/team.sh
+. "$ISUKIT_LIB/team.sh"
 
 usage() { cat >&2 <<'EOF'
 isukit — repo-agnostic ISUCON bootstrap + measurement loop
@@ -152,7 +154,7 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          built binary under /home/isucon" safety check
     isukit restart                      restart APP_UNIT (+ EXTRA_UNITS) on every
                                          host with role app
-    isukit score                        run history
+    isukit score                        run history: every run, with branch and who
 
   DIAGNOSE
     isukit os                           uptime, vmstat/iostat/mpstat, free, df, unit
@@ -160,14 +162,17 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     isukit doctor                       non-destructive check + auto-repair of config,
                                          connectivity, manifest, unit health, tools,
                                          logging state, disk headroom, bench mode
-    isukit attribute [noise_pct]        compare the last two numeric bench runs; verdict
-                                         is KEEP / REVERT / INCONCLUSIVE vs noise_pct
-                                         (default 10) — one change at a time, or this
-                                         can't tell which change moved the score
+    isukit attribute [noise_pct] [--last2]
+                                         the latest run vs the latest run deployed from
+                                         main (everyone's runs); KEEP / REVERT /
+                                         INCONCLUSIVE vs noise_pct (default 10).
+                                         --last2: the last two runs, whatever they were
 
   SHIP
-    isukit ship "<message>"             commit everything on a new isukit/<slug> branch,
-                                         push, open a draft PR (gh, if on PATH)
+    isukit ship [--no-check] "<message>"
+                                         go build + go vet first, then commit everything
+                                         on a new isukit/<slug> branch, push, open a
+                                         draft PR (gh, if on PATH)
     isukit revert [<sha>]                git revert; no arg reverts the most recent
                                          commit on an isukit/* branch reachable from HEAD
 
@@ -186,6 +191,19 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          verify HTTP (web hosts via nginx, app hosts
                                          directly; FINAL_CHECK_PATH, default /) -> score
                                          (restart order across hosts is not guaranteed)
+
+  TEAM (one set of servers, several people)
+    isukit lock [status]                take the servers for your turn: deploy, bench,
+                                         etc / env push, logs, final, finalize by anyone
+                                         else stop with "busy — <who>: <what> for Nm".
+                                         those commands also lock for their own run
+    isukit unlock [--force]             hand the servers back (--force: someone else's)
+                                         deploy refuses uncommitted changes and branches
+                                         without origin/main (--force overrides) and
+                                         records sha / branch / who on the server; bench
+                                         records that, and publishes each run to the
+                                         isukit-runs branch so score / show / attribute
+                                         see everyone's runs
 
   VERSION
     isukit version                      the kit's version and git tag/sha — check
@@ -247,6 +265,8 @@ main() {
     logs)     cmd_logs "$@" ;;
     etc)      cmd_etc "$@" ;;
     env)      cmd_env "$@" ;;
+    lock)     cmd_lock "$@" ;;
+    unlock)   cmd_unlock "$@" ;;
     bench)    cmd_bench "$@" ;;
     score)    cmd_score ;;
     show)     cmd_show "$@" ;;
