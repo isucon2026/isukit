@@ -175,7 +175,9 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          etc/ (a diff you can revert), etc push, clean
                                          the hosts, check again. app code is reported,
                                          not edited — fix it, deploy, bench, then ship
-    isukit finalize                     logs off -> reboot ALL hosts -> verify -> score
+    isukit finalize                     logs off -> reboot ALL hosts -> verify units ->
+                                         verify HTTP (web hosts via nginx, app hosts
+                                         directly; FINAL_CHECK_PATH, default /) -> score
                                          (restart order across hosts is not guaranteed)
 
   VERSION
@@ -189,6 +191,8 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     BENCH_MODE     auto (ssh + BENCH_CMD) or manual (portal, paste the score)
     ALP_MATCHES    comma-separated alp -m regexes to use instead of derived ones;
                    ALP_THRESH (20) = fan-out at which a path segment becomes a group
+    FINAL_CHECK_PATH  path finalize requests after the reboot (default /); pick one that
+                   touches the DB. FINAL_APP_PORT if the app's port is not discoverable
     PPROF_PORT     pprof listener on app hosts (default 6060); PPROF_SEC (30) and
                    PPROF_DELAY (5) shape the profile bench takes during the load
     ETC_REPO       server dir whose etc/ holds linked configs (default: git root of

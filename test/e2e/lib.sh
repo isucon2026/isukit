@@ -45,6 +45,7 @@ case "$1" in
       ExecStart:isu-go.service) echo "{ path=/home/isucon/webapp/go/isu ; argv[]=/home/isucon/webapp/go/isu ; }" ;;
       EnvironmentFiles:isu-go.service) echo "/home/isucon/env.sh (ignore_errors=no)" ;;
       User:isu-go.service) echo isucon ;;
+      MainPID:*) cat /tmp/mainpid 2>/dev/null || echo 0 ;;
       Type:*) echo simple ;;
     esac ;;
 esac
@@ -80,8 +81,10 @@ X
   [ -x /usr/local/bin/alp ] || printf '#!/bin/bash\nexit 0\n' > /stub/alp
   chmod +x /stub/*
   export PATH="/stub:$PATH"
-  git config --global user.email e2e@isukit; git config --global user.name e2e
-  git config --global init.defaultBranch main
+  if command -v git >/dev/null 2>&1; then
+    git config --global user.email e2e@isukit; git config --global user.name e2e
+    git config --global init.defaultBranch main
+  fi
 }
 
 server() { # a contest box as handed out: webapp, middleware config, env file

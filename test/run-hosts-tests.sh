@@ -33,7 +33,7 @@ rsh_stdin() { # record "<host> stdin:" + the VAR= lines the caller prepended
   case "$body" in *"Closes the measurement window"*) tag="run-stop " ;; esac
   case "$body" in *"sent by \`isukit alp\`"*) tag="alp-script " ;; esac
   case "$body" in *"sent by \`isukit final check\`"*) tag="final-check " ;; esac
-  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|APP_UNIT|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE)=' | tr '\n' ' ')" >> "$CALLS"
+  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|APP_UNIT|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE|PATH_)=' | tr '\n' ' ')" >> "$CALLS"
   return 0
 }
 say()  { :; }
@@ -387,6 +387,18 @@ t_final_check_per_role() {
   check -z "$(printf '%s\n' "$code" | grep vendor)"
 }
 
+t_finalize_http_per_role() {
+  setup_state isu1 "" "$ROLES"
+  printf "FINAL_CHECK_PATH='/api/tag'\n" >> .isukit/config
+  load
+  finalize_http >/dev/null
+  # nginx answers on web hosts, the app itself on every app host; the db host is not asked
+  check -n "$(grep "^isu1 stdin: MODE=web PATH_=/api/tag" "$CALLS")"
+  check -n "$(grep "^isu1 stdin: MODE=app PATH_=/api/tag APP_UNIT=isu-go.service" "$CALLS")"
+  check -n "$(grep "^isu2 stdin: MODE=app PATH_=/api/tag APP_UNIT=isu-go.service" "$CALLS")"
+  check -z "$(grep '^isu3 ' "$CALLS")"
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -410,6 +422,7 @@ case_ db-checks-survive-reprobe       t_db_checks_survive_reprobe
 case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts
 case_ db-left-enabled-reported        t_db_left_enabled_reported
 case_ final-check-per-role            t_final_check_per_role
+case_ finalize-http-per-role          t_finalize_http_per_role
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]
