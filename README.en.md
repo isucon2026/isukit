@@ -166,9 +166,12 @@ contests coexist without stepping on each other.
 
 Development: `bash test/run-all.sh` (offline suites), `bash test/e2e/run.sh` (the
 real isukit end to end in docker), and shellcheck (command in
-[`test/README.md`](test/README.md)); CI runs all three on every PR. Everything
-that runs on a host lives as a plain script in `remote/`; isukit only ships it
-over ssh.
+[`test/README.md`](test/README.md)); CI runs all three on every PR.
+
+Layout: `isukit` is only the entry point (config, loading `lib/`, help,
+dispatch). Laptop-side code lives in `lib/` by feature (core, hosts, probe,
+logs, etc, runs, analyze, deploy, repo, go, doctor); everything that runs on a
+host lives as a plain script in `remote/`, which isukit ships over ssh.
 
 Subdirectories: [`launch/`](launch/README.md) holds AWS pre-contest staging and
 instance bootstrap scripts; [`skills/isucon/`](skills/isucon/SKILL.md) is a Claude
