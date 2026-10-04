@@ -492,6 +492,101 @@ t_bench_target_same_box() {
   check -n "$(printf '%s' "$cmd" | grep -F -- '-target-addr 127.0.0.1:443')"
 }
 
+local_server() { # rsh runs commands here, sudo dropped: the lock / deploy files become real files
+  LOCK_FILE="$WORK/isukit.lock"; DEPLOYED_FILE="$WORK/isukit.deployed"
+  rsh() { local c="${*:2}"; bash -c "${c//sudo -n /}"; }
+  unset ISUKIT_LOCKED
+}
+
+t_lock_turns() {
+  setup_state isu1 "" "$ROLES"
+  load; local_server
+  # a command takes the servers for itself and gives them back
+  ( ISUKIT_WHO=alice lock_guard bench; cut -d'|' -f1,2,4 "$LOCK_FILE" > "$WORK/during" )
+  check "$(cat "$WORK/during")" = "alice|bench|cmd"
+  check ! -f "$LOCK_FILE"
+  # alice holds her turn: bob is refused with who and what, alice is not
+  ISUKIT_WHO=alice cmd_lock >/dev/null 2>&1
+  ( ISUKIT_WHO=bob lock_guard deploy ) > "$WORK/bob.out" 2>&1; local rc=$?
+  check "$rc" != 0
+  check -n "$(grep 'busy — alice: turn' "$WORK/bob.out")"
+  ( ISUKIT_WHO=alice lock_guard deploy ); check "$?" = 0
+  check "$(cut -d'|' -f1,4 "$LOCK_FILE")" = "alice|hold"    # her command did not end her turn
+  # only alice (or --force) hands it back
+  ( ISUKIT_WHO=bob cmd_unlock ) >/dev/null 2>&1; check "$?" != 0
+  check -f "$LOCK_FILE"
+  ( ISUKIT_WHO=bob cmd_unlock --force ) >/dev/null 2>&1; check "$?" = 0
+  check ! -f "$LOCK_FILE"
+}
+
+git_team() { # a bare origin with main, cloned to $WORK/me; prints nothing
+  rm -rf "$WORK/origin.git" "$WORK/me" "$WORK/bob"
+  git init -q --bare "$WORK/origin.git"
+  git clone -q "$WORK/origin.git" "$WORK/me" 2>/dev/null
+  ( cd "$WORK/me" && git checkout -q -b main && echo a > a && git add a \
+    && git -c user.email=t@t -c user.name=t commit -qm a && git push -q origin main )
+}
+
+t_deploy_guard() {
+  setup_state isu1 "" "$ROLES"
+  load; git_team
+  cd "$WORK/me" || return
+  git checkout -q -b mine
+  ( cd "$WORK/me" && git checkout -q main && echo b > b && git add b \
+    && git -c user.email=t@t -c user.name=t commit -qm "teammate's merged work" && git push -q origin main \
+    && git checkout -q mine )
+  ( deploy_guard ) > "$WORK/out" 2>&1; check "$?" != 0
+  check -n "$(grep 'does not contain origin/main' "$WORK/out")"
+  git rebase -q origin/main
+  ( deploy_guard ) >/dev/null 2>&1; check "$?" = 0
+  echo dirty > a
+  ( deploy_guard ) > "$WORK/out" 2>&1; check "$?" != 0
+  check -n "$(grep 'uncommitted changes' "$WORK/out")"
+  cd "$WORK" || return
+}
+
+t_attribute_against_main() {
+  setup_state isu1 "" "$ROLES"
+  mkdir -p .isukit/runs/a .isukit/runs/b .isukit/runs/c
+  printf 'when=20261031-1000\nsha=m1\nscore=1000\nnote=main\nbranch=main\nwho=alice\n' > .isukit/runs/a/meta
+  printf 'when=20261031-1010\nsha=x1\nscore=1500\nnote=cache\nbranch=isukit/cache\nwho=alice\n' > .isukit/runs/b/meta
+  printf 'when=20261031-1020\nsha=y1\nscore=800\nnote=idx\nbranch=isukit/idx\nwho=bob\n' > .isukit/runs/c/meta
+  local out
+  out=$(cmd_attribute 2>&1)
+  # bob's run is judged against main (1000), not against alice's branch (1500)
+  check -n "$(printf '%s\n' "$out" | grep '^main .*score=1000')"
+  check -n "$(printf '%s\n' "$out" | grep 'delta -20.0%')"
+  check -n "$(printf '%s\n' "$out" | grep REVERT)"
+  out=$(cmd_attribute --last2 2>&1)
+  check -n "$(printf '%s\n' "$out" | grep 'score=1500')"
+}
+
+t_runs_shared_between_laptops() {
+  setup_state isu1 "" "$ROLES"
+  git_team
+  git clone -q "$WORK/origin.git" "$WORK/bob" 2>/dev/null
+  # alice benches and publishes from her clone
+  ( cd "$WORK/me" && mkdir -p .isukit/runs/r1 \
+    && printf 'when=20261031-1100\nsha=s1\nscore=4242\nnote=n\nbranch=main\nwho=alice\n' > .isukit/runs/r1/meta \
+    && ISUKIT_WHO=alice runs_publish "$WORK/me/.isukit/runs/r1" ) >/dev/null 2>&1
+  # bob, on his own laptop, sees it
+  local seen
+  seen=$(cd "$WORK/bob" && shared_ready >/dev/null 2>&1; cd "$WORK/bob" && runs_view)
+  check -n "$(printf '%s\n' "$seen" | awk -F'\t' '$3 == 4242 && $7 == "alice"')"
+  check -n "$(git --git-dir="$WORK/origin.git" ls-tree -r --name-only isukit-runs | grep 'runs/r1-alice/meta')"
+  check -z "$(git --git-dir="$WORK/origin.git" ls-tree -r --name-only main | grep runs/)"    # main stays clean
+}
+
+t_ship_build_check() {
+  command -v go >/dev/null 2>&1 || return 0
+  rm -rf "$WORK/app"; mkdir -p "$WORK/app/go"
+  printf 'module x\n\ngo 1.21\n' > "$WORK/app/go/go.mod"
+  printf 'package main\nfunc main() { undefined() }\n' > "$WORK/app/go/main.go"
+  ( cd "$WORK/app" && ship_build_check ) >/dev/null 2>&1; check "$?" != 0
+  printf 'package main\nfunc main() {}\n' > "$WORK/app/go/main.go"
+  ( cd "$WORK/app" && ship_build_check ) >/dev/null 2>&1; check "$?" = 0
+}
+
 case_ legacy-layout-without-hosts-file t_legacy_layout
 case_ restart-hits-app-hosts-only     t_restart_app_hosts_only
 case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
@@ -519,6 +614,11 @@ case_ finalize-http-per-role          t_finalize_http_per_role
 case_ legacy-hosts-moves-to-shared    t_legacy_hosts_moves_to_shared
 case_ shared-conf-under-laptop        t_shared_conf_under_laptop
 case_ env-push-changed-hosts-only     t_env_push_changed_hosts_only
+case_ lock-turns                      t_lock_turns
+case_ deploy-guard                    t_deploy_guard
+case_ attribute-against-main          t_attribute_against_main
+case_ runs-shared-between-laptops     t_runs_shared_between_laptops
+case_ ship-build-check                t_ship_build_check
 case_ bench-target-separate-box       t_bench_target_separate_box
 case_ bench-target-same-box           t_bench_target_same_box
 

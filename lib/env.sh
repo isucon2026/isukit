@@ -66,6 +66,7 @@ cmd_env_pull() { # every host's env file -> hosts/<host>/, never over an unsaved
 
 cmd_env_push() { # hosts/<host>/<file> -> each host; restart the app where it changed
   load
+  lock_guard "env push"
   local from_deploy=0 h ef lf changed_app=0 rc=0
   [ "${1:-}" = "--from-deploy" ] && from_deploy=1
   for h in $(hosts_all); do

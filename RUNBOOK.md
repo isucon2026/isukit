@@ -347,16 +347,31 @@ isukit version                           # 全員の表示が同じ v1.0.x で�
 
 ## 4. チームルール（クロック開始前に合意する）
 
-- **ベンチ係は1人。** ベンチは同時に1本だけ。2本走ると全部の数字が無意味になる。キューイングも1人が持つ。
-- **デプロイ係も1人。** `isukit deploy` は **`rsync -a --delete` で自分の手元のツリーをサーバーに上書きする**。3人がそれぞれの手元から打つと最後の人が勝ち、`--delete` で他の2人が追加したファイルが消える。
-- **デプロイ直前に必ず `git pull`。** 上のルールの裏返し。pullを忘れたデプロイは、誰かの作業が抜けたツリーを本番に載せてベンチしていることになる。
-- **ベンチ直前に必ず commit。** `isukit bench` は `HEAD` の sha を記録するだけで、**コミットはしてくれない**。commitせずに回すと `scores.tsv` の全行が同じ sha になり、「どの変更が効いたか」という記録の意味が消える。`isukit ship "<メモ>"` で自動化できる：新しい `isukit/<slug>` ブランチを作って commit → push → draft PR を開く。
-- **1回のベンチにつき変更は1つ。** 2つ入れてスコアが動いても、どちらが効いたか分からない。
-- **スコアが落ちたら即revert。** 競技中にリグレッションをデバッグしない。`isukit revert` で手元の最後のコミットを打ち消す（git revert）、または SHA を指定して任意のコミットを打ち消す。戻ったことをベンチで確認して、次へ。
-- **30分タイムボックス。** 30分でスコアが動かない変更は捨てる。粘らない。
-- **数字を声に出す。** ベンチ結果は毎回全員に共有。古いスコアを前提に最適化する人を作らない。
+**2人とも開発する。サーバーは交代で使う。** ブランチは並行して作れるが、サーバーは1組で、ベンチも1回に1本（本番のポータルも同じ）。だから「計測の番」を回す：
 
-**3人の分担例**：1人がインフラ／計測（`isukit`、alp・slowの読み、デプロイ、スコア台帳） ＝ ベンチ係兼デプロイ係。1人がDB（スキーマ、インデックス、クエリ）。1人がアプリコード。
+```
+# 自分の番が来たら
+git fetch && git rebase origin/main     # main の最新 ＋ 自分の変更1つ、を測る
+isukit lock                             # サーバーを確保（相手の deploy / bench は止まる）
+isukit deploy
+isukit bench "何を変えたか"
+isukit show                             # 台ごとの CPU・alp・slow・pprof
+isukit attribute                        # main の最新の回と比べる（相手のブランチの回とは比べない）
+# KEEP なら PR をマージ（gh pr merge）／ REVERT なら main を deploy し直す
+isukit unlock                           # 相手の番
+```
+
+- **サーバーを変えるコマンドは、ロックを取ってから。** `deploy`・`bench`・`etc push`・`env push`・`logs`・`final`・`finalize`・`restart` は、相手がロックしていると「busy — <誰>: <何を> for N分」と出して止まる（自分のコマンドも、実行中だけ自動でロックする）。相手が離席して残ったロックは `isukit unlock --force`。
+- **deploy できるのは「main の最新を含む、コミット済みのブランチ」だけ。** 未コミットの変更や、main を取り込んでいないブランチは止まる（取り込まずに出すと、相手がマージした変更をサーバーから消してしまう）。`--force` で強行できるが、その回のスコアは誰にも再現できない。
+- **deploy したものをサーバーが覚えている。** `bench` は手元の HEAD ではなく、サーバーに deploy されたブランチと commit をスコアに記録する。
+- **記録は2人で共有。** ベンチの記録は repo の `isukit-runs` ブランチに push され、2人とも `isukit score` / `show` / `attribute` で同じ記録を見る。
+- **1ブランチ＝1変更。** `isukit ship "<メモ>"` が、手元で `go build` / `go vet` を通してから、`isukit/<slug>` ブランチで commit → push → draft PR を作る。
+- **採用したらすぐマージ。** マージを溜めると、相手のブランチがすぐ古くなる。
+- **担当を分ける。** 例：1人は DB（スキーマ・インデックス・クエリ・MySQL の設定）、1人はアプリ（ロジック・キャッシュ・nginx）。同じファイル（特に `etc/`）を2人で触らない。
+- **サーバーの上で直接編集しない。** 設定は `etc/`、接続先などは `hosts/<台>/env.sh`、DB のスキーマ変更は問題の初期化用 SQL（repo）に書く。ssh で見る（ログ、`top`、`EXPLAIN`）のは自由。
+- **スコアが落ちたら即 revert。** 競技中にリグレッションをデバッグしない。`attribute` が REVERT なら main を deploy し直して次へ。
+- **30分タイムボックス。** 30分でスコアが動かない変更は捨てる。粘らない。
+- **数字を声に出す。** 記録は共有されるが、ベンチの結果は毎回相手に伝える。
 
 ---
 
@@ -618,6 +633,7 @@ isukit unit <unit名>           # probe のunit選択を手で上書き
 isukit logs on|off             # nginx LTSV ＋ MySQLスローログ
 isukit etc adopt|status|push|pull  # nginx/MySQL/unit 設定を repo の etc/ に移して /etc からリンク・反映
 isukit env status|pull|push    # 各台の env ファイルを repo の hosts/<台>/ で管理して書き込む
+isukit lock [status] / unlock  # サーバーを自分の番として確保する／返す（相手の deploy・bench は止まる）
 isukit doctor                  # config / 接続 / manifest / unit / ツール / ログ / ディスク / ベンチモードを診断・修復
 isukit os                      # サーバーのスナップショット（uptime / vmstat / iostat / mpstat / free / df）
 isukit bench "メモ"            # スコア＋git sha を .isukit/scores.tsv に記録 (manual モード: --score N / --fail)

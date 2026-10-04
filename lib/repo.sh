@@ -178,11 +178,25 @@ slugify() { # slugify <text> -- lowercase, non-alnum -> '-', squeeze/trim, cap 4
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40
 }
 
+ship_build_check() { # the Go app must build and vet here before it reaches a PR or the servers
+  local mod dir
+  command -v go >/dev/null 2>&1 || { warn "no go here — skipping the build check"; return 0; }
+  mod=$(find . -maxdepth 4 -name go.mod -not -path "*/bench*" -not -path "*/vendor/*" -not -path "./.isukit/*" | head -1)
+  [ -n "$mod" ] || return 0
+  dir=$(dirname "$mod")
+  say "build check: go build + go vet in $dir"
+  ( cd "$dir" && go build ./... && go vet ./... ) \
+    || die "the app does not build — fix it before shipping (isukit ship --no-check to ship anyway)"
+}
+
 cmd_ship() {
+  local check=1
+  [ "${1:-}" = "--no-check" ] && { check=0; shift; }
   local msg="${1:-}"
-  [ -n "$msg" ] || die "usage: isukit ship \"<message>\""
+  [ -n "$msg" ] || die "usage: isukit ship [--no-check] \"<message>\""
   git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo"
   [ -n "$(git status --porcelain 2>/dev/null)" ] || die "nothing to ship — working tree is clean"
+  [ "$check" = 0 ] || ship_build_check
 
   local slug branch n=1
   slug=$(slugify "$msg")
@@ -207,7 +221,7 @@ cmd_ship() {
     warn "push failed — committed locally on $branch ($sha) — push by hand when ready"
   fi
 
-  say "shipped $sha on $branch — the next 'isukit bench' will record this sha"
+  say "shipped $sha on $branch — your turn on the servers: isukit lock, deploy, bench, attribute"
 }
 
 cmd_revert() {

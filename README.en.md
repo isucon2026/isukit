@@ -186,6 +186,12 @@ it in `internal/cli`, drop it from `Passthrough`, and add a test holding its
 output identical to the bash one (`TestHostsMatchesBash` is the pattern).
 `version` and `hosts` are native today.
 
+Several people: both develop on branches and take turns on the servers with
+`isukit lock` / `unlock`. deploy refuses uncommitted changes and branches
+without main, and records what it deployed on the server; every bench is shared
+on the `isukit-runs` branch, and attribute compares against main's latest run
+(RUNBOOK, team rules).
+
 Team sharing: roles (`isukit.hosts`), team-wide settings (`isukit.conf`),
 each host's env file (`hosts/<host>/`) and config (`etc/`) are committed, so all
 three laptops act on the same picture. Only ssh targets / keys
