@@ -540,6 +540,7 @@ isukit doctor                  # config / 接続 / manifest / unit / ツール /
 isukit os                      # サーバーのスナップショット（uptime / vmstat / iostat / mpstat / free / df）
 isukit bench "メモ"            # スコア＋git sha を .isukit/scores.tsv に記録 (manual モード: --score N / --fail)
 isukit score                   # 全履歴
+isukit show [n]                # 保存した回：台ごとの CPU・プロセス、alp、slow、pprof（logs on の間の bench が保存）
 isukit attribute [noise_pct]   # 最後の2回計測の有意差を判定（デフォルト ±10%）
 isukit alp                     # エンドポイントを合計レスポンスタイム順
 isukit slow                    # クエリを合計時間順

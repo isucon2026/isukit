@@ -34,6 +34,18 @@ the loop.
     isukit bench "added idx X"  # record the score; manual mode prompts for the value
     isukit ship "added idx X"   # commit everything + push + draft PR, one change per commit
     isukit score                # full history
+    isukit show [n]             # a saved run (1 = latest, 2 = the one before)
+
+While logs are on, each `isukit bench` is one measured run saved to
+`.isukit/runs/<when>/`: it empties every host's logs at the start, samples every
+host's CPU and per-process usage each second, takes a pprof on the first app
+host while the load is on (`PPROF_SEC`, default 30), then saves a per-host
+usage summary, alp (every web host's log merged), slow per db host,
+`cpu.pprof` and the bench output, and prints the summary. The host (and
+process) that was pinned says what to look at next. Manual mode records the
+same when you answer the prompts; a later `--score N` still keeps that run's
+alp / slow (logs are emptied after every record). Nothing is measured while
+logs are off.
 
 ## Middleware config under git
 

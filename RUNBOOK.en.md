@@ -535,6 +535,7 @@ isukit os                   # server snapshot: uptime / vmstat / iostat / mpstat
 isukit probe                # re-read the server after any infra change
 isukit bench "note"         # score + git sha -> .isukit/scores.tsv (manual mode: --score N / --fail)
 isukit score                # full run history
+isukit show [n]             # a saved run: per-host CPU and processes, alp, slow, pprof (saved by bench while logs are on)
 isukit attribute [pct]      # compare last two runs; KEEP / REVERT / INCONCLUSIVE
 isukit alp                  # endpoints by summed response time
 isukit slow                 # queries by total time
