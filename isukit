@@ -87,31 +87,19 @@ norm_git_url() { # norm_git_url <url> -- drop trailing slash/.git so equivalent 
   printf '%s' "$u"
 }
 
-cmd_init() {
-  local url="${1:-}"; [ -n "$url" ] || die "usage: isukit init <repo-url> [dir]"
-  local dir="${2:-$(basename "$url" .git)}"
-  if [ -d "$dir" ]; then
-    # re-run safety: reuse a matching clone, refuse to touch anything else.
-    if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
-      local origin
-      origin=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
-      if [ -z "$origin" ]; then
-        die "'$dir' exists and is a git repo but has no 'origin' remote (looks like a partial/failed clone) — inspect or move it aside by hand, then retry"
-      elif [ "$(norm_git_url "$origin")" = "$(norm_git_url "$url")" ]; then
-        say "reusing existing repo at '$dir' (origin already matches $url)"
-        git -C "$dir" fetch --quiet 2>/dev/null || warn "fetch failed (offline?) — continuing with the existing local state"
-      else
-        die "'$dir' already exists as a git repo with a different origin ('$origin', requested '$url') — pick a different directory or resolve it by hand"
-      fi
-    else
-      die "'$dir' already exists and is not a git repo — pick a different directory or resolve it by hand"
-    fi
-  else
-    git clone "$url" "$dir"
-  fi
-  cd "$dir"
+parse_github_owner_repo() { # parse_github_owner_repo <url> -- prints <owner>/<repo> for a github.com URL, empty for anything else
+  local u
+  u=$(norm_git_url "$1")
+  case "$u" in
+    git@github.com:*)       printf '%s' "${u#git@github.com:}" ;;
+    ssh://git@github.com/*) printf '%s' "${u#ssh://git@github.com/}" ;;
+    https://github.com/*)   printf '%s' "${u#https://github.com/}" ;;
+    http://github.com/*)    printf '%s' "${u#http://github.com/}" ;;
+  esac
+}
+
+write_state_scaffold() { # write_state_scaffold -- create .isukit/ + config (if absent) + .gitignore + notes.md (if absent); shared by init/adopt
   mkdir -p "$STATE"
-  git rev-parse --verify work >/dev/null 2>&1 || git switch -c work >/dev/null 2>&1 || true
   if [ -f "$CONF" ]; then
     local kept
     kept=$( . "$CONF" 2>/dev/null; printf 'APP=%s BENCH=%s BENCH_CMD=%s' "${APP:-local}" "${BENCH:-local}" "${BENCH_CMD:+<already set, kept>}" )
@@ -149,6 +137,33 @@ EOF
 - explicitly forbidden:
 EOF
   fi
+}
+
+cmd_init() {
+  local url="${1:-}"; [ -n "$url" ] || die "usage: isukit init <repo-url> [dir]"
+  local dir="${2:-$(basename "$url" .git)}"
+  if [ -d "$dir" ]; then
+    # re-run safety: reuse a matching clone, refuse to touch anything else.
+    if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+      local origin
+      origin=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+      if [ -z "$origin" ]; then
+        die "'$dir' exists and is a git repo but has no 'origin' remote (looks like a partial/failed clone) — inspect or move it aside by hand, then retry"
+      elif [ "$(norm_git_url "$origin")" = "$(norm_git_url "$url")" ]; then
+        say "reusing existing repo at '$dir' (origin already matches $url)"
+        git -C "$dir" fetch --quiet 2>/dev/null || warn "fetch failed (offline?) — continuing with the existing local state"
+      else
+        die "'$dir' already exists as a git repo with a different origin ('$origin', requested '$url') — pick a different directory or resolve it by hand"
+      fi
+    else
+      die "'$dir' already exists and is not a git repo — pick a different directory or resolve it by hand"
+    fi
+  else
+    git clone "$url" "$dir"
+  fi
+  cd "$dir"
+  git rev-parse --verify work >/dev/null 2>&1 || git switch -c work >/dev/null 2>&1 || true
+  write_state_scaffold
   say "initialised in $(pwd)"
   say "next: isukit host app <ssh-target>   (and bench)   then: isukit probe"
   grep -rilE 'bench|benchmark' README* docs/ 2>/dev/null | head -5 | sed 's/^/    read: /' >&2 || true
@@ -1057,6 +1072,34 @@ die_unplaced() { # die_unplaced <bad-arg> -- self-diagnosing die: full argv dump
   die "$msg"
 }
 
+go_setup_hosts() { # go_setup_hosts <apph> <benchh> <keyfile> <port> <raw_opts> -- shared by go/adopt
+  local apph="$1" benchh="$2" keyfile="$3" port="$4" raw_opts="$5"
+  cmd_host app "$apph"
+  cmd_host bench "${benchh:-$apph}"
+
+  if [ -n "$keyfile" ] || [ -n "$port" ]; then
+    local abskey=""
+    if [ -n "$keyfile" ]; then
+      abskey=$(abspath "$keyfile")
+      check_keyfile "$abskey"
+    fi
+    {
+      go_ssh_host_block isukit-app "$apph" "$abskey" "$port"
+      printf '\n'
+      go_ssh_host_block isukit-bench "${benchh:-$apph}" "$abskey" "$port"
+    } > "$STATE/ssh_config"
+    chmod 600 "$STATE/ssh_config" 2>/dev/null || true
+    local ssh_opts_line="-F $STATE/ssh_config"
+    [ -n "$raw_opts" ] && ssh_opts_line="$ssh_opts_line $raw_opts"
+    cmd_host app "isukit-app" "$ssh_opts_line"
+    cmd_host bench "isukit-bench" "$ssh_opts_line"
+    say "ssh config written to $STATE/ssh_config (aliases isukit-app / isukit-bench)"
+  elif [ -n "$raw_opts" ]; then
+    cmd_host app "$apph" "$raw_opts"
+    cmd_host bench "${benchh:-$apph}" "$raw_opts"
+  fi
+}
+
 cmd_go() {
   local -a full_argv=(go "$@")
   local url="${1:-}" apph="${2:-}"
@@ -1121,30 +1164,7 @@ cmd_go() {
   fi
 
   cmd_init "$url"
-  cmd_host app "$apph"
-  cmd_host bench "${benchh:-$apph}"
-
-  if [ -n "$keyfile" ] || [ -n "$port" ]; then
-    local abskey=""
-    if [ -n "$keyfile" ]; then
-      abskey=$(abspath "$keyfile")
-      check_keyfile "$abskey"
-    fi
-    {
-      go_ssh_host_block isukit-app "$apph" "$abskey" "$port"
-      printf '\n'
-      go_ssh_host_block isukit-bench "${benchh:-$apph}" "$abskey" "$port"
-    } > "$STATE/ssh_config"
-    chmod 600 "$STATE/ssh_config" 2>/dev/null || true
-    local ssh_opts_line="-F $STATE/ssh_config"
-    [ -n "$raw_opts" ] && ssh_opts_line="$ssh_opts_line $raw_opts"
-    cmd_host app "isukit-app" "$ssh_opts_line"
-    cmd_host bench "isukit-bench" "$ssh_opts_line"
-    say "ssh config written to $STATE/ssh_config (aliases isukit-app / isukit-bench)"
-  elif [ -n "$raw_opts" ]; then
-    cmd_host app "$apph" "$raw_opts"
-    cmd_host bench "${benchh:-$apph}" "$raw_opts"
-  fi
+  go_setup_hosts "$apph" "$benchh" "$keyfile" "$port" "$raw_opts"
 
   cmd_probe
   cmd_setup
@@ -1164,6 +1184,169 @@ cmd_go() {
     warn "    isukit benchcmd '<command>'   (a benchmarker you can run yourself)"
     warn "    isukit benchmode manual       (the portal runs it; you type the score)"
   fi
+}
+
+# ---------------------------------------------------------------- adopt
+cmd_adopt() {
+  local url="${1:-}" apph="${2:-}"
+  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit adopt <team-repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port] [--ssh-opts 'raw'] [--dir <name>] [--collab <user>]... [--remote-path <path>]"
+  shift 2 || true
+
+  local benchh="" keyfile="" port="" raw_opts="" dir="" remote_path=""
+  local -a collabs=()
+  while [ "$#" -gt 0 ]; do
+    is_blank "$1" && { shift; continue; }
+    case "$1" in
+      -i=*)             keyfile="${1#-i=}"; shift ;;
+      -i?*)             keyfile="${1#-i}"; shift ;;
+      -i)
+        [ "$#" -ge 2 ] || die "-i needs a keyfile argument"
+        keyfile="$2"; shift 2 ;;
+      --identity=*)     keyfile="${1#--identity=}"; shift ;;
+      --identity)
+        [ "$#" -ge 2 ] || die "--identity needs a keyfile argument"
+        keyfile="$2"; shift 2 ;;
+      --key=*)          keyfile="${1#--key=}"; shift ;;
+      --key)
+        [ "$#" -ge 2 ] || die "--key needs a keyfile argument"
+        keyfile="$2"; shift 2 ;;
+      --port=*)         port="${1#--port=}"; shift ;;
+      --port)
+        [ "$#" -ge 2 ] || die "--port needs a port argument"
+        port="$2"; shift 2 ;;
+      -p)
+        [ "$#" -ge 2 ] || die "-p needs a port argument"
+        port="$2"; shift 2 ;;
+      --ssh-opts=*)     raw_opts="${1#--ssh-opts=}"; shift ;;
+      --ssh-opts)
+        [ "$#" -ge 2 ] || die "--ssh-opts needs an argument"
+        raw_opts="$2"; shift 2 ;;
+      --dir=*)          dir="${1#--dir=}"; shift ;;
+      --dir)
+        [ "$#" -ge 2 ] || die "--dir needs a name argument"
+        dir="$2"; shift 2 ;;
+      --collab=*)       collabs+=("${1#--collab=}"); shift ;;
+      --collab)
+        [ "$#" -ge 2 ] || die "--collab needs a username argument"
+        collabs+=("$2"); shift 2 ;;
+      --remote-path=*)  remote_path="${1#--remote-path=}"; shift ;;
+      --remote-path)
+        [ "$#" -ge 2 ] || die "--remote-path needs a path argument"
+        remote_path="$2"; shift 2 ;;
+      -*)
+        die "isukit adopt: could not place argument: '$1'" ;;
+      *)
+        if [ -n "$benchh" ] && [ -z "$keyfile" ] && looks_like_keyfile "$1"; then
+          warn "'$1' looks like an identity file given without -i — using it as the keyfile"
+          keyfile="$1"
+        elif [ -n "$benchh" ]; then
+          die "isukit adopt: could not place argument: '$1'"
+        else
+          benchh="$1"
+        fi
+        shift ;;
+    esac
+  done
+  [ -n "$keyfile" ] && keyfile=$(expand_tilde "$keyfile")
+  [ -n "$dir" ] || dir=$(basename "$(norm_git_url "$url")")
+
+  if [ -d "$dir" ] && git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 && git -C "$dir" log -1 >/dev/null 2>&1; then
+    say "'$dir' already exists with commits — skipping the server pull, resuming from publish"
+    cd "$dir"
+    load
+  else
+    mkdir -p "$dir"
+    cd "$dir"
+    write_state_scaffold
+    go_setup_hosts "$apph" "$benchh" "$keyfile" "$port" "$raw_opts"
+
+    cmd_probe
+
+    local src="" c
+    local -a candidates=("${remote_path:-}" "${SRC_DIR:-}" "${APP_WORKDIR:-}" "/home/isucon/webapp")
+    for c in "${candidates[@]}"; do
+      [ -n "$c" ] || continue
+      rsh "$APP" "test -d '$c'" 2>/dev/null && { src="$c"; break; }
+    done
+    [ -n "$src" ] || die "no source tree found on $APP among: ${candidates[*]} — pass --remote-path <path>"
+    say "adopting $APP:$src -> webapp/"
+
+    mkdir -p webapp
+    rsync -a --exclude .git -e "ssh ${SSH_OPTS:-}" "$APP:$src/" webapp/ \
+      || die "rsync of $APP:$src failed — check connectivity: ssh ${SSH_OPTS:-} $APP true"
+
+    if [ "${WEB_SERVER:-}" = "nginx" ]; then
+      mkdir -p etc/nginx
+      rsync -a -e "ssh ${SSH_OPTS:-}" "$APP:/etc/nginx/" etc/nginx/ \
+        || warn "could not pull /etc/nginx from $APP — continuing without it"
+    else
+      warn "web server is '${WEB_SERVER:-none}', not nginx — skipping /etc/nginx pull"
+    fi
+    if [ "${DB_SERVER:-}" = "mysql" ] || [ "${DB_SERVER:-}" = "mariadb" ]; then
+      mkdir -p etc/mysql
+      rsync -a -e "ssh ${SSH_OPTS:-}" "$APP:/etc/mysql/" etc/mysql/ \
+        || warn "could not pull /etc/mysql from $APP — continuing without it"
+    else
+      warn "db server is '${DB_SERVER:-none}', not mysql/mariadb — skipping /etc/mysql pull"
+    fi
+
+    git rev-parse --git-dir >/dev/null 2>&1 || git init >/dev/null
+    [ -f .gitignore ] || printf '.isukit/\n*.pem\n' > .gitignore
+    git add -A
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+      git commit --no-verify -m "baseline: untouched contest code" >/dev/null || die "commit failed"
+      say "committed baseline"
+    else
+      say "nothing to commit — working tree already matched"
+    fi
+
+    cmd_setup
+    cmd_logs on
+  fi
+
+  local owner_repo
+  owner_repo=$(parse_github_owner_repo "$url")
+  if [ -n "$owner_repo" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    gh repo view "$owner_repo" >/dev/null 2>&1 \
+      || gh repo create "$owner_repo" --private >/dev/null \
+      || warn "gh repo create failed — create $owner_repo by hand, then: git remote add origin $url && git push -u origin HEAD"
+    if git remote get-url origin >/dev/null 2>&1; then
+      git remote set-url origin "$url"
+    else
+      git remote add origin "$url"
+    fi
+    if git push -u origin HEAD; then
+      say "pushed to $url"
+    else
+      warn "push failed — committed locally — push by hand: git remote add origin $url && git push -u origin HEAD"
+    fi
+    if [ "${#collabs[@]}" -gt 0 ]; then
+      local u
+      for u in "${collabs[@]}"; do
+        gh api -X PUT "repos/$owner_repo/collaborators/$u" -f permission=push >/dev/null \
+          && say "invited $u as a push collaborator" \
+          || warn "could not invite $u — add by hand: gh api -X PUT repos/$owner_repo/collaborators/$u -f permission=push"
+      done
+    fi
+  else
+    warn "gh missing/unauthenticated, or '$url' is not a github.com URL — publish by hand:"
+    warn "    (create the repo on GitHub first if it doesn't exist yet)"
+    warn "    git remote add origin $url && git push -u origin HEAD"
+    if [ "${#collabs[@]}" -gt 0 ]; then
+      local u
+      for u in "${collabs[@]}"; do
+        warn "    gh api -X PUT repos/<owner>/<repo>/collaborators/$u -f permission=push"
+      done
+    fi
+  fi
+
+  local final_bench_mode
+  final_bench_mode=$(. "$CONF" 2>/dev/null; printf '%s' "${BENCH_MODE:-auto}")
+  say "adopted: $(pwd)"
+  say "repo: $url"
+  say "server path: ${src:-<resumed, not re-probed>}"
+  say "APP_UNIT=${APP_UNIT:-none} (confidence=${APP_UNIT_CONFIDENCE:-n/a})  WEB_SERVER=${WEB_SERVER:-none}  DB_SERVER=${DB_SERVER:-none}  BENCH_MODE=$final_bench_mode"
+  say "teammates: isukit go $url <their-app-host> -i <key>"
 }
 
 # ---------------------------------------------------------------- ship
@@ -1369,6 +1552,19 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          --identity=KEY, --key KEY, --key=KEY; -p also
                                          takes --port N / --port=N; --debug-args prints
                                          the raw argv it received and exits
+    isukit adopt <team-repo-url> <app-host> [bench-host] [-i keyfile] [-p port]
+                 [--ssh-opts 'raw'] [--dir <name>] [--collab <user>]...
+                 [--remote-path <path>]
+                                         T+0: no repo exists yet — pull the
+                                         contest tree off <app-host> down to this
+                                         laptop, commit it as the baseline, then
+                                         create/push <team-repo-url> from here
+                                         (never from the contest box). Re-running
+                                         on an already-adopted dir resumes from
+                                         the publish step. --collab invites a
+                                         push collaborator (repeatable);
+                                         --remote-path overrides the auto-detected
+                                         source dir on the server
 
   SETUP
     isukit init <repo-url> [dir]        clone + create .isukit/
@@ -1460,6 +1656,7 @@ main() {
   local c="${1:-}"; shift || true
   case "$c" in
     go)       cmd_go "$@" ;;
+    adopt)    cmd_adopt "$@" ;;
     init)     cmd_init "$@" ;;
     host)     cmd_host "$@" ;;
     probe)    cmd_probe ;;
