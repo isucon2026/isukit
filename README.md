@@ -17,6 +17,25 @@
 
 これで clone → サーバー調査 → `alp` + `pt-query-digest` のインストール → LTSV nginx ログと `long_query_time=0` の有効化 → ベンチマーカー本体の `--help` を読んでの `BENCH_CMD` 組み立て、まで一通り終わる。その行を目視で確認したら、あとはループに入るだけ。
 
+## 本番：リポジトリがまだ無いとき
+
+本番では、コードは配られたサーバーの上にしか無い。`go` も `init` もリポジトリURLを要求するので、そのままでは始められない。`adopt` がこの最初の1手を埋める。
+
+    isukit adopt <team-repo-url> <app-ssh-target> -i ~/.ssh/key.pem --collab <user> --collab <user>
+
+サーバーのツリーと `/etc/nginx` `/etc/mysql` を**手元に pull** し、手を入れる前の状態をベースラインとしてcommit、private リポジトリを作って push、残り2人を招待、そのまま `setup` と `logs on` まで走る。**push は常にラップトップから** — コンテストのサーバーに GitHub の認証情報は無いし、T+0 にそれを作るのは純粋な浪費。すでに adopt 済みのディレクトリで再実行すると、pull を飛ばして publish から再開する。
+
+残り2人は、できたリポジトリに対して通常どおり：
+
+    isukit go <team-repo-url> <app-ssh-target> -i <各自の鍵>
+
+### Claude に任せる場合の2行
+
+    claude "/isucon-start <app-host> -i ~/.ssh/key.pem --repo <team-repo-url>"
+    claude "/isucon"
+
+1行目が T+0。`adopt` を走らせたうえで、**probe の結果を実機と突き合わせて直し**（`APP_UNIT_CONFIDENCE=low`、`BENCH_CMD`、インスタンス数）、マニュアルからスコア式・失格条件・`/initialize` の契約を抜き出し、ベースラインを取る。そこで**止まる** — フェーズ1でコードを触らないのは意図的。2行目が以降のループ。
+
 ## ループ
 
     isukit bench "baseline"     # BENCH_CMD をベンチホストで実行し、スコアとgit shaを記録

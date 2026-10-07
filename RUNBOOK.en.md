@@ -511,6 +511,9 @@ These are the generic ways teams lose everything, independent of the year's prob
 - **`launch/`** — AWS pre-contest staging and instance bootstrap scripts
   (`prestage.sh`, `launch.sh`, `user-data.sh`). Used only if your organizers say
   "launch from this AMI" with no turnkey template. See [`launch/README.md`](launch/README.md).
+- **`skills/isucon-start/`** — Claude skill for T+0 only: runs `adopt`, then
+  reconciles the probe results against the real machine, reads the manual, and
+  takes the baseline — then **stops**. Activate with `/isucon-start`.
 - **`skills/isucon/`** — Claude AI skill for the measure → diagnose → fix →
   ship → re-measure loop. Symlinked to `~/.claude/skills/` by `install.sh`.
   Activate with `/isukit`.

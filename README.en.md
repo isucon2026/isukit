@@ -22,6 +22,36 @@ LTSV nginx logging + `long_query_time=0`, and composes `BENCH_CMD` by reading
 the benchmarker binary's own `--help`. Sanity-check that line, then you're in
 the loop.
 
+## Production: when there's no repo yet
+
+On contest day, the code only exists on the server you were handed. Both `go`
+and `init` require a repo URL, so you can't start that way. `adopt` fills in
+that first step.
+
+    isukit adopt <team-repo-url> <app-ssh-target> -i ~/.ssh/key.pem --collab <user> --collab <user>
+
+**Pulls** the server's tree plus `/etc/nginx` and `/etc/mysql` down to your
+laptop, commits that untouched state as a baseline, creates a private repo and
+pushes, invites the other two, then runs straight through `setup` and `logs
+on`. **Push always happens from the laptop** — the contest server has no
+GitHub credentials, and creating them at T+0 is pure waste. Re-running in an
+already-adopted directory skips the pull and resumes from publish.
+
+The other two then run the normal flow against the resulting repo:
+
+    isukit go <team-repo-url> <app-ssh-target> -i <their own key>
+
+### Two lines if you hand it to Claude
+
+    claude "/isucon-start <app-host> -i ~/.ssh/key.pem --repo <team-repo-url>"
+    claude "/isucon"
+
+Line one is T+0. It runs `adopt`, then **reconciles the probe results against
+the real machine** (`APP_UNIT_CONFIDENCE=low`, `BENCH_CMD`, instance count),
+pulls the score formula, disqualification rules, and the `/initialize`
+contract out of the manual, and takes the baseline. Then it **stops** — not
+touching code in phase 1 is deliberate. Line two is the loop from there.
+
 ## The loop
 
     isukit bench "baseline"     # runs BENCH_CMD on the bench host, records score+git sha

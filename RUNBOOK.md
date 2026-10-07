@@ -262,7 +262,32 @@ isucon13 は言語別に8つ、isucon12-qualify は19個の compose ファイル
 
 **3人で並行して触るための必須手順。** コードは配られたサーバーの上にしか無い状態から始まる。公開リポジトリ（`isucon/isucon13` など）は読む専用で、push できない。
 
-**向きが大事：サーバー → 自分たちのリポジトリ → 各自のラップトップ。**
+**向きが大事：サーバー → 自分たちのラップトップ → 自分たちのリポジトリ。** 配られたサーバーに GitHub の認証情報は無い。そこで認証を作るのは、1日で一番高い5分を溶かす。だから pull してきて、手元から push する。
+
+### 自動（まずこれ）
+
+```
+isukit adopt git@github.com:<team>/<private-repo>.git <app-host> -i ~/.ssh/isukit.pem \
+  --collab n000r111 --collab imaharu
+```
+
+これ1本で、サーバーのソースツリーと `/etc/nginx` `/etc/mysql` を手元に pull → 「baseline: untouched contest code」としてcommit → private リポジトリを作成 → push → 残り2人を Collaborator に招待 → `setup` と `logs on` まで走る。すでに adopt 済みのディレクトリで再実行すると、pull を飛ばして publish から再開する。`gh` が無い／未認証なら、手で叩くコマンドを出して続行する（止まらない）。
+
+Claude に任せるなら、クロック開始と同時にこの1行：
+
+```
+claude "/isucon-start <app-host> -i ~/.ssh/isukit.pem --repo git@github.com:<team>/<private-repo>.git"
+```
+
+`/isucon-start` は adopt を走らせたうえで、**probe の結果を実機と突き合わせて直し**（`APP_UNIT_CONFIDENCE=low`、`BENCH_CMD`、インスタンス数）、マニュアルからスコア式・失格条件・`/initialize` の契約を抜き出し、ベースラインを取る。そこで止まって `/isucon` に引き継ぐ。**フェーズ1なのでコードには触らない。**
+
+### 残り2人
+
+```
+isukit go git@github.com:<team>/<private-repo>.git <app-host> -i <各自の鍵>
+```
+
+### 手でやる場合（adopt が転んだとき）
 
 ```
 # ① サーバー上で。まだ何も変えていないコードをベースラインとして push
@@ -509,6 +534,7 @@ isukit os       # サーバーのスナップショット（uptime / vmstat / io
 `isukit` リポジトリは以下のサブディレクトリを持つ：
 
 - **`launch/`** — AWS の pre-contest staging と T+0 インスタンス起動スクリプト（`prestage.sh`、`launch.sh`、`user-data.sh`）。本番で組織が指定した AMI をそのまま起動する場合のみ使用。詳しくは [`launch/README.md`](launch/README.md)
+- **`skills/isucon-start/`** — T+0 専用の Claude skill。`adopt` → probe の実機突き合わせ → マニュアル読解 → ベースライン計測 まで走って**止まる**。`/isucon-start` でアクティベート
 - **`skills/isucon/`** — Claude AI の skill ファイル（`.claude/skills/` にシンボリックリンク）。計測 → 診断 → 修正 → ship → 再計測のループを支援するプロンプト集。`/isukit` でアクティベート
 - **`test/`** — ISUCON の過去年度の実際の systemd unit 設定と nginx 設定をフィクスチャとして保持し、isukit の発見ロジックをオフラインで検証するテストスイート。`test/run-all.sh` で実行。`test/README.md` の「## Known discovery gaps」セクションが tool の実際の限界を記録している
 
@@ -518,6 +544,8 @@ isukit os       # サーバーのスナップショット（uptime / vmstat / io
 
 ```
 isukit go <repo-url> <host> -i <鍵>   # 丸ごと1コマンド：clone→probe→setup→logs→benchprobe
+isukit adopt <team-repo-url> <host> -i <鍵> [--collab <user>]...
+                               # 本番T+0：サーバーのコードを手元に pull → baseline commit → repo作成 → push
 isukit init <repo-url> [dir]   # clone（既存ディレクトリはそのまま採用）＋ work ブランチ
 isukit host app|bench <target> # ssh先を .isukit/config に設定（'local' も可）
 isukit host add <target>       # 追加ホストを EXTRA_HOSTS に追加
