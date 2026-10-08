@@ -232,7 +232,7 @@ isukit host app   ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem
 isukit host bench ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem   # 練習で1台に寄せる場合は app と同じでよい
 ```
 
-複数インスタンスの場合（ISUCON2026予定）は、ホストごとに役割を付ける。役割は `app`（アプリ）・`web`（nginx）・`db`（MySQL）の組み合わせ：
+複数インスタンスの場合は、ホストごとに役割を付ける。役割は `app`（アプリ）・`web`（nginx）・`db`（MySQL）の組み合わせ：
 
 ```
 isukit host role ubuntu@43.207.152.140 web,app   # 1台目: nginx + アプリ（isukit go で指定した台）

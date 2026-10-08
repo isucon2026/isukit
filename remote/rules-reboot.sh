@@ -57,10 +57,10 @@ if [ "$HAVE_SYSTEMCTL" = 1 ]; then
   done
 fi
 
-# --- R2 (+ IMPL lines for `rules langs`): ISUCON ships the webapp in Go, Perl,
-# PHP, Python, Ruby, Rust and Node.js, all binding the same port. More than
-# one enabled reference-implementation unit means the reboot picks the
-# winner at random.
+# --- R2 (+ IMPL lines for `rules langs`): the webapp ships as one unit per
+# language and exactly one of them should be enabled. More than one enabled
+# reference-implementation unit is a reboot hazard — which one comes back is
+# not something you control.
 impl_langs="go golang perl php python py ruby rb rust nodejs node"
 impl_units=""
 if [ "$HAVE_SYSTEMCTL" = 1 ]; then
@@ -90,10 +90,21 @@ for u in $impl_units; do
 done
 enabled_impls="${enabled_impls# }"
 if [ "$enabled_n" -gt 1 ]; then
-  fix "$enabled_n implementation units are enabled ($enabled_impls) — they share one port, so the reboot picks the winner at random" "sudo systemctl disable --now <the ones you are not using>"
+  fix "$enabled_n implementation units are enabled ($enabled_impls) — exactly one should be" "sudo systemctl disable --now <the ones you are not using>"
 elif [ "$enabled_n" -eq 0 ] && [ -n "$active_unenabled" ]; then
   for u in $active_unenabled; do
     fix "the running implementation $u is not enabled" "sudo systemctl enable $u"
+  done
+fi
+
+# --- R2b: what the enabled implementation actually listens on. Read off this
+# box, never remembered — the port is a property of this year's repo.
+if [ -n "$enabled_impls" ] && command -v ss >/dev/null 2>&1; then
+  for u in $enabled_impls; do
+    pid=$($SUDO systemctl show -p MainPID --value "$u" 2>/dev/null)
+    [ -n "$pid" ] && [ "$pid" != 0 ] || continue
+    ports=$($SUDO ss -ltnpH 2>/dev/null | awk -v p="pid=$pid," '$0 ~ p { print $4 }' | tr '\n' ' ')
+    [ -n "$ports" ] && info "$u is listening on ${ports% }" "check it matches what the web server proxies to and what the manual says"
   done
 fi
 

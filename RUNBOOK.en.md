@@ -339,7 +339,7 @@ isukit host app   ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem
 isukit host bench ubuntu@43.207.152.140 -i ~/.ssh/isukit-sandbox.pem   # fine to reuse the app box for bench too, if you're consolidating onto one instance for practice
 ```
 
-If there are multiple instances (expected for ISUCON2026), give each host its roles
+If there are multiple instances, give each host its roles
 (`app`, `web`, `db`) with `isukit host role <target> <roles>`, e.g. `web,app` / `app` / `db`,
 and check them with `isukit hosts`. Commands then go where their tier runs: deploy / restart
 / pprof to app hosts, nginx logging and alp to web hosts, the slow log and slow to db hosts,
