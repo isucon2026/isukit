@@ -121,6 +121,15 @@ run_record() { # run_record <run-dir> <when> <sha> <score> <note> <branch> -- sc
   who=$(who_am_i)
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" "$1" "${6:-?}" "$who" >> "$STATE/scores.tsv"
   printf 'when=%s\nsha=%s\nscore=%s\nnote=%s\nbranch=%s\nwho=%s\n' "$2" "$3" "$4" "$5" "${6:-?}" "$who" > "$1/meta"
+  run_note_score "$3" "$4" "$2" "$5" "$who"
+}
+
+run_note_score() { # run_note_score <sha> <score> <when> <note> <who> -- git-notes attach, best-effort, never fatal
+  local sha="$1"
+  case "$sha" in *-dirty) return 0 ;; esac
+  git cat-file -e "$sha^{commit}" 2>/dev/null || return 0
+  git notes --ref=isukit append -m "isukit-score: $2  ($3, $5) $4" "$sha" 2>/dev/null \
+    || warn "could not attach a score note to $sha — the score is still recorded in scores.tsv"
 }
 
 run_summary() { # run_summary <run-dir> -- the short view printed after a run and by `show`
@@ -330,6 +339,13 @@ cmd_attribute() { # attribute [noise_pct] [--last2] -- the latest run vs the lat
     END {
       printf "%s %s  sha=%s  score=%s  note=%s%s\n", (mode == "main" ? "main " : "prev "), t[1], h[1], s[1], n[1], who(1)
       printf "cur   %s  sha=%s  score=%s  note=%s%s\n", t[2], h[2], s[2], n[2], who(2)
+      base_dirty = (h[1] ~ /-dirty$/); cur_dirty = (h[2] ~ /-dirty$/)
+      if (base_dirty || cur_dirty) {
+        which = (base_dirty && cur_dirty) ? "both runs" : (base_dirty ? "the earlier (base)" : "the current")
+        printf "\033[33mINCONCLUSIVE\033[0m — %s run deployed a dirty tree; its sha does not hold that code.\n", which
+        print " Commit, redeploy, re-bench before trusting this delta."
+        exit 0
+      }
       if (s[1] == 0) { print "base score is 0 — cannot compute a percent delta"; exit 0 }
       denom = s[1] < 0 ? -s[1] : s[1]
       delta = (s[2] - s[1]) / denom * 100

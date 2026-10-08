@@ -18,6 +18,19 @@ warn() { printf '\033[33m~~ %s\033[0m\n' "$*" >&2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 envfile="$here/prestage.env"
 
+conf="$here/../isukit.conf"
+if [ -f "$conf" ]; then
+  # shellcheck disable=SC1090
+  . "$conf"
+  if [ -n "${CONTEST_END:-}" ]; then
+    end=$(date -d "$CONTEST_END" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S%z' "$CONTEST_END" +%s 2>/dev/null || true)
+    if [ -n "$end" ] && [ "$(date +%s)" -gt "$end" ]; then
+      [ -n "${ISUKIT_OVERRIDE:-}" ] && warn "OVERRIDE: prestage.sh run after CONTEST_END ($CONTEST_END) — $ISUKIT_OVERRIDE" \
+        || die "CONTEST_END ($CONTEST_END) has passed — prestage.sh changes the security group, which the rules forbid after launch. ISUKIT_OVERRIDE='<reason>' to override."
+    fi
+  fi
+fi
+
 key_name="" key_file="" region="" vpc_id="" subnet_id="" sg_name="isukit-ssh"
 allow_ips=()
 

@@ -10,7 +10,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 IMAGE="${E2E_IMAGE:-ubuntu:24.04}"
 command -v docker >/dev/null 2>&1 || { echo "FATAL: e2e needs docker" >&2; exit 2; }
 
-if [ "$#" -gt 0 ]; then names=("$@"); else names=(etc bench new alp final http team); fi
+if [ "$#" -gt 0 ]; then names=("$@"); else names=(etc bench new alp final http team rules); fi
 
 # E2E_GO=1: the same scenarios through the Go entry point, built for the
 # container's arch into the repo (mounted read-only below)

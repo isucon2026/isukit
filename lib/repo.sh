@@ -39,6 +39,9 @@ cmd_init() {
 
 init_state() { # .isukit/{config,.gitignore,notes.md} in the current dir; an existing config is kept
   mkdir -p "$STATE"
+  # isukit-score notes (attached by bench) ride rebase/amend and show in plain git log
+  git config notes.rewriteRef refs/notes/isukit
+  git config notes.displayRef refs/notes/isukit
   if [ -f "$CONF" ]; then
     local kept
     kept=$( . "$CONF" 2>/dev/null; printf 'APP=%s BENCH=%s BENCH_CMD=%s' "${APP:-local}" "${BENCH:-local}" "${BENCH_CMD:+<already set, kept>}" )
@@ -120,6 +123,7 @@ repo_new_baseline() { # repo_new_baseline <owner/repo> <invite,list>
     sudo -n rsync -rlpt "${ex[@]}" "$SRC_DIR/" ./ || die "copying $SRC_DIR failed"
     sudo -n chown -R "$(id -u):$(id -g)" . 2>/dev/null || true
   else
+    rules_allow_host "$APP"
     rsync -rlpt "${ex[@]}" --rsync-path="sudo -n rsync" -e "ssh ${SSH_OPTS:-}" "$APP:$SRC_DIR/" ./ \
       || die "copying $APP:$SRC_DIR failed"
   fi
@@ -253,14 +257,55 @@ ship_build_check() { # the Go app must build and vet here before it reaches a PR
   ( cd "$dir" && go vet ./... ) || warn "go vet reports the above — worth a look, not blocking"
 }
 
+ship_preview() { # ship_preview [path...] -- show what ship is about to stage, before it happens
+  say "ship preview (-- ${*:-everything changed}):"
+  git status --short -- "$@" | sed 's/^/    /' >&2 || true
+}
+
+ship_size_gate() { # ship_size_gate [path...] -- refuse an oversized commit (lines=added+deleted across tracked+untracked)
+  local files lines max_files max_lines
+  files=$(git status --short -- "$@" | wc -l | tr -d ' ')
+  lines=$(
+    { git diff --numstat -- "$@"
+      git diff --cached --numstat -- "$@"
+      git ls-files --others --exclude-standard -- "$@" | while IFS= read -r f; do
+        [ -f "$f" ] && printf '%s\t0\t%s\n' "$(wc -l < "$f" | tr -d ' ')" "$f"
+      done
+    } | awk '{a+=$1+$2} END{print a+0}'
+  )
+  max_files="${SHIP_MAX_FILES:-10}"
+  max_lines="${SHIP_MAX_LINES:-300}"
+  [ "$files" -le "$max_files" ] && [ "$lines" -le "$max_lines" ] && return 0
+  rules_override ship-size "shipping $files files / $lines lines (limits: $max_files / $max_lines)" || \
+    die "this commit is $files files / $lines lines — over SHIP_MAX_FILES=$max_files / SHIP_MAX_LINES=$max_lines.
+    A commit this size cannot be cherry-picked or reverted cleanly.
+    Split it, use --only <paths>, or set ISUKIT_OVERRIDE='<reason>'."
+}
+
 cmd_ship() {
-  local check=1
-  [ "${1:-}" = "--no-check" ] && { check=0; shift; }
+  load   # SHIP_MAX_FILES/SHIP_MAX_LINES live in isukit.conf; this is how every other cmd_* reads it
+  local check=1 measure=0
+  local -a only=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-check) check=0; shift ;;
+      --measure) measure=1; shift ;;
+      --only)
+        shift
+        [ "$#" -ge 2 ] || die "usage: isukit ship [--no-check] [--measure] [--only <path>...] \"<message>\""
+        while [ "$#" -gt 1 ]; do only+=("$1"); shift; done
+        ;;
+      *) break ;;
+    esac
+  done
   local msg="${1:-}"
-  [ -n "$msg" ] || die "usage: isukit ship [--no-check] \"<message>\""
+  [ -n "$msg" ] || die "usage: isukit ship [--no-check] [--measure] [--only <path>...] \"<message>\""
   git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo"
   [ -n "$(git status --porcelain 2>/dev/null)" ] || die "nothing to ship — working tree is clean"
   [ "$check" = 0 ] || ship_build_check
+
+  ship_preview ${only+"${only[@]}"}
+  ship_size_gate ${only+"${only[@]}"}
 
   local slug branch n=1
   slug=$(slugify "$msg")
@@ -272,12 +317,27 @@ cmd_ship() {
   done
 
   git switch -c "$branch" || die "could not create branch $branch"
-  git add -A
+  if [ "${#only[@]}" -gt 0 ]; then
+    git add -- "${only[@]}"
+  else
+    git add -A
+  fi
+  if [ "$measure" = 1 ]; then
+    msg=$(git interpret-trailers --trailer 'Isukit-Measure: true' <<< "$msg")
+  fi
   git commit -m "$msg" || die "commit failed"
   local sha
   sha=$(git rev-parse --short HEAD)
 
+  rules_repo_private
+
   if git push -u origin "$branch"; then
+    if git rev-parse -q --verify refs/notes/isukit >/dev/null 2>&1; then
+      git push origin refs/notes/isukit 2>/dev/null || warn "push of score notes (refs/notes/isukit) failed — push by hand when ready: git push origin refs/notes/isukit"
+    fi
+    if git rev-parse -q --verify refs/notes/isukit-measure >/dev/null 2>&1; then
+      git push origin refs/notes/isukit-measure 2>/dev/null || warn "push of measure notes (refs/notes/isukit-measure) failed — push by hand when ready: git push origin refs/notes/isukit-measure"
+    fi
     if command -v gh >/dev/null 2>&1; then
       gh pr create --draft --fill || warn "gh pr create failed — push succeeded, open the PR by hand"
     fi
@@ -313,4 +373,93 @@ cmd_revert() {
   say "reverting $sha"
   git revert --no-edit "$sha" || die "revert failed — resolve conflicts by hand, then: git revert --continue"
   say "reverted $sha — next: isukit deploy, then isukit bench"
+}
+
+cmd_pick() {
+  local sha="${1:-}"
+  [ -n "$sha" ] || die "usage: isukit pick <sha>"
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo"
+
+  if ! git cherry-pick "$sha"; then
+    die "cherry-pick of $sha conflicts — resolve by hand, then: git cherry-pick --continue (or --abort)
+conflicted paths:
+$(git diff --name-only --diff-filter=U 2>/dev/null)"
+  fi
+
+  local new_sha note
+  new_sha=$(git rev-parse --short HEAD)
+  git notes --ref=isukit copy "$sha" HEAD 2>/dev/null
+  note=$(git notes --ref=isukit show HEAD 2>/dev/null || true)
+  say "picked $sha as $new_sha${note:+ — carried: $note}"
+}
+
+measure_commits() { # sha<TAB>date<TAB>subject<TAB>author of every live labelled commit on HEAD, newest first
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
+
+  local trailer_shas note_shas reverted_shas qualifying sha
+
+  trailer_shas=$(git log --format='%H %(trailers:key=Isukit-Measure,valueonly)' HEAD 2>/dev/null \
+    | awk '$2 == "true" { print $1 }')
+
+  note_shas=""
+  if git rev-parse -q --verify refs/notes/isukit-measure >/dev/null 2>&1; then
+    while IFS=' ' read -r _ sha; do
+      [ -n "$sha" ] || continue
+      git merge-base --is-ancestor "$sha" HEAD 2>/dev/null && note_shas="$note_shas$sha
+"
+    done <<< "$(git notes --ref=isukit-measure list 2>/dev/null)"
+  fi
+
+  reverted_shas=$(git log --format='%B' HEAD 2>/dev/null \
+    | grep -oE 'This reverts commit [0-9a-f]{40}' | awk '{print $4}')
+
+  qualifying=$(printf '%s\n%s\n' "$trailer_shas" "$note_shas" | grep -v '^$' | sort -u)
+  [ -n "$qualifying" ] || return 0
+
+  # Walk HEAD's own history once — it is already newest-first, and unlike a
+  # re-sort on %ct it never ties same-second commits in sha-hash order.
+  git log --format='%H%x09%ad%x09%s%x09%an' --date=short HEAD 2>/dev/null | while IFS=$'\t' read -r sha date subject author; do
+    [ -n "$sha" ] || continue
+    grep -qxF "$sha" <<< "$qualifying" || continue
+    grep -qxF "$sha" <<< "$reverted_shas" && continue
+    printf '%s\t%s\t%s\t%s\n' "$sha" "$date" "$subject" "$author"
+  done
+}
+
+cmd_measures() {
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo"
+  local rows
+  rows=$(measure_commits)
+  if [ -z "$rows" ]; then
+    say "no measurement commits live in HEAD"
+    return 0
+  fi
+  local sha date subject author
+  while IFS=$'\t' read -r sha date subject author; do
+    [ -n "$sha" ] || continue
+    printf '%s  %s  %-40s  %s\n' "${sha:0:7}" "$date" "$subject" "$author"
+  done <<< "$rows"
+}
+
+cmd_measure() { # isukit measure <sha> | isukit measure --undo <sha>
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo"
+  local undo=0
+  case "${1:-}" in
+    --undo) undo=1; shift ;;
+  esac
+  local arg="${1:-}" sha
+  [ -n "$arg" ] || die "usage: isukit measure [--undo] <sha>"
+  sha=$(git rev-parse --verify "$arg" 2>/dev/null) || die "no such commit: $arg"
+
+  if [ "$undo" = 1 ]; then
+    if git log --format='%(trailers:key=Isukit-Measure,valueonly)' -1 "$sha" 2>/dev/null | grep -qx 'true'; then
+      die "$sha carries the Isukit-Measure trailer in its commit message — a trailer cannot be undone, only a note can; the message itself stays as history (no rewrite)."
+    fi
+    git notes --ref=isukit-measure remove "$sha" 2>/dev/null || die "no isukit-measure note on $sha to remove"
+    say "removed the isukit-measure note on ${sha:0:7}"
+    return 0
+  fi
+
+  git notes --ref=isukit-measure add -f -m 'true' "$sha" || die "could not add isukit-measure note on $sha"
+  say "labelled ${sha:0:7} as a measurement commit — push it: git push origin refs/notes/isukit-measure"
 }

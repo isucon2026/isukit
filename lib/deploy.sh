@@ -8,6 +8,9 @@ cmd_deploy() {
   [ "${1:-}" = "--force" ] && force=1
   lock_guard deploy
   [ "$force" = 1 ] || deploy_guard
+  if repo_dirty; then
+    warn "deploying uncommitted changes — this run will record as $(git rev-parse --short HEAD 2>/dev/null || echo nogit)-dirty"
+  fi
   # configs first: once /etc links into the repo, the repo's etc/ is what runs.
   # (hosts that do not link /etc yet are skipped inside the push)
   if [ -d "$(local_repo_root)/etc" ] && [ -n "${ETC_REPO:-${SRC_DIR:-}}" ]; then
@@ -43,6 +46,7 @@ deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it 
     if [ "$APP" = "local" ]; then
       rsync -a --delete --exclude .git "$local_src/" "$remote_dir/"
     else
+      rules_allow_host "$APP"
       rsync -a --delete --exclude .git -e "ssh ${SSH_OPTS:-}" "$local_src/" "$APP:$remote_dir/"
     fi
     say "docker compose -f $cfile up -d --build"
@@ -73,6 +77,7 @@ deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it 
   if [ "$APP" = "local" ]; then
     rsync -a --exclude .git --exclude "$exec_base" "$local_src/" "$GO_DIR/"
   else
+    rules_allow_host "$APP"
     rsync -a --exclude .git --exclude "$exec_base" -e "ssh ${SSH_OPTS:-}" "$local_src/" "$APP:$GO_DIR/"
   fi
   say "building -> $out"
@@ -118,9 +123,42 @@ finalize_http() { # print one "OK|url|code" / "FAIL|url|why" per web and app hos
   return 0
 }
 
+finalize_bench_guard() { # finalize must never score code nobody has benched yet
+  local sha
+  read -r sha _ <<< "$(deployed)"
+  case "$sha" in
+    *-dirty)
+      rules_override finalize-unbenched "finalizing with an uncommitted deployed tree ($sha)" && return 0
+      die "the final run would score an uncommitted tree ($sha) — commit it (isukit ship), deploy, bench, THEN finalize.
+Override with ISUKIT_OVERRIDE='<reason>' if you know what you are doing." ;;
+  esac
+  awk -F'\t' -v s="$sha" '$2 == s { found=1 } END { exit !found }' "$STATE/scores.tsv" 2>/dev/null && return 0
+  rules_override finalize-unbenched "deployed sha $sha has no recorded bench" && return 0
+  die "no recorded bench for the deployed sha $sha — the final run would be the first
+benchmark of this code. Deploy, bench, THEN finalize.
+Override with ISUKIT_OVERRIDE='<reason>' if you know what you are doing."
+}
+
+finalize_measure_guard() { # finalize must never score a tree still carrying labelled measurement commits
+  local rows
+  rows=$(measure_commits)
+  [ -n "$rows" ] || return 0
+  rules_override finalize-measured "finalizing with measurement commits still live in HEAD" && return 0
+  local listing
+  listing=$(printf '%s\n' "$rows" | while IFS=$'\t' read -r sha _ subject _; do
+    [ -n "$sha" ] && printf '  %s %s\n' "${sha:0:7}" "$subject"
+  done)
+  die "measurement commits are still live in HEAD — the final run would score instrumented code:
+$listing
+isukit final strip --apply to revert them, THEN finalize.
+Override with ISUKIT_OVERRIDE='<reason>' if you know what you are doing."
+}
+
 cmd_finalize() {
   load
   lock_guard finalize
+  finalize_bench_guard
+  finalize_measure_guard
   local hosts
   hosts="$(hosts_all | tr '\n' ' ' | sed 's/^ *//;s/ *$//')"
   local h

@@ -16,7 +16,8 @@ cmd_final() {
   case "$sub" in
     check) cmd_final_check ;;
     apply) cmd_final_apply ;;
-    *) die "usage: isukit final {check|apply}" ;;
+    strip) cmd_final_strip "$@" ;;
+    *) die "usage: isukit final {check|apply|strip}" ;;
   esac
 }
 
@@ -57,6 +58,107 @@ final_code_findings() { # "<file>:<line>\t<what>" for logging / profiling left i
       | sed "s|^$root/||" | awk -F: -v w="$what" '{ printf "%s:%s\t%s\n", $1, $2, w }' || true
   done
   return 0   # no match is the good outcome, never a failure under set -e
+}
+
+final_strip_candidates() { # files `final strip` would touch, one per line, relative to local_repo_root
+  local root
+  root=$(local_repo_root)
+  { grep -RlE --exclude-dir=vendor --exclude-dir=node_modules --exclude-dir=.git \
+      --exclude-dir=.isukit --exclude-dir=etc --exclude-dir=hosts \
+      -- 'isukit:measure-(begin|end)' "$root" 2>/dev/null
+    grep -RlE --include='*.go' --exclude-dir=vendor --exclude-dir=node_modules \
+      --exclude-dir=.git --exclude-dir=.isukit --exclude-dir=etc --exclude-dir=hosts \
+      -- '"net/http/pprof"' "$root" 2>/dev/null
+  } | sed "s|^$root/||" | LC_ALL=C sort -u
+}
+
+final_strip_file() { # final_strip_file <file> -- the stripped content, to stdout
+  local f="$1" body
+  body=$(awk '
+    /isukit:measure-begin/ { skip = 1; next }
+    /isukit:measure-end/   { skip = 0; next }
+    skip { next }
+    { print }
+  ' "$f")
+  case "$f" in
+    *.go) printf '%s\n' "$body" | grep -vE '"net/http/pprof"|pprof\.(Index|Profile|Cmdline|Symbol|Trace)\b|pprof\.Handler\(' ;;
+    *)    printf '%s\n' "$body" ;;
+  esac
+}
+
+cmd_final_strip() { # isukit final strip [--apply] -- labelled commits, then sentinel-wrapped blocks + the pprof import/routes; everything else stays a finding
+  load
+  local apply=0
+  case "${1:-}" in
+    --apply) apply=1 ;;
+    "") : ;;
+    *) die "usage: isukit final strip [--apply]" ;;
+  esac
+
+  local mrows
+  mrows=$(measure_commits)
+  if [ -n "$mrows" ]; then
+    say "final strip: labelled measurement commit(s) live in HEAD, newest first"
+    printf '%s\n' "$mrows" | while IFS=$'\t' read -r sha _ subject _; do
+      [ -n "$sha" ] && say "  ${sha:0:7} $subject"
+    done
+    if [ "$apply" -eq 1 ]; then
+      local sha
+      while IFS=$'\t' read -r sha _ _ _; do
+        [ -n "$sha" ] || continue
+        if ! git revert --no-edit "$sha"; then
+          die "revert of ${sha:0:7} conflicts — stopping here, remaining labelled commit(s) untouched.
+conflicted paths:
+$(git diff --name-only --diff-filter=U 2>/dev/null)
+resolve by hand, then: git revert --abort   (or --continue once fixed)"
+        fi
+      done <<< "$mrows"
+      say "reverted labelled measurement commit(s) — run final strip again to re-check for sentinel/pprof findings"
+    fi
+  fi
+
+  local root files f before after changed=0
+  root=$(local_repo_root)
+  files=$(final_strip_candidates)
+  if [ -z "$files" ]; then
+    say "final strip: nothing sentinel-wrapped or pprof-imported to strip"
+  else
+    say "final strip: $([ "$apply" -eq 1 ] && echo "writing changes" || echo "dry run — nothing written")"
+    local -a backups=()
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      before="$root/$f"
+      after="$(final_strip_file "$before")"
+      diff -q "$before" <(printf '%s\n' "$after") >/dev/null 2>&1 && continue
+      changed=1
+      if [ "$apply" -eq 1 ]; then
+        cp "$before" "$before.isukit-strip-bak"
+        backups+=("$before")
+        printf '%s\n' "$after" > "$before"
+      else
+        diff -u "$before" <(printf '%s\n' "$after") || true
+      fi
+    done <<< "$files"
+    if [ "$apply" -eq 1 ] && [ "$changed" -eq 1 ]; then
+      local gomod builddir buildout
+      gomod=$(find "$root" -maxdepth 4 -name go.mod -not -path '*/vendor/*' 2>/dev/null | head -1)
+      if [ -n "$gomod" ] && command -v go >/dev/null 2>&1; then
+        builddir=$(dirname "$gomod")
+        if ! buildout=$(cd "$builddir" && go build ./... 2>&1); then
+          for f in ${backups+"${backups[@]}"}; do mv "$f.isukit-strip-bak" "$f"; done
+          die "strip broke the build — reverted every file.
+$buildout"
+        fi
+      fi
+      for f in ${backups+"${backups[@]}"}; do rm -f "$f.isukit-strip-bak"; done
+    fi
+  fi
+  local leftn
+  leftn=$(final_code_findings | grep -vF 'pprof imported: its handlers and listener stay up' | grep -c . || true)
+  say "$leftn finding(s) left for you to judge"
+  if [ "$apply" -eq 1 ] && [ "$changed" -eq 1 ]; then
+    say 'next: isukit ship "strip measurement" && isukit deploy && isukit bench "post-strip"'
+  fi
 }
 
 cmd_final_check() {
