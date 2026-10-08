@@ -45,6 +45,7 @@ lock_take() { # lock_take <what> <hold|cmd> -- 0 taken, 2 already mine, 1 someon
 # them starts with this. Nested calls (deploy -> etc push -> logs on) find the
 # lock already held by this process and go on; only the taker releases it.
 lock_guard() {
+  rules_clock_guard "$1"
   [ "${ISUKIT_LOCKED:-0}" = 1 ] && return 0
   local rc=0
   lock_take "$1" cmd || rc=$?
@@ -115,7 +116,7 @@ deploy_record() { # what is on the servers now: sha|branch|who|when
   root=$(local_repo_root)
   sha=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo nogit)
   branch=$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
-  [ -z "$(git -C "$root" status --porcelain 2>/dev/null)" ] || sha="$sha+dirty"
+  repo_dirty && sha="$sha-dirty"
   rsh "$(lock_host)" "sudo -n sh -c 'printf \"%s\\n\" \"$sha|$branch|$(who_am_i)|$(date +%s)\" > $DEPLOYED_FILE'" >/dev/null 2>&1 || true
 }
 deployed() { # "sha branch" the servers run: the deploy record, else this checkout
@@ -126,7 +127,10 @@ deployed() { # "sha branch" the servers run: the deploy record, else this checko
     return 0
   fi
   root=$(local_repo_root)
-  printf '%s %s\n' "$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo nogit)" \
+  local sha
+  sha=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo nogit)
+  repo_dirty && sha="$sha-dirty"
+  printf '%s %s\n' "$sha" \
     "$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
 }
 

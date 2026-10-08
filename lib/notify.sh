@@ -42,6 +42,10 @@ notify() { # notify <bench|ops> -- message on stdin
   local url body
   url=$(notify_url "$1")
   if [ -z "$url" ] || [ "${ISUKIT_NOTIFY:-1}" = 0 ]; then cat >/dev/null; return 0; fi
+  if rules_in_contest && [ -z "${NOTIFY_PRIVATE_ACK:-}" ]; then
+    rules_override notify-scope "posting to Discord during the contest window without NOTIFY_PRIVATE_ACK" \
+      || { warn "notify suppressed: NOTIFY_PRIVATE_ACK is unset and the contest window is active (ISUCON2026 E1 — 終了時刻まで競技内容を公開・共有してはならない)"; cat >/dev/null; return 0; }
+  fi
   # practice and contest repos may post to the same channel by mistake: say which
   body=$({ printf '[%s] ' "$(notify_tag)"; cat; } | clip_lines | json_string)
   curl -sS -m 5 -o /dev/null -H 'Content-Type: application/json' \

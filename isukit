@@ -35,6 +35,8 @@ kit_dir() {
 ISUKIT_LIB="$(kit_dir)/lib"
 # shellcheck source=lib/core.sh
 . "$ISUKIT_LIB/core.sh"
+# shellcheck source=lib/rules.sh
+. "$ISUKIT_LIB/rules.sh"
 # shellcheck source=lib/hosts.sh
 . "$ISUKIT_LIB/hosts.sh"
 # shellcheck source=lib/probe.sh
@@ -154,6 +156,15 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          config replaces them with your own
     isukit slow                         top queries by total time
     isukit pprof [sec] [port]           pull a Go CPU profile
+    isukit pprof on                     wire a pprof endpoint into func main(): a private
+                                         mux on 127.0.0.1:PPROF_PORT (never the default
+                                         mux, never a blank import), under isukit:measure-
+                                         begin/end sentinels. refuses a missing or
+                                         ambiguous func main(), go build ./... after,
+                                         reverts on a broken build. uncommitted — ship with
+                                         isukit ship --measure "add pprof endpoint"
+    isukit pprof off                    remove it (final strip's own remover, no second
+                                         removal path) — isukit final strip --apply
     isukit deploy [--force]             rsync source up, build/compose, restart
                                          --force skips the "does this look like a
                                          built binary under /home/isucon" safety check
@@ -174,12 +185,27 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          --last2: the last two runs, whatever they were
 
   SHIP
-    isukit ship [--no-check] "<message>"
+    isukit ship [--no-check] [--measure] [--only <path>...] "<message>"
                                          go build + go vet first, then commit everything
                                          on a new isukit/<slug> branch, push, open a
-                                         draft PR (gh, if on PATH)
+                                         draft PR (gh, if on PATH). --measure labels the
+                                         commit with an Isukit-Measure trailer — use it
+                                         for instrumentation you must strip before
+                                         finalize (see final strip / finalize below)
     isukit revert [<sha>]                git revert; no arg reverts the most recent
                                          commit on an isukit/* branch reachable from HEAD
+    isukit pick <sha>                    git cherry-pick, carrying that commit's isukit
+                                         score note (refs/notes/isukit) to the new sha —
+                                         plain cherry-pick drops notes, this one doesn't
+    isukit measure <sha>                 retroactively label a commit as measurement via
+                                         a note (refs/notes/isukit-measure) — for
+                                         instrumentation shipped without --measure
+    isukit measure --undo <sha>          remove that note (cannot touch an
+                                         Isukit-Measure trailer — a trailer is permanent
+                                         history; the commit must be reverted instead)
+    isukit measures                      list every labelled measurement commit still
+                                         live in HEAD (trailer or note, minus any already
+                                         reverted)
 
   ENDGAME
     isukit final check                  list everything that still logs or measures and
@@ -192,10 +218,24 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          etc/ (a diff you can revert), etc push, clean
                                          the hosts, check again. app code is reported,
                                          not edited — fix it, deploy, bench, then ship
-    isukit finalize                     logs off -> reboot ALL hosts -> verify units ->
-                                         verify HTTP (web hosts via nginx, app hosts
-                                         directly; FINAL_CHECK_PATH, default /) -> score
-                                         (restart order across hosts is not guaranteed)
+    isukit final strip [--apply]        FIRST lists any labelled measurement commit
+                                         (isukit measures) still live in HEAD; --apply
+                                         reverts them newest-first (git revert --no-edit),
+                                         stopping immediately on conflict. THEN app-code
+                                         findings that are safe to remove by pattern:
+                                         isukit:measure-begin/end sentinel blocks, and
+                                         the pprof import + route registrations. no flag
+                                         = diff only; --apply writes it (uncommitted),
+                                         go build ./... if present, reverts on a broken
+                                         build. the rest of final check's app-code
+                                         findings stay yours to judge
+    isukit finalize                     dies if any labelled measurement commit is
+                                         still live in HEAD (isukit final strip --apply
+                                         first) -- then: logs off -> reboot ALL hosts ->
+                                         verify units -> verify HTTP (web hosts via
+                                         nginx, app hosts directly; FINAL_CHECK_PATH,
+                                         default /) -> score (restart order across
+                                         hosts is not guaranteed)
 
   TEAM (one set of servers, several people)
     isukit lock [status]                take the servers for your turn: deploy, bench,
@@ -213,6 +253,12 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
   VERSION
     isukit version                      the kit's version and git tag/sha — check
                                          everyone runs the frozen contest tag
+
+  REGULATION
+    isukit rules check                  audit this team against the ISUCON2026 regulations
+    isukit rules baseline [sha]         record/show the untouched baseline commit
+    isukit rules show                   print the clause table and what isukit enforces
+    isukit rules langs                  enumerate reference-implementation units (this team: go)
 
   CONFIG (.isukit/config)
     SSH_OPTS       extra ssh/scp flags applied to every remote call
@@ -237,6 +283,26 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                    boxes; an older .isukit/hosts moves there on the next host role
     ETC_REPO       server dir whose etc/ holds linked configs (default: git root of
                    the probed SRC_DIR, else SRC_DIR)
+
+  CONFIG (isukit.conf, repo root, committed — ISUCON2026 regulation harness)
+    CONTEST_START  contest window start, e.g. 2026-10-31T10:00:00+0900 (+0900, no colon)
+    CONTEST_END    contest window end; past this, isukit refuses commands that touch
+                   the servers (isukit rules show for the full clause list)
+    NOTIFY_PRIVATE_ACK  set to the team Discord server name once you have CONFIRMED the
+                   webhook posts only to a channel no non-member can read. empty during
+                   the contest window = isukit refuses to post (fails closed)
+    BASELINE_SHA   the untouched baseline commit; isukit rules check diffs JS/CSS/media
+                   against this. isukit rules baseline [sha] sets/shows it
+    REPRO_MIN      (default 0.8) a cold post-reboot re-run must reach this fraction of
+                   the best recorded score, or isukit rules check fails
+    INIT_PATH      (default /initialize) maintenance endpoint isukit rules check probes
+    INIT_TIMEOUT   (default 30) seconds before that probe counts as a timeout
+    IMPL_LANG      (default go — this team's decision) the reference implementation this
+                   team is running; isukit rules check fails if the enabled unit drifts
+                   from it, isukit rules langs rewrites it when exactly one is enabled
+    SHIP_MAX_FILES (default 10) isukit ship refuses to commit more files than this
+    SHIP_MAX_LINES (default 300) isukit ship refuses to commit more changed lines than
+                   this; both gates take --only <paths> or ISUKIT_OVERRIDE='<reason>'
 
   App-unit auto-detection is a scored heuristic, not certain — it can pick wrong
   on unusual layouts. 'isukit probe' prints APP_CANDIDATES and warns on low
@@ -290,11 +356,15 @@ main() {
     attribute) cmd_attribute "$@" ;;
     ship)     cmd_ship "$@" ;;
     revert)   cmd_revert "$@" ;;
+    pick)     cmd_pick "$@" ;;
+    measure)  cmd_measure "$@" ;;
+    measures) cmd_measures "$@" ;;
     deploy)   cmd_deploy "$@" ;;
     restart)  cmd_restart ;;
     final)    cmd_final "$@" ;;
     finalize) cmd_finalize ;;
     version|--version) cmd_version ;;
+    rules)    cmd_rules "$@" ;;
     help|--help|-h) usage 0 ;;
     *)        usage ;;
   esac

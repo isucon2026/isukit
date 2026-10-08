@@ -69,12 +69,12 @@ load() {
 # Every host is either "local" or an ssh target. Same primitives either way.
 rsh() { # rsh <host> <command...>
   local h="$1"; shift
-  if [ "$h" = "local" ]; then bash -lc "$*"; else ssh ${SSH_OPTS:-} -o StrictHostKeyChecking=accept-new "$h" "$*"; fi
+  if [ "$h" = "local" ]; then bash -lc "$*"; else rules_allow_host "$h"; ssh ${SSH_OPTS:-} -o StrictHostKeyChecking=accept-new "$h" "$*"; fi
 }
 
 rsh_stdin() { # rsh_stdin <host>   -- script on stdin
   local h="$1"
-  if [ "$h" = "local" ]; then bash -s; else ssh ${SSH_OPTS:-} -o StrictHostKeyChecking=accept-new "$h" 'bash -s'; fi
+  if [ "$h" = "local" ]; then bash -s; else rules_allow_host "$h"; ssh ${SSH_OPTS:-} -o StrictHostKeyChecking=accept-new "$h" 'bash -s'; fi
 }
 
 remote_script() { # remote_script <name> -- print remote/<name>, for piping into rsh_stdin
@@ -86,7 +86,7 @@ remote_script() { # remote_script <name> -- print remote/<name>, for piping into
 
 rpull() { # rpull <host> <remote-path> <local-path>
   local h="$1" r="$2" l="$3"
-  if [ "$h" = "local" ]; then cp "$r" "$l"; else scp ${SSH_OPTS:-} -q "$h:$r" "$l"; fi
+  if [ "$h" = "local" ]; then cp "$r" "$l"; else rules_allow_host "$h"; scp ${SSH_OPTS:-} -q "$h:$r" "$l"; fi
 }
 
 # Middleware config under git: the real nginx / mysql / systemd files move into
@@ -98,6 +98,10 @@ rpull() { # rpull <host> <remote-path> <local-path>
 # The host side lives in remote/etc-adopt.sh, etc-status.sh and etc-sums.sh.
 
 local_repo_root() { git rev-parse --show-toplevel 2>/dev/null || pwd; }
+
+repo_dirty() {  # 0 if the working tree has uncommitted or untracked changes
+  [ -n "$(git status --porcelain 2>/dev/null)" ]
+}
 
 abspath() { # abspath <path> -- resolve to an absolute path without requiring it to exist
   case "$1" in

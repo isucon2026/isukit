@@ -23,6 +23,7 @@ etc_rsync() { # etc_rsync <src> <dst> [rsync opts...] -- one side is $APP:..., t
   if [ "$APP" = "local" ]; then
     sudo -n rsync -rltc "$@" "${src#local:}" "${dst#local:}"
   else
+    rules_allow_host "$APP"
     rsync -rltc "$@" "$rp" -e "ssh ${SSH_OPTS:-}" "$src" "$dst"
   fi
 }

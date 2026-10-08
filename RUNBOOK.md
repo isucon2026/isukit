@@ -36,7 +36,7 @@ Go が無い環境では bash 版も入る：`curl -fsSL https://raw.githubuserc
 | **② 構成** | `isukit host role` `hosts` `probe` `etc` `env` | 台ごとの役割（app / web / db）、全台の調査、設定（`etc/`）と env ファイル（`hosts/<台>/`）を repo で管理 |
 | **③ 計測** | `isukit bench` `show` `score` `attribute` `alp` `slow` `pprof` | 1回のベンチごとに、台ごとの CPU・alp・slow・pprof を保存（`show`）。`attribute` は **main の最新の回**と比べて KEEP / REVERT / 判断不能 |
 | **④ 反映** | `isukit lock` `deploy` `ship` `unlock` | サーバーを自分の番として確保 → main を含むコミット済みのブランチだけを deploy。`ship` はビルドを確かめてから PR |
-| **⑤ 締め** | `isukit final check` `final apply` `finalize` | スコアを削る出力を止める → 全台再起動 → サービスと HTTP の応答を確認 → 最終ベンチ |
+| **⑤ 締め** | `isukit final check` `final apply` `final strip` `finalize` | スコアを削る出力を止める（`strip` は機械的に消せる分を書き換え） → 全台再起動 → サービスと HTTP の応答を確認 → 最終ベンチ |
 
 **なぜリポジトリを読まずにサーバーに聞くのか**：ISUCONのリポジトリ構成は年ごとに何も安定していない。Goのディレクトリ名（`webapp/go` か `webapp/golang`）、ビルド方法（Make → Taskfile → 無し）、docker composeの有無、unit名、envファイルの場所と変数名、ベンチのフラグ名 — 全部違う。systemdに問い合わせるのが全年代で唯一通用する手。
 
@@ -410,13 +410,15 @@ isukit unlock                           # 相手の番
 - **deploy できるのは「main の最新を含む、コミット済みのブランチ」だけ。** 未コミットの変更や、main を取り込んでいないブランチは止まる（取り込まずに出すと、相手がマージした変更をサーバーから消してしまう）。`--force` で強行できるが、その回のスコアは誰にも再現できない。
 - **deploy したものをサーバーが覚えている。** `bench` は手元の HEAD ではなく、サーバーに deploy されたブランチと commit をスコアに記録する。
 - **記録は2人で共有。** ベンチの記録は repo の `isukit-runs` ブランチに push され、2人とも `isukit score` / `show` / `attribute` で同じ記録を見る。
-- **1ブランチ＝1変更。** `isukit ship "<メモ>"` が、手元で `go build` / `go vet` を通してから、`isukit/<slug>` ブランチで commit → push → draft PR を作る。
+- **1ブランチ＝1変更。** `isukit ship "<メモ>"` が、手元で `go build` / `go vet` を通してから、`isukit/<slug>` ブランチで commit → push → draft PR を作る。大きすぎる変更（既定 `SHIP_MAX_FILES=10` ファイル／`SHIP_MAX_LINES=300` 行超）は `ship` 自体が止める — `--only <path>...` で対象を絞るか、`ISUKIT_OVERRIDE='<理由>'` で通す。
 - **採用したらすぐマージ。** マージを溜めると、相手のブランチがすぐ古くなる。
 - **担当を分ける。** 例：1人は DB（スキーマ・インデックス・クエリ・MySQL の設定）、1人はアプリ（ロジック・キャッシュ・nginx）。同じファイル（特に `etc/`）を2人で触らない。
 - **サーバーの上で直接編集しない。** 設定は `etc/`、接続先などは `hosts/<台>/env.sh`、DB のスキーマ変更は問題の初期化用 SQL（repo）に書く。ssh で見る（ログ、`top`、`EXPLAIN`）のは自由。
 - **スコアが落ちたら即 revert。** 競技中にリグレッションをデバッグしない。`attribute` が REVERT なら main を deploy し直して次へ。
+- **スコアは commit に紐づく。** `bench` が記録するたびに、その sha へ `git notes --ref=isukit` でスコアを付け、`ship` 時に push する（`git log` でそのまま見える／rebase・amend後も追従）。素の `git cherry-pick` は note を引き継がないので、スコア付き commit を別ブランチに持っていくときは `isukit pick <sha>` を使う。
 - **30分タイムボックス。** 30分でスコアが動かない変更は捨てる。粘らない。
 - **数字を声に出す。** 記録は共有されるが、ベンチの結果は毎回相手に伝える。
+- **レギュレーション違反は `isukit rules check` が検査する。** クロック終了後（`CONTEST_END`）のサーバー変更や許可外ホストへの接続は自動で止まる。条文ごとの対応は `isukit rules show`。当日のマニュアルと食い違うときだけ `ISUKIT_OVERRIDE='<理由>'`（`.isukit/overrides.log` に記録）。
 
 ---
 
@@ -557,7 +559,7 @@ isukit attribute 5         # 閾値を ±5% に設定
 - [ ] **読みが支配的なら、読み時ではなく書き時に計算しておく**
 - [ ] **外部呼び出しとDBの往復をまとめる**
 - [ ] **捨てるデータを作るのをやめる** — 使わない列、アプリ側で捨てる行、組み立ててから捨てるレスポンス
-- [ ] **上の全部、信じる前にプロファイルを取る。** `net/http/pprof` が入っていれば `isukit pprof 30`。入っていなければ早めに入れる（2行）
+- [ ] **上の全部、信じる前にプロファイルを取る。** `net/http/pprof` が入っていれば `isukit pprof 30`。入っていなければ `isukit pprof on` で早めに配線する（`func main()` を自動検出、sentinel付き）
 
 採用した変更のあとは毎回 `isukit alp` を取り直す。ボトルネックは動くので、フェーズ1のリストはこの時点でもう古い。
 
@@ -568,7 +570,9 @@ isukit attribute 5         # 閾値を ±5% に設定
 ```
 isukit final check       # スコアを削る出力・計測が残っていないか一覧にする（何も変えない）
 isukit final apply       # 設定で止められるものを止める（etc/ の差分として）＋ 全台の後片付け
-# アプリのコードに残ったもの（pprof・ロガー・デバッグ設定）を手で外す → isukit deploy
+isukit final strip       # 機械的に消せる分の差分を見る（sentinel ブロック・pprof import/route）
+isukit final strip --apply   # 書き込む（未コミット）。go build ./... が通らなければ全部戻す
+# 残りのアプリのコードの pprof・ロガー・デバッグ設定は手で外す → isukit deploy
 isukit bench "final: 出力オフ"   # 止めた状態でスコアが上がるか（下がらないか）を確かめる
 isukit ship "final: 出力オフ"
 isukit finalize          # logs off → 全ホスト再起動 → unitの復帰確認 → 採点用ベンチ
@@ -582,9 +586,15 @@ isukit finalize          # logs off → 全ホスト再起動 → unitの復帰�
 | MySQL のスロークエリログ・general log（実行中の値と `.cnf`） | `etc/` の `.cnf` を 0 にして push、実行中の値も off |
 | sysstat の定期収集、isukit の記録プロセス・計測ファイル、isukit の計測ログ | 止めて消す |
 | アプリが直近10分に journal に書いた行数 | 一覧に出すだけ |
-| アプリの Go コードの `net/http/pprof`、echo / chi / gin のリクエストロガー、デバッグ設定、`log.Print` | 一覧に出すだけ（外し方はアプリ次第なので手で直す） |
+| アプリの Go コードの `net/http/pprof`、echo / chi / gin のリクエストロガー、デバッグ設定、`log.Print` | パターンで機械的に消せる分だけ `final strip` が消す（下記）。残りは一覧に出すだけ（外し方はアプリ次第なので手で直す） |
 
 設定の変更は repo の差分なので、止めたことでスコアが落ちたら `git revert` で戻せる。`finalize` も最初に `final check` を回し、残っているものがあれば警告する。
+
+**`// isukit:measure-begin` 〜 `// isukit:measure-end`（Go。他の言語は `#` コメントで同じ）で挟んでおいたコードは、`isukit final strip` がブロックごと sentinel ごと消す。** 計測用に手で足した一時コードはこの印で囲んでおくと、最後に手で探して消さずに済む。`final strip` はこれに加えて `net/http/pprof` の blank import と、その登録行（`pprof.Index` などを渡す `HandleFunc` 呼び出し、`pprof.Handler(...)`）だけをパターンで消す。それ以外（`gin.Logger()` などのロガー、デバッグスイッチ）は `final check` / `final strip` の一覧に残り続け、手で判断する。フラグ無しは diff を見るだけ、`--apply` で書き込み（未コミット）、`go build ./...` があれば通るかまで確認して通らなければ全ファイル元に戻す。
+
+**sentinel で挟めない形（3時の手直しなど）の計測コードは、commit 自体にラベルを貼る。** 2通り：`isukit ship --measure "<メモ>"` は trailer `Isukit-Measure: true` を commit メッセージに足す。後から貼るなら `isukit measure <sha>`（`refs/notes/isukit-measure` に note を足す。push は `ship` が `refs/notes/isukit` と一緒に行う）。`isukit measure --undo <sha>` は note だけ外せる（trailer は commit メッセージの書き換えになるので外せない、と言ってくる）。`isukit measures` が今 HEAD から見えるラベル付き commit を一覧にする（sha・日付・件名・著者。無ければ「no measurement commits live in HEAD」）。revert 済みの commit（`This reverts commit <sha>` をメッセージに持つ HEAD 上の commit がある）や、別ブランチにしか無い commit は数えない。`isukit finalize` はこれが残っていると `rules_override` を踏まえた上で止まる。`isukit final strip` は一覧の先頭にラベル付き commit を出し、`--apply` で新しい順に `git revert --no-edit` していく — コンフリクトが出たら即座に止まり、残りは revert しない（`git revert --abort` で戻す）。
+
+**この sentinel ブロックを実際に作っているのが `isukit pprof on`** — `func main()` を1つだけ自動検出して、上記と同じ sentinel 付きで private mux・ループバックのみのリスナーを配線する（複数/0個の `func main()` やビルド破壊は失敗として止める）。pprof だけを外したいなら `isukit pprof off` が `final strip --apply` を直接呼ぶ（別の消し方は無い）。
 
 `finalize` があるのは、**実行時だけの状態は再起動で消える**のに、最終採点は再起動されたかもしれないマシンで走るから。複数ホストがある場合は全部を再起動し、各台の役割に必要な unit（app ならアプリ、web なら nginx、db なら MySQL）が自分で上がってくるかを確かめる。再起動順は保証されない。
 
@@ -597,7 +607,7 @@ isukit finalize          # logs off → 全ホスト再起動 → unitの復帰�
 - [ ] 必要なものが `/tmp` に無い
 - [ ] ディスクに空きがある：`df -h`
 - [ ] `isukit final check` で hosts の項目が0件（スロークエリログ・アクセスログ・計測ファイルは `final apply` が止めて消す）
-- [ ] アプリのコードの pprof・リクエストロガーを外したか、外さない判断をしたか
+- [ ] アプリのコードの pprof・リクエストロガーを外したか、外さない判断をしたか（機械的に消せる分は `isukit final strip --apply`）
 - [ ] アプリが完全なコールドスタートから手作業なしで起動する
 - [ ] db 以外の台で MySQL が**止まったまま**（`disable` し忘れると再起動で復活し、メモリと CPU を食う）
 - [ ] app の台がすべて db の台に接続している（db の台が最後に上がっても、アプリが再接続できる）
@@ -623,7 +633,7 @@ isukit os       # サーバーのスナップショット（uptime / vmstat / io
 | `alp` / `slow` が `sudo: a password is required` を出す | 先に `sudo` を叩いてからログの有無を見る作り。競技サーバーの `isucon` はパスワード無しsudoなので本番では出ない。手元のMacでは出る（無害） |
 | `logs` が web 層に何もしない | nginx専用。`probe` が nginx 以外を検出すると警告して何もしない。その場合はアプリ層でプロファイルする |
 | `deploy` が効かない | **Goアプリ前提**で、systemdが既にexecしているパスにビルドする。他言語は手でデプロイ |
-| `pprof` が繋がらない | アプリに `import _ "net/http/pprof"` とリスナーが必要。無いとコマンドがスニペットを教えてくれる |
+| `pprof` が繋がらない | アプリに `net/http/pprof` の import とリスナーが必要。無ければ `isukit pprof on` が `func main()` を自動検出して配線する（`func main()` が無い／複数ある場合は失敗するので手で足す） |
 | MySQLの自動化が動かない | ソケット経由のパスワード無し `sudo mysql` が必要。無ければ `probe` が `MYSQL_OK=0` と報告する |
 | 鍵やポートが特殊 | `.isukit/config` の `SSH_OPTS` が全 `ssh`/`scp` に渡る。**`ssh` は `-p <port>`、`scp` は `-P <port>`** で違う点に注意 |
 | インフラを変えた | `isukit probe` を打ち直す。manifestは他の全コマンドが読んでいる |
@@ -649,6 +659,7 @@ isukit os       # サーバーのスナップショット（uptime / vmstat / io
 | ベースラインを記録していない | フェーズ1は省略不可 |
 | デプロイで他の2人の作業が消えた | デプロイ係1人 ＋ デプロイ直前の `git pull`（§4） |
 | `scores.tsv` の sha が全部同じ | ベンチ直前に commit（§4） |
+| クロック終了後にサーバーを変更した | `isukit rules check` / `CONTEST_END` ガードが止める（`ISUKIT_OVERRIDE` で強行可、ログに残る） |
 
 ---
 
@@ -693,11 +704,23 @@ isukit attribute [noise_pct]   # 最後の2回計測の有意差を判定（デ�
 isukit alp                     # エンドポイントを合計レスポンスタイム順
 isukit slow                    # クエリを合計時間順
 isukit pprof 30                # GoのCPUプロファイル → .isukit/cpu.pprof
+isukit pprof on|off             # pprofエンドポイントをfunc main()に自動配線／final strip --applyで除去
 isukit deploy                  # rsync＋ビルド → systemdのExecStartパス → 再起動
 isukit restart                 # アプリの unit を再起動（app の役割を持つ全台）
 isukit ship "<メモ>"            # 新ブランチ作成 → commit → push → draft PR
+isukit ship --measure "<メモ>"  # 同上 ＋ commit に Isukit-Measure trailer を足す
+isukit measure [--undo] <sha>  # 既存 commit に後から計測ラベルを足す／外す（note。trailer は外せない）
+isukit measures                 # HEAD から見えるラベル付き commit の一覧
 isukit revert [<sha>]          # git revert で変更を打ち消す
-isukit finalize                # 終盤の締め処理一式（全ホスト再起動）
+isukit pick <sha>               # git cherry-pick ＋ その commit のスコア note を引き継ぐ
+isukit final check             # スコアを削る出力・計測の残りを一覧（何も変えない）
+isukit final apply             # 設定で止められるものを止める（etc/ の差分として）＋ 全台の後片付け
+isukit final strip [--apply]   # sentinel ブロックと pprof の import/route をパターンで消す
+isukit finalize                # 終盤の締め処理一式（ラベル付き commit が残っていると停止／全ホスト再起動）
+isukit rules check              # クロック終了後の変更・許可外ホストへの接続などを一覧
+isukit rules baseline [sha]     # 触っていないベースライン commit を記録／表示
+isukit rules show               # 条文ごとの許可/禁止と isukit の対応表を表示
+isukit rules langs              # 有効な言語別 reference 実装 unit を確認（複数有効は事故）
 ```
 
 **repo に入るもの（チームで共有する）**：`etc/`（`/etc` からリンクされている設定の実体）、`hosts/<台>/`（各台の env ファイル。`env push` で書き込む）、`isukit.hosts`（台ごとの役割）、`isukit.conf`（チーム共通の設定。`FINAL_CHECK_PATH`・`ALP_MATCHES` など。各自の `.isukit/config` が後に読まれて優先される）

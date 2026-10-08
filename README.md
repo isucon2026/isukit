@@ -33,12 +33,13 @@ Go が無い環境では、従来どおり bash 版も使える：
     isukit bench "baseline"     # BENCH_CMD をベンチホストで実行し、スコアとgit shaを記録
     isukit alp                  # エンドポイントを合計レスポンスタイム順に（URL のまとめ方はログから自動で作る。--patterns で確認）
     isukit slow                 # クエリを合計時間順に
-    isukit pprof 30             # Go CPUプロファイル（pprofが組み込まれていれば）
+    isukit pprof 30             # Go CPUプロファイル（無ければ isukit pprof on で配線してから）
     isukit attribute            # 直近2回の計測を比較；KEEP / REVERT / INCONCLUSIVE
     # 変更は必ず1つだけ
     isukit deploy                # rsync + build → systemdのExecStartパス → 再起動
     isukit bench "added idx X"   # スコアを記録（manualモードでは値の入力を求められる）
     isukit ship "added idx X"    # 全部commit + push + draft PR、1変更1コミット
+    isukit ship --measure "..."  # 同上 + commit に Isukit-Measure trailer（sentinelで囲えない計測コード用）
     isukit score                 # 全履歴
     isukit show [n]              # 保存した回の結果（1 = 最新、2 = その前）
 
@@ -65,7 +66,19 @@ Go が無い環境では、従来どおり bash 版も使える：
 
     isukit final check           # スコアを削る出力（access_log・スローログ・ロガー・pprof・計測の残り）の一覧
     isukit final apply           # 設定で止められるものを etc/ の差分として止め、全台を片付ける
+    isukit final strip [--apply] # sentinel ブロックと pprof の import/route をパターンで消す（残りは手で判断）
+    isukit pprof off             # pprof だけ外すならこちら（final strip --apply と同じ経路）
+    isukit measures               # HEAD から見えるラベル付き計測commitの一覧（残っていると finalize が止まる）
     isukit finalize              # ログOFF → 全ホスト再起動 → unit確認 → スコア計測
+
+## レギュレーション（ISUCON2026）
+
+    isukit rules check            # クロック終了後の変更・許可外ホストへの接続などを一覧
+    isukit rules baseline [sha]   # 触っていないベースラインcommitを記録／表示
+    isukit rules show             # 条文ごとの許可/禁止とisukitの対応表を表示
+    isukit rules langs            # 有効な言語別reference実装unitを確認（複数有効は事故）
+
+`CONTEST_START` / `CONTEST_END`（`isukit.conf`、repo root、commit済み）で判定し、`CONTEST_END` を過ぎてサーバーを変えるコマンドは止まる。ベンチホスト以外へのssh接続も同様に止まる。当日のマニュアルがisukitと食い違う場合は `ISUKIT_OVERRIDE='<理由>'` でそのコマンドだけ通す（`.isukit/overrides.log` に誰が・何を・なぜ、を記録）。`BASELINE_SHA` / `REPRO_MIN` / `INIT_PATH` / `INIT_TIMEOUT` / `IMPL_LANG` / `NOTIFY_PRIVATE_ACK` も同じ `isukit.conf` のキーで、全部は `isukit help` の CONFIG セクションか `isukit rules show` を参照。
 
 ## なぜリポジトリを読まずにサーバーに聞くのか
 
@@ -127,7 +140,7 @@ Discord への通知：`.isukit/config` に `DISCORD_WEBHOOK_BENCH`（bench の�
 
 チームでの共有：役割（`isukit.hosts`）・チーム共通の設定（`isukit.conf`）・各台の env ファイル（`hosts/<台>/`）・設定（`etc/`）は repo に commit して3人で共有する。各自の手元に残るのは ssh 先や鍵（`.isukit/config`）と、probe の結果・計測の記録（`.isukit/`）だけ。
 
-コードの置き場所：`isukit` は入口だけ（設定・`lib/` の読み込み・ヘルプ・コマンドの振り分け）。手元で動く処理は `lib/` に機能ごと（`core`・`hosts`・`probe`・`logs`・`etc`・`runs`・`analyze`・`deploy`・`repo`・`go`・`doctor`）、サーバー側で動く処理は `remote/` に普通のスクリプトとして置き、isukit は ssh で送るだけ。
+コードの置き場所：`isukit` は入口だけ（設定・`lib/` の読み込み・ヘルプ・コマンドの振り分け）。手元で動く処理は `lib/` に機能ごと（`core`・`hosts`・`probe`・`logs`・`etc`・`runs`・`analyze`・`deploy`・`repo`・`go`・`doctor`・`rules`）、サーバー側で動く処理は `remote/` に普通のスクリプトとして置き、isukit は ssh で送るだけ。
 
 サブディレクトリ：[`launch/`](launch/README.md) はAWSでの競技前ステージングとインスタンス起動スクリプト。[`skills/isucon/`](skills/isucon/SKILL.md) は計測 → 診断 → 修正 → ship → 再計測ループ用のClaude skill。[`test/`](test/) は過去の全ISUCONの実際のsystemd unitと設定を使って発見ロジックをオフライン検証するフィクスチャ集。
 
@@ -136,10 +149,12 @@ Discord への通知：`.isukit/config` に `DISCORD_WEBHOOK_BENCH`（bench の�
 - **`BENCH_CMD` は自動生成される、確認すること。** `isukit benchprobe` は `/home/isucon` 配下で最大サイズのELFバイナリのうちベンチマーカーらしい名前のものを選び、その `--help` を読んで、見つかったtarget/nameserver系フラグから `sudo -iu <owner> sh -c '...'` を組み立てる — ここが一番人間の手直しが必要になりやすい行。読み取り元のフラグ一覧全部は `.isukit/bench-help.txt` に残る。修正は `isukit benchcmd '<command>'`（引数無しだと現在値を表示）。`isukit benchprobe` は一度手で設定した `BENCH_CMD` を上書きしない。
 - `logs on` は `/etc/nginx` を `/etc/nginx.isukit.bak` にバックアップしたうえで、`conf.d/00-isukit.conf` を追加し、既存の `access_log` 行を `#isukit# access_log` としてコメントアウトする（シンボリックリンクの場合はリンク先の実ファイルを編集する）。`logs off` はその目印の付いた変更だけを元に戻す（バックアップは手動復旧用に残すだけ）ので、repo にリンクした設定はリンクのまま、その後のチューニングも消えない。logs が on の間はサーバー側の repo のファイルにこの目印が入るが、`etc pull` で取り除かれる。webサーバーがnginxでない場合、`probe` が警告してwebサイドの `logs` は何もしない。
 - MySQLの自動化にはソケット越しのパスワード無し `sudo mysql` が必要。使えない場合 `probe` は `MYSQL_OK=0` と報告する。
-- `pprof` には `import _ "net/http/pprof"` とリスナーがアプリ側に必要。エンドポイントが無ければ、コマンド自身が追加すべきスニペットを教えてくれる。
+- `pprof` には `net/http/pprof` の import とリスナーがアプリ側に必要。`isukit pprof on` は `func main()` を1つだけ見つけて、sentinel（`isukit:measure-begin`〜`-end`）付きでprivate mux・ループバックのみのリスナー（既定ポート6060、`.isukit/config` の `PPROF_PORT` で変更）を自動で配線する（`go build ./...` が通らなければ元に戻す）。`func main()` が無い／複数あると失敗するので、その場合は手で足す。外すのは `isukit pprof off`（`isukit final strip --apply` と同じ経路）。
 - `deploy` はGoアプリを前提としており、systemdが既にexecしている正確なパスへビルドする。他言語実装は手でデプロイする。
 - `SSH_OPTS`（config）は全ての `ssh`/`scp` 呼び出しに付与される — カスタム鍵、カスタムポート、カスタム設定ファイルなど。`ssh` は `-p <port>`、`scp` は `-P <port>` と大文字小文字が違う点に注意 — 手でポートフラグを組み立てる場合は両方の形が要る。
 - `EXTRA_UNITS`（config）はスペース区切りの追加unitリストで、`restart`/`finalize` は検出した `APP_UNIT` と一緒にこれらも再起動する — matcher/mock/simulator系のサービスを別unitとして持つ年向け。
 - 複数インスタンスは `isukit host role <target> <役割>` で `.isukit/hosts` に役割（`app` / `web` / `db`）を書く。`deploy`・`restart`・`pprof` は app の台、nginx ログと `alp` は web の台、スロークエリと `slow` は db の台、`etc`・`os`・`finalize` は全台で動く。役割は isukit の送り先を決めるだけで、MySQL を止める・`bind-address`・`DB_HOST` などの構成変更は手で行う。`.isukit/hosts` が無いときは `EXTRA_HOSTS`（`isukit host add <target>` で設定）がアプリの台として扱われる。インスタンス間の再起動順は保証されない。
 - `BENCH_MODE`（config）は `auto`（`BENCH_CMD` をベンチホストへsshして実行）か `manual`（コンテストポータルで実行をキューし、`isukit bench --score <N>` でスコアを記録）のどちらか。`isukit benchprobe` はベンチマーカーのバイナリが見つからないと自動で `manual` モードを検出する。本番環境（ISUCON11以降）ではベンチマークはWebポータルから起動されssh経由ではないので、`manual` モードは失敗ではなく正しい本番状態。モードの切り替えは `isukit benchmode <mode>`。manualモードでは、合格した実行の記録に `isukit bench --score <N> "<note>"`、エラーで終わった実行の記録に `isukit bench --fail "<note>"` を使う。
 - `isukit revert [<sha>]` は `isukit/*` ブランチ上の1コミットを取り消す — 競技中に`scores.tsv`の記録を失わずに悪い変更を戻すときに使う。
+- `bench` が記録するたびに、そのスコアは `git notes --ref=isukit` で対応するcommitに付き（`ship`時にpushされ、`git log`でそのまま見える）、rebase/amendも追従する。素の `git cherry-pick` はnoteを引き継がないので、スコア付きcommitを別ブランチへ持っていくときは `isukit pick <sha>` を使う — cherry-pick してnoteをコピーする。
+- `isukit ship` は大きすぎる変更（既定 `SHIP_MAX_FILES=10` ファイル／`SHIP_MAX_LINES=300` 行超、`isukit.conf` で変更可）を自動で止める。対象を絞るなら `ship --only <path>...`、どうしても1コミットで通すなら `ISUKIT_OVERRIDE='<理由>'`。
