@@ -21,7 +21,8 @@ import (
 var Passthrough = []string{
 	"go", "init", "host", "probe", "benchprobe", "benchcmd", "benchmode", "unit",
 	"setup", "logs", "etc", "env", "bench", "score", "show", "alp", "slow", "pprof", "os",
-	"doctor", "attribute", "ship", "revert", "deploy", "restart", "final", "finalize",
+	"doctor", "rules", "attribute", "ship", "revert", "pick", "measure", "measures",
+	"deploy", "restart", "final", "finalize",
 	"lock", "unlock", "notify",
 }
 
