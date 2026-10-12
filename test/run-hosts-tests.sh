@@ -174,6 +174,28 @@ t_deploy_builds_each_app_host_restarts_once() {
   check -z "$(grep 'systemctl restart' "$CALLS")"      # never restart a half-deployed fleet
 }
 
+# isucon14 ships go/go.mod and payment_mock/go.mod; the first go.mod found was
+# payment_mock, and deploy rsynced it over the server's webapp/go.
+t_deploy_local_src_maps_go_dir() {
+  # own directory: other cases leave go.mod files around $WORK
+  mkdir -p "$WORK/deploy-src" && cd "$WORK/deploy-src" || return
+  mkdir -p go payment_mock
+  : > go/go.mod; : > payment_mock/go.mod
+  GO_DIR=/home/isucon/webapp/go SRC_DIR=/home/isucon/webapp
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  # no SRC_DIR mapping: still the module whose path ends like GO_DIR
+  SRC_DIR=/elsewhere
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  # several modules and none matches: refuse rather than guess
+  GO_DIR=/home/isucon/webapp/rust
+  ( deploy_local_src ) >/dev/null 2>&1
+  check "$?" != 0
+  # a single module is taken as is
+  rm -rf payment_mock
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  cd "$WORK" && rm -rf "$WORK/deploy-src"
+}
+
 t_etc_push_fleet_followups_once() {
   setup_state isu1 "" "$ROLES"
   load
@@ -678,6 +700,7 @@ case_ notify-bench-message           t_notify_bench_message
 case_ notify-ops-and-silence          t_notify_ops_and_silence
 case_ bench-target-separate-box       t_bench_target_separate_box
 case_ bench-target-same-box           t_bench_target_same_box
+case_ deploy-local-src-maps-go-dir    t_deploy_local_src_maps_go_dir
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]
