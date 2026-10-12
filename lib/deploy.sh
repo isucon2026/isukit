@@ -60,6 +60,36 @@ deploy_local_src() {
   printf '%s/%s\n' "$root" "${hit#./}"
 }
 
+# deploy_tree <local go dir> -- the rest of the app beside the Go module: sql/
+# (POST /api/initialize runs the server's sql/init.sh, so a new index in
+# 1-schema.sql did nothing until copied by hand), public/, other scripts. Only
+# git-tracked files, and no --delete: the >10MB build outputs go --new left on
+# the server stay. etc/ is etc push's job (it reloads what changed); hosts/ is
+# env push's. Skipped when this checkout doesn't mirror SRC_DIR.
+deploy_tree() {
+  local root rel
+  root=$(local_repo_root)
+  [ -n "${SRC_DIR:-}" ] && [ -n "${GO_DIR:-}" ] || return 0
+  if [ "$GO_DIR" = "$SRC_DIR" ]; then rel=.
+  else
+    rel="${GO_DIR#"$SRC_DIR"/}"
+    [ "$rel" != "$GO_DIR" ] || return 0
+  fi
+  if [ "$1" != "$root/$rel" ]; then
+    warn "this checkout doesn't mirror $SRC_DIR — shipping the Go module only (sql/ and the rest are not sent)"
+    return 0
+  fi
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  say "rsync tracked files -> $APP:$SRC_DIR/ (sql/, public/, ...; etc/ goes through etc push)"
+  local files
+  files=$(cd "$root" && git ls-files -z -- . ':!:.github' ':!:etc' ':!:hosts' ':!:isukit.hosts' ':!:isukit.conf' | tr '\0' '\n')
+  if [ "$APP" = "local" ]; then
+    printf '%s\n' "$files" | rsync -a --files-from=- "$root/" "$SRC_DIR/"
+  else
+    printf '%s\n' "$files" | rsync -a --files-from=- -e "ssh ${SSH_OPTS:-}" "$root/" "$APP:$SRC_DIR/"
+  fi || die "rsync of the repo to $APP:$SRC_DIR failed"
+}
+
 deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it there
   local force="$1"
   local local_src
@@ -102,11 +132,12 @@ deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it 
   fi
   local exec_base
   exec_base=$(basename "$out")
+  [ "$APP" = "local" ] || rules_allow_host "$APP"
+  deploy_tree "$local_src"
   say "rsync $local_src/ -> $APP:$GO_DIR/"
   if [ "$APP" = "local" ]; then
     rsync -a --exclude .git --exclude "$exec_base" "$local_src/" "$GO_DIR/"
   else
-    rules_allow_host "$APP"
     rsync -a --exclude .git --exclude "$exec_base" -e "ssh ${SSH_OPTS:-}" "$local_src/" "$APP:$GO_DIR/"
   fi
   say "building -> $out"

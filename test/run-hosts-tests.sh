@@ -196,6 +196,34 @@ t_deploy_local_src_maps_go_dir() {
   cd "$WORK" && rm -rf "$WORK/deploy-src"
 }
 
+# a new index in sql/1-schema.sql never reached the server: deploy shipped go/
+# (and etc/ via etc push) only, while POST /api/initialize runs the server's sql/
+t_deploy_tree_ships_sql() {
+  local repo="$WORK/deploy-tree" srv="$WORK/deploy-tree-srv"
+  rm -rf "$repo" "$srv"; mkdir -p "$repo" "$srv/sql" && cd "$repo" || return
+  git init -q . && mkdir -p go sql etc/nginx .github hosts/isu1
+  : > go/go.mod; echo idx > sql/1-schema.sql; : > etc/nginx/nginx.conf
+  : > .github/ci.yml; : > hosts/isu1/env.sh; : > isukit.hosts
+  git add -A && git -c user.name=t -c user.email=t@t commit -q -m t
+  echo junk > untracked.txt
+  echo kept > "$srv/sql/server-only.bin"   # build output left on the server
+  APP=local SRC_DIR="$srv" GO_DIR="$srv/go"
+  deploy_tree "$(local_repo_root)/go" 2>/dev/null
+  check "$(cat "$srv/sql/1-schema.sql" 2>/dev/null)" = idx
+  check -f "$srv/sql/server-only.bin"      # no --delete
+  check ! -e "$srv/untracked.txt"          # tracked files only
+  check ! -e "$srv/etc"                    # etc push's job
+  check ! -e "$srv/.github"
+  check ! -e "$srv/hosts"
+  check ! -e "$srv/isukit.hosts"
+  # a checkout that doesn't mirror SRC_DIR: nothing sent
+  rm -rf "$srv"; mkdir -p "$srv"
+  GO_DIR="$srv/elsewhere/go"
+  deploy_tree "$(local_repo_root)/go" 2>/dev/null
+  check ! -e "$srv/sql"
+  cd "$WORK" && rm -rf "$repo" "$srv"
+}
+
 t_etc_push_fleet_followups_once() {
   setup_state isu1 "" "$ROLES"
   load
@@ -701,6 +729,7 @@ case_ notify-ops-and-silence          t_notify_ops_and_silence
 case_ bench-target-separate-box       t_bench_target_separate_box
 case_ bench-target-same-box           t_bench_target_same_box
 case_ deploy-local-src-maps-go-dir    t_deploy_local_src_maps_go_dir
+case_ deploy-tree-ships-sql           t_deploy_tree_ships_sql
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]
