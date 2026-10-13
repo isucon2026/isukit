@@ -112,7 +112,9 @@ cmd_restart() {
 finalize_http() { # print one "OK|url|code" / "FAIL|url|why" per web and app host
   local h
   for h in $(hosts_with web); do
-    { printf 'MODE=web\nPATH_=%q\nWAIT=%q\n' "${FINAL_CHECK_PATH:-/}" "${FINAL_HTTP_WAIT:-60}"; remote_script http-check.sh; } \
+    # to the site's own server block (listen port, server_name), read off nginx -T
+    # there unless FINAL_WEB_URL names it — never just http://localhost
+    { printf 'MODE=web\nPATH_=%q\nWEB_URL=%q\nWAIT=%q\n' "${FINAL_CHECK_PATH:-/}" "${FINAL_WEB_URL:-}" "${FINAL_HTTP_WAIT:-60}"; remote_script http-check.sh; } \
       | rsh_stdin "$h" 2>/dev/null | sed "s|^|$h |" || echo "$h FAIL|nginx|could not run the check"
   done
   for h in $(hosts_with app); do
@@ -203,7 +205,7 @@ cmd_finalize() {
   bad=$(printf '%s\n' "$http" | grep -c ' FAIL|' || true)
   if [ "$bad" != 0 ]; then
     warn "$bad host(s) do not answer after the reboot — fix that before any scoring run (journalctl -u <unit>, is the DB reachable?)"
-    warn "FINAL_CHECK_PATH in $CONF picks a path that touches the DB; FINAL_APP_PORT if the app port is not discoverable"
+    warn "FINAL_CHECK_PATH in $CONF picks a path that touches the DB; FINAL_WEB_URL (https://<server_name>) the site nginx serves it on; FINAL_APP_PORT if the app port is not discoverable"
   fi
   printf '🏁 %s ran finalize — reboot: every host back; units: %s; HTTP: %s%s\n' "$(who_am_i)" \
     "$([ "$units_bad" = 0 ] && echo "all up" || echo "$units_bad host(s) missing some")" \

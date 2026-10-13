@@ -684,9 +684,13 @@ up what its roles need (the app on app hosts, nginx on web hosts, MySQL on db
 hosts); restart order is not guaranteed.
 
 Active is not answering (500 with no DB, 502 with no upstream), so after the
-reboot it also asks over HTTP: every web host through nginx
-(`http://localhost/`), every app host directly (the port its unit's process
-listens on). 2xx-4xx is an answer; no answer or 5xx fails, with up to 60s of
+reboot it also asks over HTTP: every web host through nginx — to the server
+block that proxies to the app, at its listen port and scheme with its
+`server_name` as the Host (read off `nginx -T`; `FINAL_WEB_URL=https://<name>`
+names it instead), since `http://localhost/` lands on the default server —
+and every app host directly (the port its unit's process listens on). 2xx-4xx
+is an answer, except a 4xx nginx wrote itself (its own error page: the request
+never reached the app); no answer or 5xx fails, with up to 60s of
 retries while services start. `FINAL_CHECK_PATH` in `.isukit/config` (default
 `/`) picks the path — **make it one that touches the DB** so the DB connection
 is checked too; `FINAL_APP_PORT` if the port is not discoverable. Fix any
