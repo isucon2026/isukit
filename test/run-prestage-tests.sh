@@ -56,7 +56,7 @@ FAKE
 printf '#!/bin/sh\necho 198.51.100.9\n' > "$WORK/bin/curl"
 chmod +x "$WORK/bin/aws" "$WORK/bin/curl"
 
-TOTAL=0; PASSED=0; FAILED=""; ERR=""; OUT=""
+TOTAL=0; PASSED=0; FAILED=""; ERR=""
 check() { [ "$@" ] || ERR="$ERR
     failed: [ $* ]"; }
 case_() {
