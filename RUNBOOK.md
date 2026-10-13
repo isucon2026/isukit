@@ -573,8 +573,8 @@ isukit final apply       # 設定で止められるものを止める（etc/ の
 isukit final strip       # 機械的に消せる分の差分を見る（sentinel ブロック・pprof import/route）
 isukit final strip --apply   # 書き込む（未コミット）。go build ./... が通らなければ全部戻す
 # 残りのアプリのコードの pprof・ロガー・デバッグ設定は手で外す → isukit deploy
+isukit ship "final: 出力オフ" && isukit deploy   # それまで final apply は deploy の記録を <sha>-dirty にしておく
 isukit bench "final: 出力オフ"   # 止めた状態でスコアが上がるか（下がらないか）を確かめる
-isukit ship "final: 出力オフ"
 isukit finalize          # logs off → 全ホスト再起動 → unitの復帰確認 → 採点用ベンチ
 ```
 

@@ -94,6 +94,69 @@ t_override_bypasses_absent_bench() {
   check -n "$(grep -F 'finalize-unbenched' .isukit/overrides.log | grep -F 'contest day')"
 }
 
+# --- #40: final apply changes what the hosts run without a deploy. The deploy
+# record (on the lock host, /var/tmp/isukit.deployed) stands in a file here.
+deployed_on_file() { # rsh that reads / writes $WORK/deployed for the deploy record, records the rest
+  rsh() {
+    printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"
+    local c="${*:2}"
+    case "$c" in
+      *"cat $DEPLOYED_FILE"*) cat "$WORK/deployed" 2>/dev/null ;;
+      *"> $DEPLOYED_FILE"*) c="${c#sudo -n }"; bash -c "${c//$DEPLOYED_FILE/$WORK/deployed}" ;;
+    esac
+    return 0
+  }
+}
+
+final_apply_stubbed() { # cmd_final_apply with every host-side step a no-op; only the etc/ edit + record are real
+  lock_guard() { :; }; cmd_logs() { :; }; cmd_etc_push() { :; }; cmd_final_check() { :; }
+  final_host_findings() { :; }; final_code_findings() { :; }; notify() { cat >/dev/null; }
+  cmd_final_apply
+}
+
+t_final_apply_marks_the_deploy_dirty() {
+  setup_repo
+  deployed_on_file
+  mkdir -p etc/nginx
+  printf 'http {\n    access_log /var/log/nginx/access.log;\n}\n' > etc/nginx/nginx.conf
+  git add etc && git commit -q -m etc
+  local sha
+  sha=$(git rev-parse --short HEAD)
+  printf '%s|main|alice|1\n' "$sha" > "$WORK/deployed"
+  printf 'when\t%s\t1234\tnote\trundir\tmain\twho\n' "$sha" > .isukit/scores.tsv   # benched as deployed
+  ( final_apply_stubbed ) >/dev/null 2>&1
+  check -n "$(grep -F 'access_log off' etc/nginx/nginx.conf)"
+  check "$(cut -d'|' -f1,2 "$WORK/deployed")" = "$sha-dirty|main"
+  # what bench would now record, and finalize refuses it: the old sha's bench is not this config's
+  check "$(deployed)" = "$sha-dirty main"
+  local out rc
+  out=$( ( finalize_bench_guard ) 2>&1 ); rc=$?
+  check "$rc" != 0
+  check -n "$(printf '%s' "$out" | grep -F 'uncommitted tree')"
+  # applying again does not stack the mark
+  ( deploy_record_dirty ) >/dev/null
+  check "$(cut -d'|' -f1 "$WORK/deployed")" = "$sha-dirty"
+  # ship + deploy writes a clean record again
+  git add etc && git commit -q -m "final: logging off"
+  deploy_record
+  check "$(cut -d'|' -f1 "$WORK/deployed")" = "$(git rev-parse --short HEAD)"
+}
+
+t_final_apply_leaves_a_clean_record_alone() {
+  setup_repo
+  deployed_on_file
+  mkdir -p etc/nginx
+  printf 'http {\n    access_log off;\n}\n' > etc/nginx/nginx.conf     # nothing left to turn off
+  git add etc && git commit -q -m etc
+  local sha
+  sha=$(git rev-parse --short HEAD)
+  printf '%s|main|alice|1\n' "$sha" > "$WORK/deployed"
+  ( final_apply_stubbed ) >/dev/null 2>&1
+  check "$(cut -d'|' -f1 "$WORK/deployed")" = "$sha"
+}
+
+case_ final-apply-marks-deploy-dirty      t_final_apply_marks_the_deploy_dirty
+case_ final-apply-clean-record-kept       t_final_apply_leaves_a_clean_record_alone
 case_ finalize-dies-on-absent-bench       t_dies_on_absent_bench
 case_ finalize-dies-on-dirty-tree         t_dies_on_dirty_tree
 case_ finalize-proceeds-when-benched      t_proceeds_when_benched

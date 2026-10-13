@@ -660,8 +660,8 @@ how good the idea is. This phase is about not losing what you already earned.
 isukit final check       # list everything that still logs or measures (changes nothing)
 isukit final apply       # turn off what config can (as an etc/ diff) + clean the hosts
 # remove what the app's code still does (pprof, request logger, debug) by hand -> isukit deploy
+isukit ship "final: output off" && isukit deploy   # final apply marks the deploy record <sha>-dirty until this
 isukit bench "final: output off"   # confirm the score holds or improves with it all off
-isukit ship "final: output off"
 isukit finalize          # logs off -> reboot ALL hosts -> verify units -> scoring run
 ```
 
@@ -675,7 +675,11 @@ echo / chi / gin request loggers, debug switches and `log.Print`. `final apply`
 turns off what config can — `access_log off;` and the logs set to 0 in the
 repo's `etc/`, then `etc push`, so it is a diff you can `git revert` — and
 cleans the hosts. The app's code is only listed: fix it by hand. `finalize`
-also runs `final check` first and warns about anything left.
+also runs `final check` first and warns about anything left. Since the hosts
+now run an uncommitted `etc/`, `final apply` marks the deploy record
+`<sha>-dirty` (as a deploy of a dirty tree would be): a bench before the next
+`ship` + `deploy` is recorded as dirty, `attribute` calls it inconclusive and
+`finalize` refuses it.
 
 `finalize` exists because runtime-only state evaporates on reboot, and the
 final scoring run happens on a machine that may have been restarted. If you have

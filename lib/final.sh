@@ -217,6 +217,11 @@ cmd_final_apply() {
   if [ -d "$root/etc" ]; then
     final_edit_etc "$root/etc"
     cmd_etc_push || warn "etc push reported problems (above)"
+    # the hosts now run etc/ as it is here, uncommitted: no longer what the
+    # deploy record's sha holds, so runs from here on must not be credited to it
+    if [ -n "$(git -C "$root" status --porcelain -- etc 2>/dev/null)" ]; then
+      say "deploy record: now $(deploy_record_dirty) (uncommitted etc/ is live) — bench records that until: isukit ship, then isukit deploy"
+    fi
   else
     warn "no etc/ here — nginx / mysql config is not under git (isukit etc adopt). turn access_log off and the slow / general log off by hand"
   fi
@@ -234,6 +239,6 @@ cmd_final_apply() {
   cmd_final_check || true
   printf '🧹 %s ran final apply — left: %s on the hosts, %s in the app code%s\n' "$(who_am_i)" "$left_hosts" "$left_code" \
     "$([ "$left_code" != 0 ] && printf ' (pprof / loggers to remove by hand)')" | notify ops
-  say "next: isukit bench \"final: logging off\" (compare with isukit score), then isukit ship \"final: logging off\""
+  say "next: isukit ship \"final: logging off\" && isukit deploy && isukit bench \"final: logging off\" (compare with isukit score) — a bench before that deploy records as <sha>-dirty, and finalize wants a bench of the deployed sha"
   git -C "$root" status --short -- etc 2>/dev/null || true
 }
