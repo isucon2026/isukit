@@ -27,7 +27,12 @@ cat > "$BIN/nginx" <<'EOF'
 #!/bin/bash
 exit "${NGINX_RC:-0}"
 EOF
-for c in systemctl apparmor_parser; do printf '#!/bin/bash\nexit 0\n' > "$BIN/$c"; done
+printf '#!/bin/bash\nexit 0\n' > "$BIN/apparmor_parser"
+# NGINX_INACTIVE=1: nginx is stopped on this host (is-active fails)
+cat > "$BIN/systemctl" <<'EOF2'
+#!/bin/bash
+case "$1 ${2:-} ${3:-}" in "is-active --quiet nginx") [ -z "${NGINX_INACTIVE:-}" ] ;; *) exit 0 ;; esac
+EOF2
 # mysql answers SELECT @@GLOBAL.x with $MYSQL_LIVE (default 1000 = the fixture's
 # max_connections), so the "file values are live" check runs for real.
 cat > "$BIN/mysql" <<'EOF'
@@ -276,6 +281,20 @@ t_status_expects_by_role() {
   check -n "$(printf '%s\n' "$OUT" | grep "^NOT LINKED .*nginx.conf")"
 }
 
+t_nginx_inactive_not_a_failure() {
+  new_tree
+  NGINX_INACTIVE=1 run_adopt; local rc=$?
+  check "$rc" = 0
+  check -n "$(linked_to "$E/nginx/nginx.conf" "$R/etc/nginx/nginx.conf" && echo y)"
+  check -n "$(printf '%s\n' "$OUT" | grep 'nginx inactive here — not reloaded')"
+  # a broken config is still a failure (and still rolled back) when nginx is stopped
+  new_tree
+  NGINX_INACTIVE=1 NGINX_RC=1 run_adopt; rc=$?
+  check "$rc" = 1
+  check -n "$(printf '%s\n' "$OUT" | grep 'FAILED (nginx -t)')"
+  check ! -L "$E/nginx/nginx.conf"
+}
+
 case_ adopt-links-discovered-configs t_adopt
 case_ adopt-is-idempotent            t_idempotent
 case_ status-reports-link-state      t_status
@@ -289,6 +308,7 @@ case_ mysql-value-not-live-rollback  t_mysql_value_not_live
 case_ mysql-unreadable-rollback      t_mysql_unreadable
 case_ db-host-adopts-only-mysql      t_db_host_adopts_only_mysql
 case_ status-expects-by-role         t_status_expects_by_role
+case_ nginx-inactive-not-a-failure   t_nginx_inactive_not_a_failure
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]

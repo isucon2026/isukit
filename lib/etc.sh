@@ -30,7 +30,8 @@ etc_rsync() { # etc_rsync <src> <dst> [rsync opts...] -- one side is $APP:..., t
 
 # A host links only the files of the tiers its roles run (lib/hosts.sh): nginx
 # on web hosts, mysql on db hosts, the app's units on app hosts. A unit linked
-# on a db host vanishes as soon as `systemctl disable` removes the symlink.
+# on a db host vanishes as soon as `systemctl disable` removes the symlink, and
+# a stopped nginx is no reason to report the config as broken.
 etc_role() { # etc_role <web|db|app> -- true if $APP holds that role (a host without roles: all)
   local roles
   roles=$(host_roles "$APP")
@@ -251,14 +252,23 @@ etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
   rsh "$APP" "sudo -n chown -R \"\$(stat -c %U '$repo')\" '$repo/etc'" 2>/dev/null || true
   [ -n "$mine" ] || say "etc push: none of these are used by $APP's roles ($(host_roles "$APP")) — copied, nothing reloaded"
 
-  local restart_db=0 reload_nginx=0 units=""
+  local restart_db=0 reload_nginx=0 units="" x
   printf '%s\n' $mine | grep -q '^nginx/' && reload_nginx=1
   printf '%s\n' $mine | grep -q '^mysql/' && restart_db=1
   units=$(printf '%s\n' $mine | sed -n 's|^systemd/system/||p' | tr '\n' ' ')
 
   if [ "$reload_nginx" = 1 ]; then
-    rsh "$APP" "sudo -n nginx -t && sudo -n systemctl reload nginx" \
-      || { warn "nginx -t FAILED — the broken file is live on disk but nginx still runs the old config; fix it and push again"; rc=1; }
+    # a broken file and a failed reload are different problems; a stopped
+    # nginx (this host no longer serves) is neither
+    x=0
+    rsh "$APP" "sudo -n nginx -t || exit 11; systemctl is-active --quiet nginx || exit 10; sudo -n systemctl reload nginx || exit 12" || x=$?
+    case "$x" in
+      0)  say "nginx: config OK, reloaded" ;;
+      10) say "nginx inactive here — not reloaded" ;;
+      11) warn "nginx -t FAILED — the broken file is live on disk but nginx still runs the old config; fix it and push again"; rc=1 ;;
+      12) warn "nginx -t passed but the reload FAILED — check: ssh $APP sudo journalctl -u nginx -n 50"; rc=1 ;;
+      *)  warn "could not check / reload nginx on $APP (exit $x)"; rc=1 ;;
+    esac
   fi
   if [ -n "$units" ]; then
     rsh "$APP" "sudo -n systemctl daemon-reload" && say "systemd: daemon-reload ($units)"
@@ -273,9 +283,14 @@ etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
     done
   fi
   if [ "$restart_db" = 1 ]; then
-    say "mysql config changed — restarting the DB (brief downtime)"
-    rsh "$APP" "for s in mysql mariadb; do systemctl is-active --quiet \$s && { sudo -n systemctl restart \$s; break; }; done; sudo -n mysql -e 'SELECT 1' >/dev/null" \
-      || { warn "mysql did not come back — check: ssh $APP sudo journalctl -u mysql -n 50"; rc=1; }
+    # only a running DB: restarting a disabled one starts a stray local mysqld
+    x=0
+    rsh "$APP" "for s in mysql mariadb; do systemctl is-active --quiet \$s || continue; sudo -n systemctl restart \$s && sudo -n mysql -e 'SELECT 1' >/dev/null; exit \$?; done; exit 10" || x=$?
+    case "$x" in
+      0)  say "mysql config changed — restarted the DB" ;;
+      10) say "mysql inactive here — not restarted" ;;
+      *)  warn "mysql did not come back — check: ssh $APP sudo journalctl -u mysql -n 50"; rc=1 ;;
+    esac
   fi
   # a pushed nginx file replaced the copy 'logs on' had edited, and a DB restart
   # drops SET GLOBAL — either way logging has to be put back (once, afterwards).

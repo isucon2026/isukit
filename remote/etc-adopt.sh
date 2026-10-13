@@ -187,11 +187,21 @@ $SUDO chown -R "$OWNER" "$DEST" 2>/dev/null || true
 
 # verify each tier actually starts from the linked files; undo that tier if not.
 if has nginx; then
-  if $SUDO nginx -t >/dev/null 2>&1 && $SUDO systemctl reload nginx; then
+  # nginx -t proves the files; a reload only where nginx runs (a stopped one on
+  # a host that no longer serves is not a broken config)
+  why=""
+  if ! $SUDO nginx -t >/dev/null 2>&1; then
+    why="nginx -t"
+  elif ! systemctl is-active --quiet nginx 2>/dev/null; then
+    echo "nginx: config OK through the links; nginx inactive here — not reloaded"
+  elif $SUDO systemctl reload nginx; then
     echo "nginx: config OK through the links, reloaded"
   else
-    echo "nginx: FAILED with the linked config — rolling back nginx" >&2
-    $SUDO nginx -t 2>&1 | tail -5 >&2
+    why="systemctl reload nginx"
+  fi
+  if [ -n "$why" ]; then
+    echo "nginx: FAILED ($why) with the linked config — rolling back nginx" >&2
+    [ "$why" = "nginx -t" ] && $SUDO nginx -t 2>&1 | tail -5 >&2
     rollback nginx
     $SUDO systemctl reload nginx 2>/dev/null || true
     RC=1

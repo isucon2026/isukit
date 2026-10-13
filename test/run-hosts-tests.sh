@@ -309,6 +309,33 @@ t_etc_push_reloads_by_role() {
   check "$(hosts_called 'systemctl restart isu-go.service')" = "isu1 isu2"
 }
 
+t_etc_push_nginx_outcomes() {
+  setup_state isu1 ""
+  load
+  local_repo_root() { printf '%s\n' "$WORK/app"; }
+  mkdir -p "$WORK/app/etc"
+  etc_sums() { [ "$1" = local ] && printf '1 1 ./nginx/nginx.conf\n'; return 0; }
+  etc_rsync() { :; }
+  etc_status_one() { :; }
+  local x
+  for x in 10 11 12; do
+    : > "$CALLS"
+    NGINX_X=$x
+    rsh() { # nginx answers with $NGINX_X; logging reads as off
+      printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"
+      case "$*" in *"nginx -t"*) return "$NGINX_X" ;; *00-isukit.conf*) return 1 ;; esac
+      return 0
+    }
+    cmd_etc_push 2>/dev/null; local rc=$?
+    case "$x" in
+      10) check "$rc" = 0; check -z "$(grep '^warn:' "$CALLS")" ;;   # stopped nginx: not a failure
+      11) check "$rc" = 1; check -n "$(grep 'warn: nginx -t FAILED' "$CALLS")" ;;
+      12) check "$rc" = 1; check -n "$(grep 'warn: nginx -t passed but the reload FAILED' "$CALLS")"
+          check -z "$(grep 'nginx -t FAILED' "$CALLS")" ;;
+    esac
+  done
+}
+
 t_host_app_moves_hosts_line() {
   setup_state isu1 "" "$ROLES"
   cmd_host app isu9 >/dev/null 2>&1
@@ -695,6 +722,7 @@ case_ logs-space-guard-on-db-hosts    t_logs_space_guard_on_db_hosts
 case_ etc-pull-leaves-out-disagreeing t_etc_pull_leaves_out_disagreeing_files
 case_ etc-adopt-by-role              t_etc_adopt_by_role
 case_ etc-push-reloads-by-role       t_etc_push_reloads_by_role
+case_ etc-push-nginx-outcomes        t_etc_push_nginx_outcomes
 case_ host-app-moves-hosts-line       t_host_app_moves_hosts_line
 case_ catchall-follows-app-key        t_catchall_follows_app_key
 case_ bench-records-score-on-failure  t_bench_records_score_when_collection_fails
