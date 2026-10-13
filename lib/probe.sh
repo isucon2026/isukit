@@ -26,9 +26,9 @@ cmd_probe() {
     warn "edit the compose file / container config instead, then: isukit restart"
   fi
   [ "${PROC_MANAGER:-systemd}" = "supervisor" ] && warn "app is under supervisord, not systemd — '$APP_UNIT' restarts ALL of it; per-program: supervisorctl restart <${SUPERVISOR_PROGRAMS:-name}>"
-  [ "${MYSQL_OK:-0}" != "1" ] && warn "cannot reach mysql as root over socket — slow-log automation is off"
   say "manifest written to $STATE/manifest"
   cp "$STATE/manifest" "$(host_manifest "$APP")"
+  probe_siblings
   probe_fleet "$override"
   # subshell: benchprobe's failure path is `die`, i.e. exit(1) of the whole
   # script. The app manifest above is already written and useful on its own, so
@@ -50,6 +50,12 @@ probe_fleet() { # probe_fleet <unit-override> -- every other host into manifest.
     else
       rm -f "$f.tmp"; warn "could not probe $h — its checks fall back to what other hosts report"
     fi
+  done
+  # the slow log is read where the db role is: only those hosts must answer mysql
+  for h in $(hosts_with db); do
+    f=$(host_manifest "$h"); [ -f "$f" ] || continue
+    [ "$( . "$f" 2>/dev/null; printf '%s' "${MYSQL_OK:-0}" )" = 1 ] \
+      || warn "$h (db): cannot reach mysql as root over socket — slow-log automation is off"
   done
   [ "$(hosts_all | wc -l | tr -d ' ')" -gt 1 ] || return 0
   # what the roles promise vs what each box is actually running
@@ -77,19 +83,24 @@ probe_fleet() { # probe_fleet <unit-override> -- every other host into manifest.
   done
   [ -n "$db_unit" ] || [ -z "$(hosts_with db)" ] || [ -n "$(host_fact "$(hosts_with db | head -1)" DB_SERVER)" ] \
     || warn "no host reports a datastore — finalize/doctor cannot check the db role"
+  split_warn "$(split_findings)"
   return 0
 }
 
-db_left_enabled() { # print each non-db host where the fleet's DB unit is still enabled (comes back on reboot)
-  local h u
-  [ -f "$HOSTS_FILE" ] || return 0
-  u=$(host_fact "$(hosts_with db | head -1)" DB_SERVER)
-  [ -n "$u" ] || return 0
-  for h in $(hosts_all); do
-    case ",$(host_roles "$h")," in *,db,*) continue ;; esac
-    [ "$(rsh "$h" "systemctl is-enabled '$u' 2>/dev/null" 2>/dev/null)" = enabled ] && printf '%s %s\n' "$h" "$u"
+probe_siblings() { # the app's enabled siblings (isuride-matcher) belong in EXTRA_UNITS: go writes them, probe says how
+  local u missing=""
+  for u in ${APP_SIBLINGS:-}; do
+    case " ${EXTRA_UNITS:-} " in *" $u "*) ;; *) missing="$missing $u" ;; esac
   done
-  return 0
+  [ -n "$missing" ] || return 0
+  if [ "${PROBE_FILLS_EXTRA_UNITS:-0}" = 1 ] && [ -z "${EXTRA_UNITS:-}" ] && grep -q "^EXTRA_UNITS=''" "$CONF" 2>/dev/null; then
+    sed -i.bak "s|^EXTRA_UNITS=.*|EXTRA_UNITS='${missing# }'|" "$CONF"; rm -f "$CONF.bak"
+    EXTRA_UNITS="${missing# }"
+    say "EXTRA_UNITS = $EXTRA_UNITS (enabled next to $APP_UNIT — restart/deploy/finalize restart them with it)"
+  else
+    warn "enabled next to $APP_UNIT but not in EXTRA_UNITS:$missing — deploy/restart leave them on the old env. add them:"
+    warn "    echo \"EXTRA_UNITS='$(printf '%s' "${EXTRA_UNITS:-}$missing" | sed 's/^ *//')'\" >> $CONF"
+  fi
 }
 
 cmd_unit() {

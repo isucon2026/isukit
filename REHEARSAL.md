@@ -167,9 +167,9 @@ isukit probe                        # 役割と実態の食い違いを警告す
 
 手で行う変更（それぞれ所要時間を記録する）：
 
-1. **db の台（`<pub3>`）**：`etc/` の mysqld.cnf で `bind-address = 0.0.0.0`。他の台から接続するユーザーを作る（`CREATE USER 'isucon'@'%' …; GRANT …`）
+1. **db の台（`<pub3>`）**：`etc/` の mysqld.cnf で `bind-address = 0.0.0.0`。他の台から接続するユーザーを作る（`CREATE USER 'isucon'@'%' …; GRANT …`）。イメージのまま動いている app・matcher・nginx を止める：`sudo systemctl disable --now isuride-go isuride-matcher nginx`（残すと共有 DB を本物の app と並んで書き換え、finalize が FAIL する。`isukit probe` が台ごとのコマンドを出す）
 2. **app の台（`<pub1>`・`<pub2>`）**：repo の `hosts/<台>/env.sh`（無ければ `isukit env pull`）で DB の接続先を `<priv3>` にして commit。`isukit env push` で書き込む（下の deploy でも書き込まれる）
-3. **db 以外の台**：`sudo systemctl disable --now mysql`
+3. **db 以外の台**：先に app の unit から DB への依存を外す（`Requires=mysql.service` を消して `sudo systemctl daemon-reload`。残すと mysql を止めた時に app も止まり、再起動で mysql も起き上がる。`isukit probe` がコマンドを出す）。それから `sudo systemctl disable --now mysql`
 4. **web の台（`<pub1>`）**：`etc/` の nginx の upstream に `<priv1>`・`<priv2>` を並べる
 5. `isukit deploy`（設定の push と、全 app の台でのビルドと再起動）
 

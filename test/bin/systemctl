@@ -6,14 +6,16 @@ Answers from ISUKIT_FIXTURE (a fixture dir under test/fixtures/<year>/):
                        FragmentPath for each is reported as /etc/systemd/system/<name>.
   active            -- newline list of bare (no .service suffix) unit names
                        that are currently active (is-active).
+  enabled           -- same format, the units is-enabled reports enabled;
+                       without the file, the active ones are the enabled ones.
 
 Any WorkingDirectory/ExecStart/EnvironmentFile path in a unit file that starts
 with the literal string /home/isucon is rewritten to $ISUKIT_FAKE_HOME/... so
 it lines up with the same substitution run-probe-tests.sh applies to the
 extracted PROBE_SCRIPT text (see that script for why).
 
-Supports exactly what PROBE_SCRIPT calls: list-units, is-active, show -p PROP
-[--value] UNIT. list-unit-files and cat are supported too (not called by
+Supports exactly what PROBE_SCRIPT and split-check.sh call: list-units,
+is-active, is-enabled, show -p PROP[,PROP] [--value] UNIT. list-unit-files and cat are supported too (not called by
 PROBE_SCRIPT today, but asked for in the test spec) for robustness.
 """
 import sys, os, glob
@@ -47,7 +49,8 @@ def norm(name):
 
 def parse_unit(name):
     path = os.path.join(UNITS_DIR, name)
-    props = {"WorkingDirectory": "", "ExecStart": "", "EnvironmentFile": [], "User": "", "Type": "simple"}
+    props = {"WorkingDirectory": "", "ExecStart": "", "EnvironmentFile": [], "User": "", "Type": "simple",
+             "Requires": [], "BindsTo": [], "Wants": []}
     if not os.path.isfile(path):
         return None
     with open(path) as f:
@@ -72,11 +75,13 @@ def parse_unit(name):
                 props["User"] = v
             elif k == "Type":
                 props["Type"] = v
+            elif k in ("Requires", "BindsTo", "Wants"):
+                props[k].extend(v.split())
     return props
 
 
-def active_set():
-    p = os.path.join(FIX, "active")
+def active_set(fname="active"):
+    p = os.path.join(FIX, fname)
     names = set()
     if not os.path.isfile(p):
         return names
@@ -118,6 +123,17 @@ def main(argv):
             print("active" if active else "inactive")
         return 0 if active else 3
 
+    if cmd == "is-enabled":
+        unit = next((a for a in argv[1:] if not a.startswith("-")), None)
+        if unit is None:
+            return 1
+        bare = unit[: -len(".service")] if unit.endswith(".service") else unit
+        if not os.path.isfile(os.path.join(UNITS_DIR, norm(unit))):
+            return 1
+        en = active_set("enabled" if os.path.isfile(os.path.join(FIX, "enabled")) else "active")
+        print("enabled" if bare in en else "disabled")
+        return 0 if bare in en else 1
+
     if cmd == "show":
         rest = [a for a in argv[1:] if a != "--value"]
         value_only = "--value" in argv[1:]
@@ -134,7 +150,8 @@ def main(argv):
         if not prop or not unit:
             return 1
         uname = norm(unit)
-        data = parse_unit(uname) or {"WorkingDirectory": "", "ExecStart": "", "EnvironmentFile": [], "User": "", "Type": "simple"}
+        data = parse_unit(uname) or {"WorkingDirectory": "", "ExecStart": "", "EnvironmentFile": [], "User": "", "Type": "simple",
+                                     "Requires": [], "BindsTo": [], "Wants": []}
         fragpath = f"/etc/systemd/system/{uname}" if os.path.isfile(os.path.join(UNITS_DIR, uname)) else ""
 
         outs = {
@@ -142,6 +159,9 @@ def main(argv):
             "WorkingDirectory": data["WorkingDirectory"],
             "User": data["User"],
             "Type": data["Type"],
+            "Requires": " ".join(data["Requires"]),
+            "BindsTo": " ".join(data["BindsTo"]),
+            "Wants": " ".join(data["Wants"]),
         }
         if data["ExecStart"]:
             path = data["ExecStart"].split()[0]

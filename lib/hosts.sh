@@ -80,6 +80,73 @@ role_units() { # units a host must be running, from its roles
   printf '%s\n' $u | awk 'NF && !seen[$0]++' | tr '\n' ' ' | sed 's/ *$//'
 }
 
+app_family() { # the app's units: APP_UNIT, EXTRA_UNITS, and the siblings probe found on each app host
+  local h f
+  { printf '%s\n' ${APP_UNIT:-} ${EXTRA_UNITS:-}
+    for h in $(hosts_with app); do
+      f=$(host_manifest "$h"); [ -f "$f" ] || continue
+      ( . "$f" 2>/dev/null; printf '%s\n' ${APP_UNIT:-} ${APP_SIBLINGS:-} )
+    done
+  } | awk 'NF && !seen[$0]++' | tr '\n' ' ' | sed 's/ *$//'
+}
+
+# Split sanity, shared by probe, doctor and finalize. Every host starts from the
+# same image, so after a split a db-only box still has the app, its matcher and
+# nginx enabled — against what is now the shared DB (#37: a stray matcher there
+# reassigned rides and failed the scoring run) — and an app box still has a
+# unit that Requires= the mysql it no longer runs (#29).
+split_findings() { # "<host>\t<app|web|db|dep|unknown>\t<what>\t<fix>" per thing a host runs that its roles give away
+  [ -f "$HOSTS_FILE" ] || return 0
+  local fam web db h roles off deps out kind u p d frag st on_app on_web on_db app_st web_st
+  fam=$(app_family)
+  web=$(host_fact "$(hosts_with web | head -1)" WEB_SERVER)
+  db=$(host_fact "$(hosts_with db | head -1)" DB_SERVER)
+  for h in $(hosts_all); do
+    roles=",$(host_roles "$h"),"; off=""; deps=""
+    case "$roles" in *,app,*) ;; *) off="$fam" ;; esac
+    case "$roles" in *,web,*) ;; *) off="$off $web" ;; esac
+    case "$roles" in
+      *,db,*) ;;
+      *) off="$off $db"
+         case "$roles" in *,app,*) deps="${APP_UNIT:-} ${EXTRA_UNITS:-}" ;; esac ;;
+    esac
+    [ -n "${off// /}${deps// /}" ] || continue
+    out=$( { printf 'OFF_UNITS=%q\nDEP_UNITS=%q\n' "$off" "$deps"; remote_script split-check.sh; } | rsh_stdin "$h" 2>/dev/null ) \
+      || { printf '%s\tunknown\tcould not check which units run on %s\tssh %s %s true\n' "$h" "$h" "${SSH_OPTS:-}" "$h"; continue; }
+    on_app=""; on_web=""; on_db=""; app_st=""; web_st=""
+    while IFS='|' read -r kind u p d frag; do
+      case "$kind" in
+        DEP)
+          printf '%s\tdep\t%s: %s has %s=%s but the host has no db role — stopping %s stops the app, and every boot starts %s again\t%s\n' \
+            "$h" "$h" "$u" "$p" "$d" "$d" "$d" \
+            "ssh $h \"sudo sed -i --follow-symlinks '/^$p=/s/$d//' ${frag:-/etc/systemd/system/$u} && sudo systemctl daemon-reload\"   (and the same edit in etc/ if the unit is adopted)" ;;
+        ON)
+          st=$(printf '%s %s' "$p" "${d:+running}" | sed 's/^ *//;s/ *$//;s/ /, /')
+          if [ "$u" = "$db" ]; then
+            [ -n "$p" ] && on_db="$on_db $u"          # running alone: probe_fleet says so; enabled: back on every reboot
+          elif [ "$u" = "$web" ]; then
+            on_web="$on_web $u"; web_st="$web_st $u ($st)"
+          else
+            on_app="$on_app $u"; app_st="$app_st $u ($st)"
+          fi ;;
+      esac
+    done <<< "$out"
+    [ -z "$on_app" ] || printf '%s\tapp\t%s has no app role but the app'"'"'s units are on:%s — with a shared DB they work on it next to the real app\tssh %s sudo systemctl disable --now%s\n' "$h" "$h" "$app_st" "$h" "$on_app"
+    [ -z "$on_web" ] || printf '%s\tweb\t%s has no web role but%s — nothing should reach it there\tssh %s sudo systemctl disable --now%s\n' "$h" "$h" "$web_st" "$h" "$on_web"
+    [ -z "$on_db" ]  || printf '%s\tdb\t%s has no db role but%s is still enabled — it comes back on every reboot\tssh %s sudo systemctl disable --now%s\n' "$h" "$h" "$on_db" "$h" "$on_db"
+  done
+  return 0
+}
+
+split_warn() { # split_warn <findings> -- each one as a warning with its fix
+  local what fix
+  [ -n "$1" ] || return 0
+  while IFS=$'\t' read -r _ _ what fix; do
+    warn "$what"
+    warn "    fix: $fix"
+  done <<< "$1"
+}
+
 on_hosts() { # on_hosts <role|all> <fn> [args...] -- run fn once per matching host, $APP pointed at it
   local sel="$1" fn="$2" hosts h n bad=""
   shift 2

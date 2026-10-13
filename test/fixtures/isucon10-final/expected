@@ -3,3 +3,4 @@ APP_UNIT_CONFIDENCE=high
 WEB_SERVER=envoy
 DB_SERVER=mysql
 SRC_LANGS="golang nodejs ruby rust "
+APP_SIBLINGS=xsuportal-web-ruby.service

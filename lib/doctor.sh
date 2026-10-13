@@ -73,12 +73,15 @@ cmd_doctor() {
     doctor_ok "APP_UNIT_CONFIDENCE=${APP_UNIT_CONFIDENCE:-n/a}"
   fi
 
-  local left
-  left=$(db_left_enabled)
-  if [ -n "$left" ]; then
-    printf '%s\n' "$left" | while read -r h u; do
-      doctor_warn "$h: $u is enabled but the host has no db role — it starts on every reboot: ssh $h sudo systemctl disable --now $u"
-    done
+  local split kind what fix
+  split=$(split_findings)
+  if [ -n "$split" ]; then
+    while IFS=$'\t' read -r h kind what fix; do
+      # the app on a host without the app role fails scoring runs (#37)
+      if [ "$kind" = app ]; then doctor_fail "$what: $fix"; else doctor_warn "$what: $fix"; fi
+    done <<< "$split"
+  elif [ -f "$HOSTS_FILE" ]; then
+    doctor_ok "split: every host runs only what its roles need"
   fi
 
   local missing=0
