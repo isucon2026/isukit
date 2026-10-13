@@ -28,6 +28,39 @@ etc_rsync() { # etc_rsync <src> <dst> [rsync opts...] -- one side is $APP:..., t
   fi
 }
 
+# A host links only the files of the tiers its roles run (lib/hosts.sh): nginx
+# on web hosts, mysql on db hosts, the app's units on app hosts. A unit linked
+# on a db host vanishes as soon as `systemctl disable` removes the symlink.
+etc_role() { # etc_role <web|db|app> -- true if $APP holds that role (a host without roles: all)
+  local roles
+  roles=$(host_roles "$APP")
+  [ -n "$roles" ] || return 0
+  case ",$roles," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+
+etc_role_vars() { # VAR=value lines that tell remote/etc-*.sh which tiers $APP runs
+  local wn=0 wm=0 wa=0
+  etc_role web && wn=1
+  etc_role db  && wm=1
+  etc_role app && wa=1
+  printf 'WANT_NGINX=%s\nWANT_MYSQL=%s\nWANT_APP=%s\nAPP_UNIT=%q\nEXTRA_UNITS=%q\n' \
+    "$wn" "$wm" "$wa" "${APP_UNIT:-}" "${EXTRA_UNITS:-}"
+}
+
+etc_wanted() { # etc_wanted <path under etc/> -- true if $APP's roles use it (as in remote/etc-adopt.sh)
+  case "$1" in
+    nginx/*) etc_role web ;;
+    mysql/*) etc_role db ;;
+    systemd/system/*)
+      case " ${APP_UNIT:-} ${EXTRA_UNITS:-} " in
+        *" ${1#systemd/system/} "*) etc_role app ;;
+        *) return 0 ;;
+      esac ;;
+    *) return 0 ;;
+  esac
+}
+
 cmd_etc() {
   local sub="${1:-}"; shift || true
   case "$sub" in
@@ -71,7 +104,7 @@ etc_adopt_one() {
   repo=$(etc_repo)
   logs_are_on && etc_flag relog
   say "etc adopt on $APP: /etc -> $repo/etc/ (symlinks; replaced files backed up under /etc/isukit-orig/)"
-  { printf 'REPO=%q\nAPP_UNIT=%q\nTARGETS=%q\n' "$repo" "${APP_UNIT:-}" "$targets"; remote_script etc-adopt.sh; } \
+  { printf 'REPO=%q\nTARGETS=%q\n' "$repo" "$targets"; etc_role_vars; remote_script etc-adopt.sh; } \
     | rsh_stdin "$APP" || rc=$?
   return "$rc"
 }
@@ -81,7 +114,7 @@ cmd_etc_status() { load; on_hosts all etc_status_one; }
 etc_status_one() {
   local repo
   repo=$(etc_repo)
-  { printf 'REPO=%q\n' "$repo"; remote_script etc-status.sh; } | rsh_stdin "$APP"
+  { printf 'REPO=%q\n' "$repo"; etc_role_vars; remote_script etc-status.sh; } | rsh_stdin "$APP"
 }
 
 etc_sums() { # etc_sums <local|remote> <repo-dir> -- see remote/etc-sums.sh
@@ -202,6 +235,11 @@ etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
     return 0
   fi
   logs_are_on && was_on=1
+  # every changed file is copied, so each host's server repo holds the whole
+  # tree (etc pull compares them), but only the tiers this host's roles run are
+  # reloaded: a nginx file on the db host is not linked into its /etc.
+  local mine f
+  mine=$(for f in $changed; do etc_wanted "$f" && printf '%s\n' "$f"; done)
   say "etc push: $root/etc/ -> $APP:$repo/etc/"
   printf '    %s\n' $changed >&2
   # only the changed files: an untouched server copy keeps its logging edits
@@ -211,11 +249,12 @@ etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
   etc_rsync "$root/etc/" "$APP:$repo/etc/" "--files-from=$list" || { rm -f "$list"; die "rsync to $APP failed"; }
   rm -f "$list"
   rsh "$APP" "sudo -n chown -R \"\$(stat -c %U '$repo')\" '$repo/etc'" 2>/dev/null || true
+  [ -n "$mine" ] || say "etc push: none of these are used by $APP's roles ($(host_roles "$APP")) — copied, nothing reloaded"
 
   local restart_db=0 reload_nginx=0 units=""
-  printf '%s\n' $changed | grep -q '^nginx/' && reload_nginx=1
-  printf '%s\n' $changed | grep -q '^mysql/' && restart_db=1
-  units=$(printf '%s\n' $changed | sed -n 's|^systemd/system/||p' | tr '\n' ' ')
+  printf '%s\n' $mine | grep -q '^nginx/' && reload_nginx=1
+  printf '%s\n' $mine | grep -q '^mysql/' && restart_db=1
+  units=$(printf '%s\n' $mine | sed -n 's|^systemd/system/||p' | tr '\n' ' ')
 
   if [ "$reload_nginx" = 1 ]; then
     rsh "$APP" "sudo -n nginx -t && sudo -n systemctl reload nginx" \

@@ -33,7 +33,7 @@ rsh_stdin() { # record "<host> stdin:" + the VAR= lines the caller prepended
   case "$body" in *"Closes the measurement window"*) tag="run-stop " ;; esac
   case "$body" in *"sent by \`isukit alp\`"*) tag="alp-script " ;; esac
   case "$body" in *"sent by \`isukit final check\`"*) tag="final-check " ;; esac
-  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|APP_UNIT|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE|PATH_)=' | tr '\n' ' ')" >> "$CALLS"
+  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|WANT_APP|APP_UNIT|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE|PATH_)=' | tr '\n' ' ')" >> "$CALLS"
   return 0
 }
 say()  { :; }
@@ -270,6 +270,43 @@ t_etc_pull_leaves_out_disagreeing_files() {
   cmd_etc_pull; rc=$?
   check "$rc" = 0
   check -z "$(grep exclude "$CALLS")"
+}
+
+t_etc_adopt_by_role() {
+  setup_state isu1 "" "$ROLES"
+  load
+  on_hosts all etc_adopt_one
+  # each host links only the tiers its roles run
+  check -n "$(grep '^isu1 stdin: .*WANT_NGINX=1 WANT_MYSQL=0 WANT_APP=1 APP_UNIT=isu-go.service' "$CALLS")"
+  check -n "$(grep '^isu2 stdin: .*WANT_NGINX=0 WANT_MYSQL=0 WANT_APP=1' "$CALLS")"
+  check -n "$(grep '^isu3 stdin: .*WANT_NGINX=0 WANT_MYSQL=1 WANT_APP=0' "$CALLS")"
+  # no hosts file: the one host runs everything
+  setup_state isu1 ""
+  load
+  on_hosts all etc_adopt_one
+  check -n "$(grep '^isu1 stdin: .*WANT_NGINX=1 WANT_MYSQL=1 WANT_APP=1' "$CALLS")"
+}
+
+t_etc_push_reloads_by_role() {
+  setup_state isu1 "" "$ROLES"
+  load
+  local_repo_root() { printf '%s\n' "$WORK/app"; }
+  mkdir -p "$WORK/app/etc"
+  etc_sums() { # every tier changed locally; the hosts have nothing yet
+    [ "$1" = local ] || return 0
+    printf '1 1 ./nginx/nginx.conf\n1 1 ./mysql/mysqld.cnf\n1 1 ./systemd/system/isu-go.service\n'
+  }
+  etc_rsync() { printf '%s rsync %s\n' "$APP" "$(tr '\n' ' ' < "${3#--files-from=}")" >> "$CALLS"; }
+  etc_status_one() { :; }
+  cmd_etc_push 2>/dev/null; local rc=$?
+  check "$rc" = 0
+  # the whole tree is copied everywhere, so the server repos stay alike...
+  check "$(hosts_called 'rsync mysql/mysqld.cnf nginx/nginx.conf systemd/system/isu-go.service')" = "isu1 isu2 isu3"
+  # ...but nginx is reloaded on the web host only, mysql restarted on the db host only
+  check "$(hosts_called 'nginx -t')" = "isu1"
+  check "$(hosts_called 'systemctl restart \$s')" = "isu3"
+  check "$(hosts_called 'daemon-reload')" = "isu1 isu2"
+  check "$(hosts_called 'systemctl restart isu-go.service')" = "isu1 isu2"
 }
 
 t_host_app_moves_hosts_line() {
@@ -656,6 +693,8 @@ case_ bench-clean-when-logs-off       t_bench_clean_when_logs_off
 case_ manual-score-collects-its-run   t_manual_score_collects_run
 case_ logs-space-guard-on-db-hosts    t_logs_space_guard_on_db_hosts
 case_ etc-pull-leaves-out-disagreeing t_etc_pull_leaves_out_disagreeing_files
+case_ etc-adopt-by-role              t_etc_adopt_by_role
+case_ etc-push-reloads-by-role       t_etc_push_reloads_by_role
 case_ host-app-moves-hosts-line       t_host_app_moves_hosts_line
 case_ catchall-follows-app-key        t_catchall_follows_app_key
 case_ bench-records-score-on-failure  t_bench_records_score_when_collection_fails

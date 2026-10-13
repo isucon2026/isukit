@@ -68,8 +68,12 @@ new_tree() { # fresh fake /etc + empty repo under $T
 
 OUT=""
 # same framing isukit uses: VAR=value lines, then the script, on bash's stdin
-run_adopt()  { OUT="$( { printf 'SUDO=\nETC_ROOT=%q\nREPO=%q\nAPP_UNIT=isu-go.service\nTARGETS=\n' "$E" "$R"; cat "$ADOPT_SH"; } | PATH="$BIN:$PATH" bash -s 2>&1)"; }
-run_status() { OUT="$( { printf 'ETC_ROOT=%q\nREPO=%q\n' "$E" "$R"; cat "$STATUS_SH"; } | PATH="$BIN:$PATH" bash -s 2>&1)"; }
+# optional arg: more VAR=value lines (a host's roles: WANT_NGINX=0 ..., TARGETS=...)
+run_adopt()  { OUT="$( { printf 'SUDO=\nETC_ROOT=%q\nREPO=%q\nAPP_UNIT=isu-go.service\nTARGETS=\n%s\n' "$E" "$R" "${1:-}"; cat "$ADOPT_SH"; } | PATH="$BIN:$PATH" bash -s 2>&1)"; }
+run_status() { OUT="$( { printf 'ETC_ROOT=%q\nREPO=%q\nAPP_UNIT=isu-go.service\n%s\n' "$E" "$R" "${1:-}"; cat "$STATUS_SH"; } | PATH="$BIN:$PATH" bash -s 2>&1)"; }
+DB_ONLY='WANT_NGINX=0
+WANT_MYSQL=1
+WANT_APP=0'
 run_logs()   { OUT="$(printf 'MODE=%s\nAPP_UNIT=isu-go.service\n%s\n' "$1" "${LOGS//\/etc\//$E/}" | PATH="$BIN:$PATH" bash -s 2>&1)"; }
 
 TOTAL=0; PASSED=0; FAILED=""; ERR=""
@@ -236,6 +240,42 @@ t_mysql_unreadable() {
   check -f "$E/mysql/mysql.conf.d/mysqld.cnf" -a ! -L "$E/mysql/mysql.conf.d/mysqld.cnf"
 }
 
+t_db_host_adopts_only_mysql() {
+  new_tree
+  run_adopt "$DB_ONLY"; local rc=$?
+  check "$rc" = 0
+  check -n "$(linked_to "$E/mysql/mysql.conf.d/mysqld.cnf" "$R/etc/mysql/mysql.conf.d/mysqld.cnf" && echo y)"
+  # nginx and the app's unit are another host's business: left exactly as found
+  check -f "$E/nginx/nginx.conf" -a ! -L "$E/nginx/nginx.conf"
+  check -f "$E/systemd/system/isu-go.service" -a ! -L "$E/systemd/system/isu-go.service"
+  check ! -e "$R/etc/nginx" -a ! -e "$R/etc/systemd"
+  check -z "$(printf '%s\n' "$OUT" | grep '^nginx:')"
+  # naming one explicitly does not link it either
+  run_adopt "$DB_ONLY
+TARGETS=$E/systemd/system/isu-go.service"
+  check -n "$(printf '%s\n' "$OUT" | grep "^skip: .*isu-go.service (not used by this host's roles)")"
+  check ! -L "$E/systemd/system/isu-go.service"
+}
+
+t_status_expects_by_role() {
+  new_tree
+  run_adopt "$DB_ONLY"
+  # the app/web host's files reached this host's server repo (push copies the tree)
+  mkdir -p "$R/etc/nginx" "$R/etc/systemd/system"
+  printf '%s\n' "$NGINX_CONF" > "$R/etc/nginx/nginx.conf"
+  printf '[Service]\n' > "$R/etc/systemd/system/isu-go.service"
+  rm "$E/systemd/system/isu-go.service"   # e.g. `systemctl disable` removed it
+  run_status "$DB_ONLY"; local rc=$?
+  check "$rc" = 0
+  check -z "$(printf '%s\n' "$OUT" | grep -E 'NO TARGET|NOT LINKED|OTHER LINK')"
+  check -n "$(printf '%s\n' "$OUT" | grep "^linked .*mysqld.cnf")"
+  # the same tree on a host that runs everything still wants them
+  run_status; rc=$?
+  check "$rc" = 1
+  check -n "$(printf '%s\n' "$OUT" | grep "^NO TARGET .*isu-go.service")"
+  check -n "$(printf '%s\n' "$OUT" | grep "^NOT LINKED .*nginx.conf")"
+}
+
 case_ adopt-links-discovered-configs t_adopt
 case_ adopt-is-idempotent            t_idempotent
 case_ status-reports-link-state      t_status
@@ -247,6 +287,8 @@ case_ readopt-keeps-current-version  t_readopt_keeps_current
 case_ rollback-uses-this-runs-backup t_rollback_uses_this_runs_backup
 case_ mysql-value-not-live-rollback  t_mysql_value_not_live
 case_ mysql-unreadable-rollback      t_mysql_unreadable
+case_ db-host-adopts-only-mysql      t_db_host_adopts_only_mysql
+case_ status-expects-by-role         t_status_expects_by_role
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]
