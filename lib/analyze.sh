@@ -55,7 +55,10 @@ slow_one() {
     rsh "$APP" "command -v pt-query-digest >/dev/null" || die "pt-query-digest still not installed after isukit setup — install by hand on $APP"
   }
   say "pt-query-digest (top queries by total time)"
-  rsh "$APP" "set -o pipefail; sudo -n pt-query-digest --limit=15 /tmp/isukit-slow.log | head -80"
+  # whole: --limit already bounds it, and the per-query sections after the
+  # profile (full statement, rows examined) are what you index from — a head
+  # cut kept the profile and the first query only
+  rsh "$APP" "sudo -n pt-query-digest --limit=15 /tmp/isukit-slow.log"
 }
 
 cmd_pprof() { # pprof [sec] [port] | pprof on | pprof off

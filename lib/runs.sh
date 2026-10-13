@@ -7,7 +7,7 @@
 #   hosts.txt     per host: cpu avg/max/iowait + the top processes, sampled 1s
 #   alp.txt       endpoints for this run only (every web host's log, merged)
 #   alp-patterns.txt  the URI groups alp.txt was cut by (`isukit alp --patterns`)
-#   slow-<h>.txt  pt-query-digest per db host
+#   slow-<h>.txt  pt-query-digest per db host, whole (show prints its profile)
 #   cpu.pprof     a CPU profile taken while the load was on (first app host)
 #   meta          when / sha / score / note
 # Measuring happens only while `isukit logs on` is in effect, so a logs-off
@@ -153,6 +153,7 @@ run_summary() { # run_summary <run-dir> -- the short view printed after a run an
     [ -s "$f" ] || continue
     echo "== slow: $(basename "$f" .txt | sed 's/^slow-//') =="
     awk '/^# Profile/ { on = 1 } on && NF == 0 { exit } on' "$f"
+    echo "each query in full: $f"
     echo
   done
   [ -f "$run/cpu.pprof" ] && echo "pprof: go tool pprof -http=: $run/cpu.pprof"

@@ -361,6 +361,24 @@ t_pprof_hint_when_no_endpoint() {
   check ! -e "$WORK/run/.pprof-started"
 }
 
+# the digest is kept whole (--limit bounds it): the per-query sections after
+# the profile are the point; show prints the profile and names the file
+t_slow_digest_kept_whole() {
+  setup_state isu1 "" "$ROLES"
+  load
+  cmd_slow >/dev/null 2>&1
+  check -n "$(grep '^isu3 .*pt-query-digest --limit=15 /tmp/isukit-slow.log' "$CALLS")"
+  check -z "$(grep 'pt-query-digest' "$CALLS" | grep -F '| head')"
+  mkdir -p .isukit/runs/20261012-100000
+  { printf '# Profile\n# Rank Query ID Response time\n# 1 0xAA 9.0\n\n'
+    for i in $(seq 1 15); do printf '# Query %s: ...\nSELECT * FROM t%s WHERE id = 1\\G\n\n' "$i" "$i"; done
+  } > .isukit/runs/20261012-100000/slow-isu3.txt
+  local out; out=$(run_summary .isukit/runs/20261012-100000)
+  check -n "$(printf '%s\n' "$out" | grep -F '# 1 0xAA 9.0')"
+  check -z "$(printf '%s\n' "$out" | grep -F 'Query 2:')"
+  check -n "$(printf '%s\n' "$out" | grep -F 'each query in full: .isukit/runs/20261012-100000/slow-isu3.txt')"
+}
+
 t_show_out_of_range() {
   setup_state isu1 "" "$ROLES"
   mkdir -p .isukit/runs/20260101-000000 .isukit/runs/20260102-000000
@@ -734,6 +752,7 @@ case_ stale-pprof-never-saved         t_stale_pprof_never_saved
 case_ bench-isucon14                  t_bench_isucon14
 case_ alp-patterns-saved-with-run     t_alp_patterns_saved_with_run
 case_ pprof-hint-when-no-endpoint     t_pprof_hint_when_no_endpoint
+case_ slow-digest-kept-whole          t_slow_digest_kept_whole
 case_ show-out-of-range-errors        t_show_out_of_range
 case_ db-checks-survive-reprobe       t_db_checks_survive_reprobe
 case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts
