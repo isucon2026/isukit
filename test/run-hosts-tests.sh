@@ -320,6 +320,47 @@ t_stale_pprof_never_saved() {
   check ! -e "$(ls -1d .isukit/runs/* | tail -1)/cpu.pprof"
 }
 
+# the groups alp.txt was cut by are saved with the run; after it the live log
+# holds nothing to group, and `alp --patterns` shows the latest run's instead
+t_alp_patterns_saved_with_run() {
+  setup_state isu1 "" "$ROLES"
+  load
+  LIVE_PATTERNS='^/api/chair/rides/[^/]+$'
+  rsh_stdin() {
+    local body; body=$(cat)
+    case "$body" in
+      *"PRINT_MATCHES=1"*) [ -n "$LIVE_PATTERNS" ] && printf '%s\n' "$LIVE_PATTERNS" ;;
+      *"sent by \`isukit alp\`"*) printf '| COUNT | URI |\n| 10 | ^/api/chair/rides/[^/]+$ |\n' ;;
+    esac
+    return 0
+  }
+  mkdir -p .isukit/runs/20261012-100000
+  run_alp .isukit/runs/20261012-100000/alp.txt
+  check "$(cat .isukit/runs/20261012-100000/alp-patterns.txt 2>/dev/null)" = '^/api/chair/rides/[^/]+$'
+  check -n "$(run_summary .isukit/runs/20261012-100000 | grep -F 'alp groups: .isukit/runs/20261012-100000/alp-patterns.txt')"
+  # live log still has groups: those win
+  LIVE_PATTERNS='^/api/app/rides/[^/]+$'
+  check "$(cmd_alp --patterns 2>/dev/null)" = '^/api/app/rides/[^/]+$'
+  # emptied after the run: the saved ones
+  LIVE_PATTERNS=''
+  check "$(cmd_alp --patterns 2>/dev/null)" = '^/api/chair/rides/[^/]+$'
+  # no groups and no saved run: an error that says what to do
+  rm -rf .isukit/runs
+  ( cmd_alp --patterns ) >/dev/null 2>&1; check "$?" != 0
+}
+
+t_pprof_hint_when_no_endpoint() {
+  setup_state isu1 "" "$ROLES"
+  load
+  say() { printf 'say: %s\n' "$*" >> "$CALLS"; }
+  mkdir -p "$WORK/run"
+  pprof_begin "$WORK/run"                       # rsh answers no 200: no endpoint
+  check -n "$(grep -F "isukit pprof on" "$CALLS")"
+  check -n "$(grep -F 'import _ "net/http/pprof"' "$CALLS")"
+  check -n "$(grep -F 'http.ListenAndServe("127.0.0.1:6060", nil)' "$CALLS")"
+  check ! -e "$WORK/run/.pprof-started"
+}
+
 t_show_out_of_range() {
   setup_state isu1 "" "$ROLES"
   mkdir -p .isukit/runs/20260101-000000 .isukit/runs/20260102-000000
@@ -691,6 +732,8 @@ case_ catchall-follows-app-key        t_catchall_follows_app_key
 case_ bench-records-score-on-failure  t_bench_records_score_when_collection_fails
 case_ stale-pprof-never-saved         t_stale_pprof_never_saved
 case_ bench-isucon14                  t_bench_isucon14
+case_ alp-patterns-saved-with-run     t_alp_patterns_saved_with_run
+case_ pprof-hint-when-no-endpoint     t_pprof_hint_when_no_endpoint
 case_ show-out-of-range-errors        t_show_out_of_range
 case_ db-checks-survive-reprobe       t_db_checks_survive_reprobe
 case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts

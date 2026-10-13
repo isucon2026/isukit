@@ -167,7 +167,7 @@ runs_publish() { # runs_publish <run-dir> -- copy the run into the shared branch
   d=$(shared_dir)
   name="$(basename "$run")-$(who_am_i)"
   mkdir -p "$d/runs/$name"
-  for f in meta hosts.txt alp.txt "$run"/slow-*.txt cpu.pprof; do
+  for f in meta hosts.txt alp.txt alp-patterns.txt "$run"/slow-*.txt cpu.pprof; do
     f="$run/$(basename "$f")"
     [ -f "$f" ] || continue
     case "$f" in *.pprof) [ "$(wc -c < "$f")" -lt 2000000 ] || continue ;; esac
