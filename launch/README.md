@@ -12,7 +12,7 @@ from AMI X" and leaves the how to you.
 
 | When | Script | What |
 |---|---|---|
-| T-7d (any day before) | `prestage.sh` | verify AWS auth, key pair, VPC/subnet, security group (SSH from your IP, plus any `--allow-ip`) |
+| T-7d (any day before) | `prestage.sh` | verify AWS auth, key pair, VPC/subnet, security group (22 and 443 from your IP plus any `--allow-ip`, all traffic between the group's own instances) |
 | T+0:00 | — | contest starts, read the manual, get AMI id / instance type / instance count |
 | T+0:10 | `launch.sh --ami … --type … --count …` | launch exactly what the manual specifies |
 | T+0:15 | `isukit go …` | printed by launch.sh — hand off to the main isukit loop |
@@ -46,6 +46,17 @@ from AMI X" and leaves the how to you.
   every teammate's IP has to be in the list **before** that point — re-run
   `prestage.sh` with `--allow-ip` any time before contest day to add one, and
   check the printed authorized-CIDR list against the roster.
+- **The security group also opens 443 and instance-to-instance traffic.**
+  The same `--allow-ip` list (and your own IP) gets 443 as well as 22 —
+  isucon14's manual said "open 443 and 22". And the group allows all traffic
+  from itself: the bench box reaches the app on its private IP, the app calls
+  back the benchmarker's payment server (isucon14: 12346), and a split
+  app→db needs 3306. Those ports are only known from the manual, after the
+  group can no longer change, so prestage allows the group to itself rather
+  than guessing ports. Each rule is added only if missing, and AWS's
+  "already exists" (a rule added by hand) is not an error. Anything else the
+  manual opens to the outside (80, an envcheck port) is still yours to add
+  before launch.
 - **The benchmarker server is never touched by this tooling.** These scripts
   launch app instances only; nothing here targets or reconfigures a bench
   host.
