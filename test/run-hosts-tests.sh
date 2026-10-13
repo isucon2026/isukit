@@ -492,6 +492,36 @@ t_bench_target_same_box() {
   check -n "$(printf '%s' "$cmd" | grep -F -- '-target-addr 127.0.0.1:443')"
 }
 
+# isucon14: --target is the vhost URL, --addr where to connect, and the app
+# calls the benchmarker's payment server back on the bench box's own IP.
+bench14_case() { # bench14_case <app ips> <bench ips> -- the BENCH_CMD benchprobe composes
+  setup_state isu1 "" "$ROLES"
+  sed -i.bak "s|^BENCH_MODE=manual|BENCH_MODE=auto|" .isukit/config && rm -f .isukit/config.bak
+  load
+  APP_IPS="$1"; BENCH_IPS="$2"
+  rsh() {
+    case "$1 $*" in
+      "isu1 "*"hostname -I"*)  echo "$APP_IPS" ;;
+      "bench "*"hostname -I"*) echo "$BENCH_IPS" ;;
+      "isu1 "*"server_name"*)  printf '  server_name _;\n  server_name _;\n  server_name xiv.isucon.net;\n  server_name *.xiv.isucon.net;\n' ;;
+    esac
+    return 0
+  }
+  rsh_stdin() { cat >/dev/null; printf 'BENCH_BIN=/home/isucon/bench\nBENCH_DIR=/home/isucon\nBENCH_OWNER=isucon\nBENCH_SUBCMD=run\nBENCH_TARGET_FLAG=--target\nBENCH_ADDR_FLAG=--addr\nBENCH_HAS_NAMESERVER=0\nBENCH_HAS_SSL_FLAG=0\nBENCH_PAYMENT_URL_FLAG=--payment-url\nBENCH_PAYMENT_PORT_FLAG=--payment-bind-port\nBENCH_PAYMENT_PORT=12345\n'; }
+  rpull() { :; }
+  cmd_benchprobe >/dev/null 2>&1
+  ( . .isukit/config; printf '%s\n' "$BENCH_CMD" )
+}
+
+t_bench_isucon14() {
+  local cmd
+  cmd=$(bench14_case "10.0.1.11" "10.0.1.14")
+  check -n "$(printf '%s' "$cmd" | grep -F -- "./bench run --target https://xiv.isucon.net --addr 10.0.1.11:443 --payment-url http://10.0.1.14:12345 --payment-bind-port 12345'")"
+  # on the app box: same vhost and addr, the payment default (localhost) already right
+  cmd=$(bench14_case "10.0.1.11" "10.0.1.11")
+  check -n "$(printf '%s' "$cmd" | grep -F -- "./bench run --target https://xiv.isucon.net --addr 127.0.0.1:443'")"
+}
+
 local_server() { # rsh runs commands here, sudo dropped: the lock / deploy files become real files
   LOCK_FILE="$WORK/isukit.lock"; DEPLOYED_FILE="$WORK/isukit.deployed"
   rsh() { local c="${*:2}"; bash -c "${c//sudo -n /}"; }
@@ -660,6 +690,7 @@ case_ host-app-moves-hosts-line       t_host_app_moves_hosts_line
 case_ catchall-follows-app-key        t_catchall_follows_app_key
 case_ bench-records-score-on-failure  t_bench_records_score_when_collection_fails
 case_ stale-pprof-never-saved         t_stale_pprof_never_saved
+case_ bench-isucon14                  t_bench_isucon14
 case_ show-out-of-range-errors        t_show_out_of_range
 case_ db-checks-survive-reprobe       t_db_checks_survive_reprobe
 case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts

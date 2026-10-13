@@ -4,7 +4,8 @@
 # pure text matching against $HELP) against every fixtures/bench/<year>.help
 # and asserts the S KEY=value output matches <year>.expected. The binary-
 # discovery preamble (find -perm -u+x, file, stat) is never exercised: $HELP
-# is set directly from the fixture instead of by running a real binary.
+# is set directly from the fixture instead of by running a real binary, and
+# sub_help (the subcommand's --help) reads <year>.subhelp when there is one.
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,7 +44,12 @@ run_one() {
   [ -f "$expfile" ] || return 0
   TOTAL=$((TOTAL + 1))
 
-  OUT="$(HELP="$(cat "$helpfile")" bash -c "$TAIL_SCRIPT" 2>&1)"
+  # <year>.subhelp: what `<bench> <subcmd> --help` prints, for benchmarkers
+  # whose top-level --help lists only subcommands (isucon14)
+  local pre=""
+  [ -f "$BENCH_DIR/$year.subhelp" ] && pre="BEST=bench; sub_help() { cat $(printf %q "$BENCH_DIR/$year.subhelp"); }
+"
+  OUT="$(HELP="$(cat "$helpfile")" bash -c "$pre$TAIL_SCRIPT" 2>&1)"
 
   if [ "$VERBOSE" = "1" ]; then
     echo "--- $year: full tail-script output ---"

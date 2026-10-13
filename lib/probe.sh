@@ -124,6 +124,16 @@ bench_target_host() { # where the benchmarker must aim: 127.0.0.1 on the app box
   esac
 }
 
+bench_self_ip() { # the bench box's own private IP: where the app has to call the benchmarker back
+  rsh "$BENCH" "hostname -I 2>/dev/null" 2>/dev/null | awk '{print $1}'
+}
+
+bench_vhost() { # the first plain hostname the app's nginx serves (isucon14: xiv.isucon.net), else empty
+  rsh "$APP" "grep -Rhs server_name /etc/nginx/ 2>/dev/null" 2>/dev/null \
+    | sed -E 's/#.*//; s/^[[:space:]]*server_name//; s/;.*//' | tr -s ' \t' '\n\n' \
+    | grep -E '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$' | grep -vE '^[0-9.]+$' | head -1
+}
+
 cmd_benchprobe() {
   load
   say "probing benchmarker on $BENCH"
@@ -147,7 +157,7 @@ cmd_benchprobe() {
     rpull "$BENCH" "$BENCH_HELP_FILE" "$STATE/bench-help.txt" 2>/dev/null || warn "could not pull help text ($BENCH_HELP_FILE)"
   fi
 
-  local binbase cmdline target scheme=http
+  local binbase cmdline target vhost self scheme=http
   binbase=$(basename "$BENCH_BIN")
   cmdline="cd ${BENCH_DIR:-.} && ./$binbase"
   [ -n "${BENCH_SUBCMD:-}" ] && cmdline="$cmdline $BENCH_SUBCMD"
@@ -155,12 +165,29 @@ cmd_benchprobe() {
   [ "${BENCH_HAS_SSL_FLAG:-0}" = 1 ] && scheme=https
   # on the app box, the binary's own default (localhost) already points home;
   # from a separate box every target flag must carry the app's address
-  case "${BENCH_TARGET_FLAG:-}" in
-    *-addr) cmdline="$cmdline $BENCH_TARGET_FLAG $target:443" ;;
-    *url)   [ "$target" = 127.0.0.1 ] || cmdline="$cmdline $BENCH_TARGET_FLAG $scheme://$target" ;;
-    ?*)     [ "$target" = 127.0.0.1 ] || cmdline="$cmdline $BENCH_TARGET_FLAG $target" ;;
-  esac
+  if [ -n "${BENCH_ADDR_FLAG:-}" ]; then
+    # a URL flag and an ip:port flag (isucon14 --target / --addr): the URL
+    # names the vhost nginx routes on, the addr is where to connect — the
+    # binary's own default URL (localhost:8080) would skip nginx entirely
+    vhost=$(bench_vhost)
+    [ -n "$vhost" ] || warn "no server_name in the app's nginx — $BENCH_TARGET_FLAG gets the bare address; give it the contest's hostname"
+    cmdline="$cmdline $BENCH_TARGET_FLAG https://${vhost:-$target} $BENCH_ADDR_FLAG $target:443"
+  else
+    case "${BENCH_TARGET_FLAG:-}" in
+      *-addr) cmdline="$cmdline $BENCH_TARGET_FLAG $target:443" ;;
+      *url)   [ "$target" = 127.0.0.1 ] || cmdline="$cmdline $BENCH_TARGET_FLAG $scheme://$target" ;;
+      ?*)     [ "$target" = 127.0.0.1 ] || cmdline="$cmdline $BENCH_TARGET_FLAG $target" ;;
+    esac
+  fi
   [ "${BENCH_HAS_NAMESERVER:-0}" = "1" ] && cmdline="$cmdline ${BENCH_NAMESERVER_FLAG:---nameserver} $target"
+  # the app calls the benchmarker back (isucon14's payment server): its
+  # default is localhost, which from the app box is the app box itself
+  if [ -n "${BENCH_PAYMENT_URL_FLAG:-}" ] && [ "$target" != 127.0.0.1 ]; then
+    self=$(bench_self_ip)
+    [ -n "$self" ] || warn "could not read the bench box's own IP — fix $BENCH_PAYMENT_URL_FLAG by hand"
+    cmdline="$cmdline $BENCH_PAYMENT_URL_FLAG http://${self:-BENCH_PRIVATE_IP}:${BENCH_PAYMENT_PORT:-12345}"
+    [ -n "${BENCH_PAYMENT_PORT_FLAG:-}" ] && cmdline="$cmdline $BENCH_PAYMENT_PORT_FLAG ${BENCH_PAYMENT_PORT:-12345}"
+  fi
   [ "$target" = 127.0.0.1 ] || say "the benchmarker runs on another box: aiming it at the app host's private IP $target"
 
   local composed="sudo -iu ${BENCH_OWNER:-isucon} sh -c '$cmdline'"
