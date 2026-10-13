@@ -99,8 +99,12 @@ cmd_restart() {
     # never let one host abort the loop: a silent partial restart is exactly
     # what fails the post-contest verification. collect failures, report them
     # all, fail at the end. (db-only / web-only hosts are not app hosts.)
+    # remote/restart.sh: daemon-reload first if a unit file changed, then every
+    # unit must still be active a few seconds on (one `active` right after the
+    # restart proved nothing in #34); if one is not, systemd's view of it is
+    # printed and it is restarted once more.
     rc=0
-    rsh "$h" "sudo -n systemctl restart $units && sleep 2 && systemctl is-active $units" || rc=$?
+    { printf 'UNITS=%q\n' "$units"; remote_script restart.sh; } | rsh_stdin "$h" || rc=$?
     [ "$rc" = 0 ] || { warn "restart failed on $h (rc=$rc) — that host may not run all of: $units"; bad="$bad $h"; }
   done
   [ -z "$bad" ] || die "restart incomplete on:$bad — fix before any scoring run"
@@ -192,7 +196,8 @@ cmd_finalize() {
     # host is assumed to be a copy of the probed one.
     if [ -f "$HOSTS_FILE" ]; then want=$(role_units "$h"); else want="${UNITS_ACTIVE:-}"; fi
     [ -n "$want" ] || continue
-    rsh "$h" "systemctl is-active $want" \
+    # one state per unit; `systemctl is-active a b` alone succeeds when ANY is active
+    rsh "$h" "st=\$(systemctl is-active $want); echo \"\$st\"; ! printf '%s\\n' \"\$st\" | grep -vqx active" \
       || { units_bad=$((units_bad + 1)); warn "some units did not come up on their own on $h — enable them: ssh ${SSH_OPTS:-} $h sudo systemctl enable --now $want"; }
   done
   # active is not answering: ask every web host through nginx and every app host

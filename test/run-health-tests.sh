@@ -1,10 +1,13 @@
 #!/bin/bash
-# The host-side "is it really up" checks, run as-is with the commands they
+# The two host-side "is it really up" checks, run as-is with the commands they
 # call stubbed from $WORK/bin:
 #   remote/http-check.sh — finalize's answer check. Through nginx it must reach
 #     the server block that proxies to the app (listen port / scheme /
 #     server_name off `nginx -T`, curl --resolve + -k), and a 4xx nginx wrote
 #     itself (the default server) is a FAIL, not an answer (#39).
+#   remote/restart.sh — restart's check that the units stay up: a unit that is
+#     active at first and gone a moment later is caught, diagnosed and restarted
+#     once more (#34).
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +38,37 @@ while IFS='|' read -r pat code body; do
 done < "$ISUKIT_T_STATE/curl-rules"
 printf '000'; exit 7
 X
+# systemctl: is-active answers from a per-unit queue ($S/<unit>.checks, one
+# state per call, the last one sticks), else $S/<unit>.state, else active
+cat > "$BIN/systemctl" <<'X'
+#!/bin/bash
+echo "systemctl $*" >> "$ISUKIT_T_CALLS"
+st() { # st <unit> -- the next state of the unit
+  local q="$ISUKIT_T_STATE/$1.checks" s
+  if [ -s "$q" ]; then
+    s=$(head -1 "$q")
+    [ "$(wc -l < "$q")" -gt 1 ] && sed -i.bak 1d "$q"
+    printf '%s' "$s"; return
+  fi
+  cat "$ISUKIT_T_STATE/$1.state" 2>/dev/null || printf active
+}
+case "$1" in
+  is-active)
+    shift; [ "$1" = --quiet ] && { shift; q=1; }
+    s=$(st "$1"); [ -n "${q:-}" ] || echo "$s"; [ "$s" = active ] ;;
+  show)
+    case "$*" in
+      *NeedDaemonReload*) cat "$ISUKIT_T_STATE/need-reload" 2>/dev/null || echo no ;;
+      *"Requires,BindsTo,PartOf --value"*) echo "mysql.service" ;;
+      *) echo "ActiveState=inactive" ;;
+    esac ;;
+  is-enabled) echo enabled ;;
+  status) echo "* $2 - stub"; echo "   Active: inactive (dead)" ;;
+  *) exit 0 ;;
+esac
+X
+printf '#!/bin/bash\necho "journalctl $*" >> "$ISUKIT_T_CALLS"\necho "-- journal --"\n' > "$BIN/journalctl"
+printf '#!/bin/bash\nexit 0\n' > "$BIN/sleep"
 chmod +x "$BIN"/*
 export ISUKIT_T_STATE="$S" ISUKIT_T_CALLS="$CALLS"
 
@@ -176,6 +210,64 @@ t_app_4xx_is_an_answer() {
   check "$(run http-check.sh MODE=app APP_PORT=8080 PATH_=/x WAIT=2)" = "OK|http://127.0.0.1:8080/x|404"
 }
 
+t_restart_holds() {
+  reset
+  local out rc
+  out=$(run restart.sh UNITS="isu-go.service isu-matcher.service" 2>"$WORK/stderr"); rc=$?
+  check "$rc" = 0
+  check "$out" = "isu-go.service active
+isu-matcher.service active"
+  check "$(grep -c '^systemctl restart' "$CALLS")" = 1
+  check -z "$(grep 'daemon-reload' "$CALLS")"
+  check ! -s "$WORK/stderr"
+}
+
+t_restart_stopped_after_active_is_caught() {
+  reset
+  # active at +2s, gone at +2+SETTLE s (#34), fine after the second restart
+  printf 'active\ninactive\nactive\n' > "$S/isu-go.service.checks"
+  local out rc
+  out=$(run restart.sh UNITS=isu-go.service 2>"$WORK/stderr"); rc=$?
+  check "$rc" = 0
+  check "$(grep -c '^systemctl restart' "$CALLS")" = 2
+  check -n "$(grep 'not up after the restart: isu-go.service' "$WORK/stderr")"
+  check -n "$(grep 'up after the second restart' "$WORK/stderr")"
+  # what the issue asked to keep: status, is-enabled, the links, the journal (with what it Requires=)
+  check -n "$(grep 'isu-go.service: systemctl status' "$WORK/stderr")"
+  check -n "$(grep 'is-enabled enabled' "$WORK/stderr")"
+  check -n "$(grep 'links under /etc/systemd/system' "$WORK/stderr")"
+  check -n "$(grep '^journalctl .*-u isu-go.service -u mysql.service' "$CALLS")"
+  check -n "$(grep '^systemctl list-jobs' "$CALLS")"
+}
+
+t_restart_stays_down() {
+  reset
+  echo failed > "$S/isu-go.service.state"
+  local rc
+  run restart.sh UNITS="isu-go.service isu-matcher.service" >"$WORK/out" 2>"$WORK/stderr"; rc=$?
+  check "$rc" = 1
+  check "$(grep -c '^systemctl restart' "$CALLS")" = 2
+  check -n "$(grep 'still not up after a second restart: isu-go.service' "$WORK/stderr")"
+  check -z "$(grep 'isu-matcher.service: systemctl status' "$WORK/stderr")"   # only the unit that is down
+  check -n "$(grep '^isu-go.service failed' "$WORK/out")"
+}
+
+t_restart_one_of_two_down() {
+  reset
+  # `systemctl is-active a b` succeeds when ANY is active: each unit is asked alone
+  echo inactive > "$S/isu-matcher.service.state"
+  local rc
+  run restart.sh UNITS="isu-go.service isu-matcher.service" >/dev/null 2>&1; rc=$?
+  check "$rc" = 1
+}
+
+t_restart_reloads_changed_unit_first() {
+  reset
+  echo yes > "$S/need-reload"
+  run restart.sh UNITS=isu-go.service >/dev/null 2>&1
+  check "$(grep -n 'daemon-reload\|^systemctl restart' "$CALLS" | head -1 | grep -c daemon-reload)" = 1
+}
+
 case_ http-web-reaches-site-block        t_web_reaches_the_site_block
 case_ http-web-nginx-own-404-fails       t_web_nginx_own_404_fails
 case_ http-web-upstream-404-answers      t_web_upstream_404_is_an_answer
@@ -183,6 +275,11 @@ case_ http-web-url-override              t_web_url_override
 case_ http-web-plain-site-and-fallback   t_web_plain_site_and_fallback
 case_ http-web-5xx-fails                 t_web_5xx_still_fails
 case_ http-app-4xx-answers               t_app_4xx_is_an_answer
+case_ restart-holds                      t_restart_holds
+case_ restart-stopped-after-active       t_restart_stopped_after_active_is_caught
+case_ restart-stays-down                 t_restart_stays_down
+case_ restart-one-of-two-down            t_restart_one_of_two_down
+case_ restart-reloads-changed-unit       t_restart_reloads_changed_unit_first
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]

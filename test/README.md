@@ -60,6 +60,12 @@ busier sibling like `/api/user/me` stays literal, every regex anchored).
 transport for a recorder and asserts which host each command reaches, with and
 without a `.isukit/hosts` roles file. Full runs only, like the etc suite.
 
+`run-health-tests.sh` runs the two host-side "is it really up" scripts as-is, with
+`nginx` / `curl` / `systemctl` / `journalctl` stubbed: `remote/http-check.sh` must reach
+the server block that proxies to the app (port, scheme, `server_name` off `nginx -T`) and
+fail on a 4xx nginx answered itself; `remote/restart.sh` must catch a unit that is active
+right after the restart and gone a moment later, print systemd's view of it and restart once more.
+
 `run-etc-tests.sh` is different in kind: it runs `remote/etc-adopt.sh` and
 `remote/etc-status.sh` as-is (plus `LOGS_SCRIPT`, extracted) against a throwaway
 `/etc` tree via `ETC_ROOT`, and checks the symlink contract — adopt, idempotence,

@@ -33,6 +33,8 @@ rsh_stdin() { # record "<host> stdin:" + the VAR= lines the caller prepended
   case "$body" in *"Closes the measurement window"*) tag="run-stop " ;; esac
   case "$body" in *"sent by \`isukit alp\`"*) tag="alp-script " ;; esac
   case "$body" in *"sent by \`isukit final check\`"*) tag="final-check " ;; esac
+  # remote/restart.sh: recorded as the restart it does, so the routing checks read as before
+  case "$body" in *"sent by \`isukit restart\`"*) tag="systemctl restart $(eval "$(printf '%s\n' "$body" | grep '^UNITS=')"; printf '%s' "$UNITS") " ;; esac
   printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|APP_UNIT|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE|PATH_)=' | tr '\n' ' ')" >> "$CALLS"
   return 0
 }
@@ -105,7 +107,7 @@ t_logs_split_by_role() {
   cmd_logs on
   check -n "$(grep '^isu1 stdin: MODE=on WANT_NGINX=1 WANT_MYSQL=0' "$CALLS")"
   check -n "$(grep '^isu3 stdin: MODE=on WANT_NGINX=0 WANT_MYSQL=1' "$CALLS")"
-  check -z "$(grep '^isu2 stdin:' "$CALLS")"
+  check -z "$(grep '^isu2 stdin: MODE=' "$CALLS")"
   # the slow log only sees new sessions: every app host reconnects, once
   check "$(hosts_called 'systemctl restart')" = "isu1 isu2"
   check "$(grep -c 'systemctl restart' "$CALLS")" = 2
