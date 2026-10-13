@@ -3,8 +3,8 @@
 本番（ISUCON2026、2026-10-31）と同じ流れを、過去問で頭から最後まで一度通す。**目的はスコアではなく、手順と isukit が本番で詰まらないことを確かめること。** 各ステップで「確認すること」が通らなければ、その場で止めて記録シート（末尾）に書く。
 
 - 題材：isucon14（matsuu の AMI `ami-0fcf9e8e8675a9ee4`、2026-09-28 検証済み。アプリ・nginx・MySQL・ベンチマーカーが入っている）
-- 構成：競技用 3台（c5.large）＋ ベンチ用 1台。本番と同じ形
-- 所要：4〜5時間（AWS 料金はおよそ c5.large × 4台 × 5時間）
+- 構成：競技用 3台（c5.large）＋ ベンチ用 1台（c5.2xlarge）。本番と同じ形
+- 所要：4〜5時間（AWS 料金はおよそ c5.large × 3台 ＋ c5.2xlarge × 1台、5時間分）
 - 進め方：2人ともブランチで開発し、サーバーは `isukit lock` / `unlock` で交代で使う（RUNBOOK §4）。§2 のリポジトリ作成は1人（リポジトリ係）、時刻と詰まった点の記録はもう1人
 
 ---
@@ -18,6 +18,8 @@ go install github.com/isucon2026/isukit/cmd/isukit@latest
 isukit version              # 全員で表示を突き合わせる（本番は凍結タグを指定する。RUNBOOK §3.5）
 gh auth status              # リポジトリ係は必須（go --new が gh で作る）
 ```
+
+`go install` は `~/go/bin`（`$(go env GOPATH)/bin`）に入れる。ここが PATH に無いと `isukit: command not found` になるので、シェルの設定に `export PATH="$HOME/go/bin:$PATH"` を足しておく。
 
 - [ ] 全員の `isukit version` が同じ
 - [ ] Discord に「練習」カテゴリ（#ベンチ・#サーバー・#git）を作り、その3つの Webhook を各自のシェルの設定に `export` した（RUNBOOK §3.6。本番用は前日に切り替える）
@@ -35,6 +37,9 @@ launch/prestage.sh --key-name isukit --key-file ~/claude-workspace/isukit.pem \
 ```
 
 - [ ] prestage が出力した「許可した CIDR の一覧」に、全員の IP がある（**起動後は変えられない**）
+- [ ] 同じ一覧で、HTTPS (443) にも全員の IP があり、最後に `all traffic between instances in sg-…: allowed` と出ている
+
+> prestage はセキュリティグループに、22 と 443（自分と `--allow-ip` の IP から）と、**グループ内の台どうしの全通信**を入れる（[#31](https://github.com/isucon2026/isukit/issues/31)）。isucon14 の README も「443 と 22 を開ける」と書いている。グループ内の通信が無いと、ベンチ用の台から app の台の Private IP（443）に届かず、app からベンチマーカーの決済サーバー（12346 など）への呼び出しも、分割後の app → db（3306）も通らない。古い isukit で作ったグループなら、prestage を流し直せば足りないルールだけが足される。
 
 ---
 
@@ -43,16 +48,24 @@ launch/prestage.sh --key-name isukit --key-file ~/claude-workspace/isukit.pem \
 > **本番はここが違う。** 本番は当日のマニュアルに従ってサーバーを用意する（ISUCON14 はチーム固有の CloudFormation のテンプレート、`isucon` ユーザー、GitHub の鍵。RUNBOOK §2-1）。この練習で `launch/` を使うのは、本番のテンプレートが手に入らないから。§2 以降（`go --new` から先）は、本番も同じ手順になる。
 
 ```
-launch/launch.sh --ami ami-0fcf9e8e8675a9ee4 --type c5.large --count 4 \
+launch/launch.sh --ami ami-0fcf9e8e8675a9ee4 --type c5.large --count 3 \
   --name-prefix isucon --root-gb 30 --yes
+launch/launch.sh --ami ami-0fcf9e8e8675a9ee4 --type c5.2xlarge --count 1 \
+  --name-prefix isucon-bench --root-gb 30 --yes
 ```
 
-`isucon-1`〜`3` を競技用、`isucon-4` をベンチ用にする。表示される **Public IP と Private IP を全部メモする**（以下 `<pub1>`〜`<pub4>`、`<priv1>`〜`<priv3>`）。
+`isucon-1`〜`3` を競技用、`isucon-bench-1` をベンチ用にする。表示される **Public IP と Private IP を全部メモする**（以下 `<pub1>`〜`<pub4>`、`<priv1>`〜`<priv4>`。4 がベンチ用）。
+
+**ベンチ用の台は c5.2xlarge（8 vCPU）にする。** isucon14 のベンチマーカーは本番では ECS Fargate の 8 vCPU / 8 GB で動いていた（isucon14 の README）。c5.large（2 vCPU）だとベンチマーカー側が先に詰まり、スコアが頭打ちになる。競技用の3台は本番どおり c5.large のまま。
 
 - [ ] 4台とも Public IP がついている
 - [ ] 全員が `ssh -i isukit.pem ubuntu@<pub1> true` できる
 
-> `launch.sh` は最後に、次に打つコマンド（`go --new`・`go`・`host role`）と各台の Private IP を表示する。
+> `launch.sh` は最後に、次に打つコマンド（`go --new`・`go`・`host role`）と各台の Private IP を表示する。2回目（ベンチ用）の案内は `isucon-bench-1` を起点にしているので使わず、1回目の案内に従う。
+
+**ログインするユーザー**：本番は `isucon` ユーザーに GitHub の鍵で入る。この練習は `ubuntu` ＋ AWS のキーペア（`isukit.pem`）。`isucon@` で練習したいときは、`isucon` の `~/.ssh/authorized_keys` に **GitHub の鍵と `isukit.pem` の公開鍵の両方**を入れる（`ssh-keygen -y -f isukit.pem` で公開鍵が出る）。`go` に `-i isukit.pem` を渡すと、`.isukit/ssh_config` にそれが `IdentityFile` として書かれ、ssh はふだんの鍵（`~/.ssh/id_*`）を試さなくなる。GitHub の鍵だけを入れた `isucon` には `Permission denied (publickey)` で入れない。ベンチ用の台は AWS の鍵のままなので、`-i` は外せない。
+
+**時刻**：サーバーの時計は UTC だが、isucon14 のベンチマーカーはログ（`bench.log`）を日本時間で出す。ベンチのログの時刻で `journalctl --since` を引くときは、9時間引いて UTC にする（例：`20:32` → `journalctl --since '11:32'`）か、`TZ=Asia/Tokyo journalctl --since '20:32'` のように日本時間で読ませる。
 
 ---
 
@@ -74,7 +87,7 @@ cd isu14-rehearsal-<日付>
 
 **ベンチのコマンドを確かめる**
 
-ベンチマーカーが別の台にあるとき、`benchprobe` は宛先を app の台の Private IP（`<priv1>`）にして組み立てる。ただし組み立ては `--help` から推測したものなので、必ず目で確かめる：
+ベンチマーカーが別の台にあるとき、`benchprobe` は宛先を app の台の Private IP（`<priv1>`）にして組み立てる。isucon14 のように `./bench run --help` にしかフラグが出ないベンチマーカーでも、サブコマンドの `--help` まで読む（`--target https://<nginx の server_name> --addr <priv1>:443`、決済サーバーの `--payment-url http://<priv4>:12345`）。ただし組み立ては `--help` から推測したものなので、必ず目で確かめる：
 
 ```
 isukit benchcmd                      # 組み立てたコマンドを表示
