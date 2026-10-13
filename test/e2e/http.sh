@@ -15,6 +15,19 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 http.server.HTTPServer(("0.0.0.0", int(sys.argv[1])), H).serve_forever()
 P
+# nginx's default server as handed out: its own 404 page whatever the Host; the
+# site answers only for its server_name
+cat > /tmp/vhost.py <<'P'
+import http.server, sys
+name = sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = name and self.headers.get("Host", "").split(":")[0] == name
+        self.send_response(200 if ok else 404); self.end_headers()
+        if not ok: self.wfile.write(b"<html><body><center><h1>404 Not Found</h1></center><hr><center>nginx</center></body></html>")
+    def log_message(self, *a): pass
+http.server.HTTPServer(("0.0.0.0", int(sys.argv[1])), H).serve_forever()
+P
 hc() { { printf 'SUDO=\n'; for kv in "$@"; do printf '%s\n' "$kv"; done; cat /k/remote/http-check.sh; } | bash -s; }
 
 python3 /tmp/srv.py 18080 200 & echo $! > /tmp/mainpid     # the app, as its unit's main process
@@ -29,4 +42,12 @@ check "no port found says so"                bash -c 'case "$0" in "FAIL|isu-go.
 # a service still starting: answers 3s into a 10s wait
 ( sleep 3; python3 /tmp/srv.py 18081 200 ) &
 check "retries while the box comes up"       bash -c '[ "$0" = "OK|http://127.0.0.1:18081/|200" ]' "$(hc MODE=app APP_PORT=18081 WAIT=10)"
+# through nginx: the server block that proxies, by its port and server_name (#39)
+python3 /tmp/vhost.py 18443 isu.test &
+python3 /tmp/vhost.py 18444 "" &
+mkdir -p /etc/nginx
+printf 'http {\n  server {\n    listen 18444 default_server;\n    root /var/www/html;\n  }\n  server {\n    listen 18443;\n    server_name isu.test;\n    location / { proxy_pass http://127.0.0.1:18080; }\n  }\n}\n' > /etc/nginx/nginx.conf
+sleep 1
+check "web: the site's own block, Host = its server_name" bash -c '[ "$0" = "OK|http://isu.test:18443/|200" ]' "$(hc MODE=web WAIT=2)"
+check "web: nginx's own 404 never reached the app"        bash -c 'case "$0" in "FAIL|http://other.test:18444/|404 from nginx itself"*) ;; *) exit 1 ;; esac' "$(hc MODE=web WEB_URL=http://other.test:18444 WAIT=2)"
 finish

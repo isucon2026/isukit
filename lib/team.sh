@@ -117,7 +117,20 @@ deploy_record() { # what is on the servers now: sha|branch|who|when
   sha=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo nogit)
   branch=$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
   repo_dirty && sha="$sha-dirty"
-  rsh "$(lock_host)" "sudo -n sh -c 'printf \"%s\\n\" \"$sha|$branch|$(who_am_i)|$(date +%s)\" > $DEPLOYED_FILE'" >/dev/null 2>&1 || true
+  deploy_record_write "$sha" "$branch"
+}
+deploy_record_write() { # deploy_record_write <sha> <branch>
+  rsh "$(lock_host)" "sudo -n sh -c 'printf \"%s\\n\" \"$1|$2|$(who_am_i)|$(date +%s)\" > $DEPLOYED_FILE'" >/dev/null 2>&1 || true
+}
+deploy_record_dirty() { # the servers now run config the deployed sha does not hold (final apply): <sha>-dirty, printed
+  # the same mark a deploy of an uncommitted tree gets, so bench records it,
+  # attribute calls it inconclusive and finalize refuses it until a clean
+  # deploy (ship + deploy) replaces it. the branch stays the deployed one.
+  local sha branch
+  read -r sha branch <<< "$(deployed)"
+  case "$sha" in *-dirty) ;; *) sha="$sha-dirty" ;; esac
+  deploy_record_write "$sha" "$branch"
+  printf '%s\n' "$sha"
 }
 deployed() { # "sha branch" the servers run: the deploy record, else this checkout
   local line root

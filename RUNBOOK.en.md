@@ -660,8 +660,8 @@ how good the idea is. This phase is about not losing what you already earned.
 isukit final check       # list everything that still logs or measures (changes nothing)
 isukit final apply       # turn off what config can (as an etc/ diff) + clean the hosts
 # remove what the app's code still does (pprof, request logger, debug) by hand -> isukit deploy
+isukit ship "final: output off" && isukit deploy   # final apply marks the deploy record <sha>-dirty until this
 isukit bench "final: output off"   # confirm the score holds or improves with it all off
-isukit ship "final: output off"
 isukit finalize          # logs off -> reboot ALL hosts -> verify units -> scoring run
 ```
 
@@ -675,7 +675,11 @@ echo / chi / gin request loggers, debug switches and `log.Print`. `final apply`
 turns off what config can — `access_log off;` and the logs set to 0 in the
 repo's `etc/`, then `etc push`, so it is a diff you can `git revert` — and
 cleans the hosts. The app's code is only listed: fix it by hand. `finalize`
-also runs `final check` first and warns about anything left.
+also runs `final check` first and warns about anything left. Since the hosts
+now run an uncommitted `etc/`, `final apply` marks the deploy record
+`<sha>-dirty` (as a deploy of a dirty tree would be): a bench before the next
+`ship` + `deploy` is recorded as dirty, `attribute` calls it inconclusive and
+`finalize` refuses it.
 
 `finalize` exists because runtime-only state evaporates on reboot, and the
 final scoring run happens on a machine that may have been restarted. If you have
@@ -684,9 +688,13 @@ up what its roles need (the app on app hosts, nginx on web hosts, MySQL on db
 hosts); restart order is not guaranteed.
 
 Active is not answering (500 with no DB, 502 with no upstream), so after the
-reboot it also asks over HTTP: every web host through nginx
-(`http://localhost/`), every app host directly (the port its unit's process
-listens on). 2xx-4xx is an answer; no answer or 5xx fails, with up to 60s of
+reboot it also asks over HTTP: every web host through nginx — to the server
+block that proxies to the app, at its listen port and scheme with its
+`server_name` as the Host (read off `nginx -T`; `FINAL_WEB_URL=https://<name>`
+names it instead), since `http://localhost/` lands on the default server —
+and every app host directly (the port its unit's process listens on). 2xx-4xx
+is an answer, except a 4xx nginx wrote itself (its own error page: the request
+never reached the app); no answer or 5xx fails, with up to 60s of
 retries while services start. `FINAL_CHECK_PATH` in `.isukit/config` (default
 `/`) picks the path — **make it one that touches the DB** so the DB connection
 is checked too; `FINAL_APP_PORT` if the port is not discoverable. Fix any

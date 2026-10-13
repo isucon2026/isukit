@@ -274,7 +274,11 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                    post pushes, PRs and CI results there. Every post starts with
                    [<repo>] (NOTIFY_TAG overrides)
     FINAL_CHECK_PATH  path finalize requests after the reboot (default /); pick one that
-                   touches the DB. FINAL_APP_PORT if the app's port is not discoverable
+                   touches the DB. FINAL_APP_PORT if the app's port is not discoverable.
+                   web hosts are asked through the server block that proxies to the app
+                   (its listen port and server_name, from nginx -T); FINAL_WEB_URL
+                   (https://<server_name>[:port]) names it instead. a 4xx nginx answers
+                   itself (the default server) never reached the app and fails
     PPROF_PORT     pprof listener on app hosts (default 6060); PPROF_SEC (30) and
                    PPROF_DELAY (5) shape the profile bench takes during the load
     isukit.conf    (repo root, committed) team-wide settings, read before .isukit/config

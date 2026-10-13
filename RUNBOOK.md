@@ -573,8 +573,8 @@ isukit final apply       # 設定で止められるものを止める（etc/ の
 isukit final strip       # 機械的に消せる分の差分を見る（sentinel ブロック・pprof import/route）
 isukit final strip --apply   # 書き込む（未コミット）。go build ./... が通らなければ全部戻す
 # 残りのアプリのコードの pprof・ロガー・デバッグ設定は手で外す → isukit deploy
+isukit ship "final: 出力オフ" && isukit deploy   # それまで final apply は deploy の記録を <sha>-dirty にしておく
 isukit bench "final: 出力オフ"   # 止めた状態でスコアが上がるか（下がらないか）を確かめる
-isukit ship "final: 出力オフ"
 isukit finalize          # logs off → 全ホスト再起動 → unitの復帰確認 → 採点用ベンチ
 ```
 
@@ -598,7 +598,7 @@ isukit finalize          # logs off → 全ホスト再起動 → unitの復帰�
 
 `finalize` があるのは、**実行時だけの状態は再起動で消える**のに、最終採点は再起動されたかもしれないマシンで走るから。複数ホストがある場合は全部を再起動し、各台の役割に必要な unit（app ならアプリ、web なら nginx、db なら MySQL）が自分で上がってくるかを確かめる。再起動順は保証されない。
 
-**unit が動いていても、応答するとは限らない**（DB につながらずに 500、nginx の転送先が無くて 502）。そこで再起動後に HTTP でも確かめる：web の台は nginx 経由（`http://localhost/`）、app の台はアプリに直接（unit のプロセスが待ち受けているポート）。2xx〜4xx なら応答あり、応答なし・5xx なら失敗で、起動途中を考えて最大60秒待つ。確かめるパスは `.isukit/config` の `FINAL_CHECK_PATH`（既定 `/`）で、**DB を触るエンドポイントにしておく**と DB への接続まで確かめられる。ポートが見つからないときは `FINAL_APP_PORT`。失敗した台があれば、ポータルで最終計測を流す前に直す。
+**unit が動いていても、応答するとは限らない**（DB につながらずに 500、nginx の転送先が無くて 502）。そこで再起動後に HTTP でも確かめる：web の台は nginx 経由で、アプリに転送する server ブロックに送る（`nginx -T` から読んだ listen のポートとスキーム、`server_name` を Host にする。`http://localhost/` は既定の server に当たってアプリまで届かないため。`FINAL_WEB_URL=https://<名前>` で直接指定もできる）。app の台はアプリに直接（unit のプロセスが待ち受けているポート）。2xx〜4xx なら応答あり（ただし nginx 自身のエラーページの 4xx は、アプリに届いていないので失敗）、応答なし・5xx なら失敗で、起動途中を考えて最大60秒待つ。確かめるパスは `.isukit/config` の `FINAL_CHECK_PATH`（既定 `/`）で、**DB を触るエンドポイントにしておく**と DB への接続まで確かめられる。ポートが見つからないときは `FINAL_APP_PORT`。失敗した台があれば、ポータルで最終計測を流す前に直す。
 
 以下は手で確認する：
 

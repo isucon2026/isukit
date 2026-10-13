@@ -99,8 +99,12 @@ cmd_restart() {
     # never let one host abort the loop: a silent partial restart is exactly
     # what fails the post-contest verification. collect failures, report them
     # all, fail at the end. (db-only / web-only hosts are not app hosts.)
+    # remote/restart.sh: daemon-reload first if a unit file changed, then every
+    # unit must still be active a few seconds on (one `active` right after the
+    # restart proved nothing in #34); if one is not, systemd's view of it is
+    # printed and it is restarted once more.
     rc=0
-    rsh "$h" "sudo -n systemctl restart $units && sleep 2 && systemctl is-active $units" || rc=$?
+    { printf 'UNITS=%q\n' "$units"; remote_script restart.sh; } | rsh_stdin "$h" || rc=$?
     [ "$rc" = 0 ] || { warn "restart failed on $h (rc=$rc) — that host may not run all of: $units"; bad="$bad $h"; }
   done
   [ -z "$bad" ] || die "restart incomplete on:$bad — fix before any scoring run"
@@ -112,7 +116,9 @@ cmd_restart() {
 finalize_http() { # print one "OK|url|code" / "FAIL|url|why" per web and app host
   local h
   for h in $(hosts_with web); do
-    { printf 'MODE=web\nPATH_=%q\nWAIT=%q\n' "${FINAL_CHECK_PATH:-/}" "${FINAL_HTTP_WAIT:-60}"; remote_script http-check.sh; } \
+    # to the site's own server block (listen port, server_name), read off nginx -T
+    # there unless FINAL_WEB_URL names it — never just http://localhost
+    { printf 'MODE=web\nPATH_=%q\nWEB_URL=%q\nWAIT=%q\n' "${FINAL_CHECK_PATH:-/}" "${FINAL_WEB_URL:-}" "${FINAL_HTTP_WAIT:-60}"; remote_script http-check.sh; } \
       | rsh_stdin "$h" 2>/dev/null | sed "s|^|$h |" || echo "$h FAIL|nginx|could not run the check"
   done
   for h in $(hosts_with app); do
@@ -190,7 +196,8 @@ cmd_finalize() {
     # host is assumed to be a copy of the probed one.
     if [ -f "$HOSTS_FILE" ]; then want=$(role_units "$h"); else want="${UNITS_ACTIVE:-}"; fi
     [ -n "$want" ] || continue
-    rsh "$h" "systemctl is-active $want" \
+    # one state per unit; `systemctl is-active a b` alone succeeds when ANY is active
+    rsh "$h" "st=\$(systemctl is-active $want); echo \"\$st\"; ! printf '%s\\n' \"\$st\" | grep -vqx active" \
       || { units_bad=$((units_bad + 1)); warn "some units did not come up on their own on $h — enable them: ssh ${SSH_OPTS:-} $h sudo systemctl enable --now $want"; }
   done
   # active is not answering: ask every web host through nginx and every app host
@@ -203,7 +210,7 @@ cmd_finalize() {
   bad=$(printf '%s\n' "$http" | grep -c ' FAIL|' || true)
   if [ "$bad" != 0 ]; then
     warn "$bad host(s) do not answer after the reboot — fix that before any scoring run (journalctl -u <unit>, is the DB reachable?)"
-    warn "FINAL_CHECK_PATH in $CONF picks a path that touches the DB; FINAL_APP_PORT if the app port is not discoverable"
+    warn "FINAL_CHECK_PATH in $CONF picks a path that touches the DB; FINAL_WEB_URL (https://<server_name>) the site nginx serves it on; FINAL_APP_PORT if the app port is not discoverable"
   fi
   printf '🏁 %s ran finalize — reboot: every host back; units: %s; HTTP: %s%s\n' "$(who_am_i)" \
     "$([ "$units_bad" = 0 ] && echo "all up" || echo "$units_bad host(s) missing some")" \
