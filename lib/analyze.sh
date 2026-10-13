@@ -9,7 +9,19 @@ cmd_alp() { # alp [--patterns]
     "") ;;
     *) die "usage: isukit alp [--patterns]" ;;
   esac
-  on_hosts web alp_one
+  [ "${ALP_PRINT:-0}" = 1 ] || { on_hosts web alp_one; return; }
+  local out last="" d err="$STATE/.alp-patterns.err"
+  out=$(on_hosts web alp_one 2>"$err") || true
+  if [ -n "$out" ]; then cat "$err" >&2; rm -f "$err"; printf '%s\n' "$out"; return 0; fi
+  # every bench empties the live log when it is done, so right after one there
+  # is nothing to group: show the groups the latest run saved instead
+  while IFS= read -r d; do
+    [ -s "$d/alp-patterns.txt" ] && last="$d/alp-patterns.txt"
+  done < <(runs_view | awk -F'\t' '$5 != "" { print $5 }')
+  [ -n "$last" ] || { cat "$err" >&2; rm -f "$err"; die "no URI groups in the live log, and no saved run has any yet — run: isukit logs on, then a bench"; }
+  rm -f "$err"
+  say "nothing to group in the live log (emptied after each bench) — the groups of the latest run, $last:"
+  cat "$last"
 }
 
 alp_one() { # alp_one [log] -- default: this host's live isukit.log
@@ -43,7 +55,10 @@ slow_one() {
     rsh "$APP" "command -v pt-query-digest >/dev/null" || die "pt-query-digest still not installed after isukit setup — install by hand on $APP"
   }
   say "pt-query-digest (top queries by total time)"
-  rsh "$APP" "set -o pipefail; sudo -n pt-query-digest --limit=15 /tmp/isukit-slow.log | head -80"
+  # whole: --limit already bounds it, and the per-query sections after the
+  # profile (full statement, rows examined) are what you index from — a head
+  # cut kept the profile and the first query only
+  rsh "$APP" "sudo -n pt-query-digest --limit=15 /tmp/isukit-slow.log"
 }
 
 cmd_pprof() { # pprof [sec] [port] | pprof on | pprof off
@@ -61,7 +76,7 @@ cmd_pprof_pull() {
   [ -n "$APP" ] || die "no host has role app — set one: isukit host role <target> app"
   say "CPU profile ${sec}s via $APP:$port/debug/pprof — needs net/http/pprof imported and a listener in the app"
   rsh "$APP" "curl -s -o /tmp/isukit-cpu.pprof 'http://localhost:$port/debug/pprof/profile?seconds=$sec'" \
-    || die "pprof endpoint not reachable — add: import _ \"net/http/pprof\"  +  go func(){ http.ListenAndServe(\":$port\", nil) }()"
+    || { warn "pprof endpoint not reachable on $APP:$port"; pprof_hint "$port"; die "no profile taken"; }
   rpull "$APP" /tmp/isukit-cpu.pprof "$STATE/cpu.pprof"
   say "go tool pprof -http=: $STATE/cpu.pprof"
 }

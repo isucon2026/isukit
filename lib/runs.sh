@@ -6,7 +6,8 @@
 #   bench.log     benchmarker output (auto mode)
 #   hosts.txt     per host: cpu avg/max/iowait + the top processes, sampled 1s
 #   alp.txt       endpoints for this run only (every web host's log, merged)
-#   slow-<h>.txt  pt-query-digest per db host
+#   alp-patterns.txt  the URI groups alp.txt was cut by (`isukit alp --patterns`)
+#   slow-<h>.txt  pt-query-digest per db host, whole (show prints its profile)
 #   cpu.pprof     a CPU profile taken while the load was on (first app host)
 #   meta          when / sha / score / note
 # Measuring happens only while `isukit logs on` is in effect, so a logs-off
@@ -43,7 +44,8 @@ pprof_begin() { # pprof_begin <run-dir> -- start a CPU profile on the first app 
   # a profile left by an earlier run (or `isukit pprof`) must never pass for this one
   rsh "$h" "rm -f /tmp/isukit-cpu.pprof /tmp/isukit-cpu.pprof.part" 2>/dev/null || true
   if [ "$(rsh "$h" "curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://localhost:$port/debug/pprof/" 2>/dev/null)" != 200 ]; then
-    say "pprof: no endpoint on $h:$port — skipped (import _ \"net/http/pprof\" + a listener; PPROF_PORT in config)"
+    say "pprof: no endpoint on $h:$port — skipped (PPROF_PORT in config if it listens elsewhere)"
+    pprof_hint "$port"
     return 0
   fi
   rsh "$h" "setsid nohup sh -c 'sleep $delay; curl -s --max-time $((sec + 30)) -o /tmp/isukit-cpu.pprof.part \"http://localhost:$port/debug/pprof/profile?seconds=$sec\" && mv /tmp/isukit-cpu.pprof.part /tmp/isukit-cpu.pprof' >/dev/null 2>&1 < /dev/null &" \
@@ -67,8 +69,14 @@ pprof_collect() { # pprof_collect <run-dir> -- wait for the profile to finish, t
   rm -f "$1/.pprof-started"
 }
 
+pprof_hint() { # pprof_hint <port> -- how to give the app an endpoint, where one is missing
+  say "pprof: 'isukit pprof on' wires one into func main() (uncommitted), or add it by hand:"
+  say "    import _ \"net/http/pprof\""
+  say "    go func() { log.Println(http.ListenAndServe(\"127.0.0.1:$1\", nil)) }()"
+}
+
 run_alp() { # run_alp <out> -- alp over every web host's log, merged onto the first one
-  local webs first h
+  local webs first h log="" pat="${1%.txt}-patterns.txt"
   webs=$(hosts_with web)
   first=$(printf '%s\n' $webs | head -1)
   [ -n "$first" ] || return 0
@@ -80,13 +88,16 @@ run_alp() { # run_alp <out> -- alp over every web host's log, merged onto the fi
       rsh "$h" "sudo -n cat /var/log/nginx/isukit.log 2>/dev/null" | rsh "$first" "sudo -n tee -a /tmp/isukit-alp.log >/dev/null" \
         || warn "alp: could not merge $h's log — alp shows the other web hosts only"
     done
-    # shellcheck disable=SC2034  # HOST_OVERRIDE is read by load() in lib/core.sh
-    ( HOST_OVERRIDE="$first"; load; alp_one /tmp/isukit-alp.log ) > "$1" 2>/dev/null || true
-  else
-    # shellcheck disable=SC2034  # HOST_OVERRIDE is read by load() in lib/core.sh
-    ( HOST_OVERRIDE="$first"; load; alp_one ) > "$1" 2>/dev/null || true
+    log=/tmp/isukit-alp.log
   fi
-  [ -s "$1" ] || { rm -f "$1"; warn "alp: nothing to report for this run"; }
+  # shellcheck disable=SC2034  # HOST_OVERRIDE is read by load() in lib/core.sh
+  ( HOST_OVERRIDE="$first"; load; alp_one ${log:+"$log"} ) > "$1" 2>/dev/null || true
+  [ -s "$1" ] || { rm -f "$1"; warn "alp: nothing to report for this run"; return 0; }
+  # the groups it was cut by, kept next to it: run_end empties the live log
+  # right after, so `isukit alp --patterns` has nothing left to derive them from
+  # shellcheck disable=SC2034  # HOST_OVERRIDE is read by load() in lib/core.sh
+  ( HOST_OVERRIDE="$first"; load; ALP_PRINT=1 alp_one ${log:+"$log"} ) > "$pat" 2>/dev/null || true
+  [ -s "$pat" ] || rm -f "$pat"
 }
 
 run_end() { # run_end <run-dir> <sampled 0|1> -- collect everything, then empty the logs
@@ -137,10 +148,12 @@ run_summary() { # run_summary <run-dir> -- the short view printed after a run an
   [ -f "$run/meta" ] && awk '{ i = index($0, "="); printf "%s %s   ", substr($0, 1, i - 1), substr($0, i + 1) } END { print "" }' "$run/meta"
   if [ -s "$run/hosts.txt" ]; then echo; echo "== hosts (while the load was on) =="; cat "$run/hosts.txt"; fi
   if [ -s "$run/alp.txt" ]; then echo "== alp (top 15 by sum) =="; head -18 "$run/alp.txt"; echo; fi
+  [ -s "$run/alp-patterns.txt" ] && echo "alp groups: $run/alp-patterns.txt"
   for f in "$run"/slow-*.txt; do
     [ -s "$f" ] || continue
     echo "== slow: $(basename "$f" .txt | sed 's/^slow-//') =="
     awk '/^# Profile/ { on = 1 } on && NF == 0 { exit } on' "$f"
+    echo "each query in full: $f"
     echo
   done
   [ -f "$run/cpu.pprof" ] && echo "pprof: go tool pprof -http=: $run/cpu.pprof"

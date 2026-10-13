@@ -3,7 +3,8 @@
 #
 # Verifies (and creates only what the team owns) everything that CAN be nailed
 # down before the organizers publish the AMI: account identity, key pair, VPC/
-# subnet, and a security group scoped to the operator's own IP. Never launches
+# subnet, and a security group scoped to the operator's own IP (22/443) plus
+# all traffic between its own members. Never launches
 # an instance — instance count/type/AMI are read off the day-of manual by a
 # human and passed to launch.sh, not guessed here.
 #
@@ -154,42 +155,83 @@ sg_id=$(aws ec2 describe-security-groups --region "$region" \
 if [ -z "$sg_id" ] || [ "$sg_id" = "None" ]; then
   say "creating security group '$sg_name' in $vpc_id..."
   sg_id=$(aws ec2 create-security-group --region "$region" --vpc-id "$vpc_id" \
-    --group-name "$sg_name" --description "isukit: ssh from operator IP only" \
+    --group-name "$sg_name" --description "isukit: ssh/https from operator IPs, all traffic within the group" \
     --query 'GroupId' --output text) || die "create-security-group failed"
 fi
 say "security group: $sg_id"
+
+# authorize <what> <ingress args>... -- add one ingress rule, tolerating one
+# that is already there: AWS rejects an exact duplicate with
+# InvalidPermission.Duplicate ("... already exists"), which is what a rule
+# added by hand, or a describe that missed it, looks like on a re-run.
+authorize() {
+  local what="$1" err; shift
+  err=$(aws ec2 authorize-security-group-ingress --region "$region" --group-id "$sg_id" "$@" 2>&1 >/dev/null) && return 0
+  case "$err" in
+    *InvalidPermission.Duplicate*|*"already exists"*) say "$what already authorized" ;;
+    *) printf '%s\n' "$err" >&2; die "authorize-security-group-ingress failed for $what" ;;
+  esac
+}
 
 # chaining two JMESPath filter-projections (IpPermissions[?..].IpRanges[?..])
 # does not filter each element's CidrIp — it always evaluates to empty
 # regardless of the SG's actual contents. Flatten once up front and test
 # membership in bash instead.
-existing_cidrs_raw=$(aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
-  --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[].CidrIp" \
-  --output text 2>/dev/null || true)
-IFS=$'\t\n' read -r -d '' -a existing_cidrs < <(printf '%s\0' "$existing_cidrs_raw")
+port_cidrs() { # <port> -- the CIDRs the SG allows on <port>, one per line
+  aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
+    --query "SecurityGroups[0].IpPermissions[?ToPort==\`$1\`].IpRanges[].CidrIp" \
+    --output text 2>/dev/null | tr '\t' '\n' | sed '/^$/d' | sort -u || true
+}
 
-for cidr in "${targets[@]}"; do
-  if list_has "$cidr" "${existing_cidrs[@]+"${existing_cidrs[@]}"}"; then
-    say "SSH from $cidr already authorized"
-  else
-    say "authorizing SSH (22) from $cidr..."
-    aws ec2 authorize-security-group-ingress --region "$region" --group-id "$sg_id" \
-      --protocol tcp --port 22 --cidr "$cidr" >/dev/null \
-      || die "authorize-security-group-ingress failed for $cidr"
-  fi
+# 22 for ssh, 443 because the contest's own manual opens it (isucon14: "443 and
+# 22") and a teammate's browser or a bench run from a laptop reaches the app there.
+for port in 22 443; do
+  existing_cidrs=()
+  while IFS= read -r c; do existing_cidrs+=("$c"); done < <(port_cidrs "$port")
+  for cidr in "${targets[@]}"; do
+    if list_has "$cidr" "${existing_cidrs[@]+"${existing_cidrs[@]}"}"; then
+      say "$port from $cidr already authorized"
+    else
+      say "authorizing $port from $cidr..."
+      authorize "$port from $cidr" --protocol tcp --port "$port" --cidr "$cidr"
+    fi
+  done
 done
+
+# all traffic between members of the group: the bench box reaches the app on
+# its private IP (443), the app calls the benchmarker's payment server back
+# (isucon14: 12346), and a split app->db needs 3306. None of these are known
+# before the manual, and the group can't change after launch — so allow the
+# group to itself, whatever the ports turn out to be.
+self_groups() {
+  aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
+    --query "SecurityGroups[0].IpPermissions[?IpProtocol=='-1'].UserIdGroupPairs[].GroupId" \
+    --output text 2>/dev/null | tr '\t' '\n' || true
+}
+if self_groups | grep -qx "$sg_id"; then
+  say "all traffic within $sg_id already authorized"
+else
+  say "authorizing all traffic within $sg_id (instance to instance)..."
+  authorize "all traffic within $sg_id" --ip-permissions "IpProtocol=-1,UserIdGroupPairs=[{GroupId=$sg_id}]"
+fi
 
 # query back what's actually in the SG rather than echoing input — the point
 # is to show ground truth before launch, since the rules forbid changing it after.
-authorized=$(aws ec2 describe-security-groups --region "$region" --group-ids "$sg_id" \
-  --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\`].IpRanges[].CidrIp" --output text \
-  | tr '\t' '\n' | sort -u)
+authorized=$(port_cidrs 22)
+authorized_https=$(port_cidrs 443)
 
 say "SSH (22) currently authorized from:"
 printf '%s\n' "$authorized" | while read -r c; do printf '     %s\n' "$c" >&2; done
+say "HTTPS (443) currently authorized from:"
+printf '%s\n' "$authorized_https" | while read -r c; do printf '     %s\n' "$c" >&2; done
+if self_groups | grep -qx "$sg_id"; then
+  say "all traffic between instances in $sg_id: allowed"
+else
+  warn "all traffic between instances in $sg_id: NOT allowed — the bench box won't reach the app's private IP"
+fi
 
 warn "changing a security group AFTER instances are launched is prohibited by the rules — every teammate's IP must be in the list above before launch.sh runs. missing one? re-run with: --allow-ip <their-ip>"
-warn "the day-of manual may require opening OTHER ports (e.g. the app port, envcheck) — add those rules HERE, before launch."
+warn "the day-of manual may require opening OTHER ports from outside (e.g. 80, envcheck) — add those rules HERE, before launch."
 
 # ---------------------------------------------------------------- write env
 cat > "$envfile" <<EOF
@@ -202,6 +244,7 @@ SUBNET_ID=$subnet_id
 SUBNET_PUBLIC_IP=true
 SG_ID=$sg_id
 SG_ALLOWED_CIDRS="$(printf '%s' "$authorized" | tr '\n' ' ' | sed 's/ *$//')"
+SG_HTTPS_CIDRS="$(printf '%s' "$authorized_https" | tr '\n' ' ' | sed 's/ *$//')"
 EOF
 
 say "wrote $envfile"

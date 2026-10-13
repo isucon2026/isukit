@@ -152,7 +152,9 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
     isukit alp [--patterns]             top endpoints by SUMMED response time.
                                          URIs are grouped by regexes derived from
                                          the log (ids, high fan-out segments);
-                                         --patterns prints them. ALP_MATCHES in the
+                                         --patterns prints them (after a bench, the
+                                         latest run's; each run keeps its own in
+                                         alp-patterns.txt). ALP_MATCHES in the
                                          config replaces them with your own
     isukit slow                         top queries by total time
     isukit pprof [sec] [port]           pull a Go CPU profile

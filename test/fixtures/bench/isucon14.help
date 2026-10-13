@@ -1,0 +1,17 @@
+ISUCON14 benchmarker
+
+Usage:
+  bench [command]
+
+Available Commands:
+  completion         Generate the autocompletion script for the specified shell
+  generate-init-data 初期データをDBに生成する
+  help               Help about any command
+  run                Run a benchmark
+  version            Print the version number
+
+Flags:
+  -h, --help      help for bench
+  -v, --version   version for bench
+
+Use "bench [command] --help" for more information about a command.

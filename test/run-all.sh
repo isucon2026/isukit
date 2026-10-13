@@ -33,7 +33,7 @@ BENCH_RC=$?
 echo "$BENCH_OUT"
 
 # etc, hosts and rules cases are scenarios, not per-year fixtures: full runs only.
-ETC_OUT=""; ETC_RC=0; HOSTS_OUT=""; HOSTS_RC=0; ALP_OUT=""; ALP_RC=0; RULES_OUT=""; RULES_RC=0; PROV_OUT=""; PROV_RC=0; SHIP_OUT=""; SHIP_RC=0; NOTES_OUT=""; NOTES_RC=0; FIN_OUT=""; FIN_RC=0; STRIP_OUT=""; STRIP_RC=0; PPROF_OUT=""; PPROF_RC=0; MEAS_OUT=""; MEAS_RC=0
+ETC_OUT=""; ETC_RC=0; HOSTS_OUT=""; HOSTS_RC=0; ALP_OUT=""; ALP_RC=0; RULES_OUT=""; RULES_RC=0; PROV_OUT=""; PROV_RC=0; SHIP_OUT=""; SHIP_RC=0; NOTES_OUT=""; NOTES_RC=0; FIN_OUT=""; FIN_RC=0; STRIP_OUT=""; STRIP_RC=0; PPROF_OUT=""; PPROF_RC=0; MEAS_OUT=""; MEAS_RC=0; PRE_OUT=""; PRE_RC=0
 if [ -z "$ONLY" ]; then
   ETC_OUT="$("$HERE/run-etc-tests.sh" ${FLAGS+"${FLAGS[@]}"})"
   ETC_RC=$?
@@ -68,6 +68,9 @@ if [ -z "$ONLY" ]; then
   MEAS_OUT="$("$HERE/run-measure-tests.sh" ${FLAGS+"${FLAGS[@]}"} 2>/dev/null)"
   MEAS_RC=$?
   echo "$MEAS_OUT"
+  PRE_OUT="$("$HERE/run-prestage-tests.sh" ${FLAGS+"${FLAGS[@]}"} 2>/dev/null)"
+  PRE_RC=$?
+  echo "$PRE_OUT"
 fi
 
 parse_summary() {
@@ -88,12 +91,13 @@ read -r F_TOTAL F_PASS F_FAIL <<< "$(parse_summary "$FIN_OUT")"
 read -r X_TOTAL X_PASS X_FAIL <<< "$(parse_summary "$STRIP_OUT")"
 read -r PP_TOTAL PP_PASS PP_FAIL <<< "$(parse_summary "$PPROF_OUT")"
 read -r MEAS_TOTAL MEAS_PASS MEAS_FAIL <<< "$(parse_summary "$MEAS_OUT")"
+read -r PRE_TOTAL PRE_PASS PRE_FAIL <<< "$(parse_summary "$PRE_OUT")"
 
 # A skipped suite prints no summary line, so parse_summary yields empty fields.
-TOTAL=$((${P_TOTAL:-0} + ${B_TOTAL:-0} + ${E_TOTAL:-0} + ${H_TOTAL:-0} + ${A_TOTAL:-0} + ${R_TOTAL:-0} + ${V_TOTAL:-0} + ${S_TOTAL:-0} + ${N_TOTAL:-0} + ${F_TOTAL:-0} + ${X_TOTAL:-0} + ${PP_TOTAL:-0} + ${MEAS_TOTAL:-0}))
-PASS=$((${P_PASS:-0} + ${B_PASS:-0} + ${E_PASS:-0} + ${H_PASS:-0} + ${A_PASS:-0} + ${R_PASS:-0} + ${V_PASS:-0} + ${S_PASS:-0} + ${N_PASS:-0} + ${F_PASS:-0} + ${X_PASS:-0} + ${PP_PASS:-0} + ${MEAS_PASS:-0}))
-FAIL=$((${P_FAIL:-0} + ${B_FAIL:-0} + ${E_FAIL:-0} + ${H_FAIL:-0} + ${A_FAIL:-0} + ${R_FAIL:-0} + ${V_FAIL:-0} + ${S_FAIL:-0} + ${N_FAIL:-0} + ${F_FAIL:-0} + ${X_FAIL:-0} + ${PP_FAIL:-0} + ${MEAS_FAIL:-0}))
+TOTAL=$((${P_TOTAL:-0} + ${B_TOTAL:-0} + ${E_TOTAL:-0} + ${H_TOTAL:-0} + ${A_TOTAL:-0} + ${R_TOTAL:-0} + ${V_TOTAL:-0} + ${S_TOTAL:-0} + ${N_TOTAL:-0} + ${F_TOTAL:-0} + ${X_TOTAL:-0} + ${PP_TOTAL:-0} + ${MEAS_TOTAL:-0} + ${PRE_TOTAL:-0}))
+PASS=$((${P_PASS:-0} + ${B_PASS:-0} + ${E_PASS:-0} + ${H_PASS:-0} + ${A_PASS:-0} + ${R_PASS:-0} + ${V_PASS:-0} + ${S_PASS:-0} + ${N_PASS:-0} + ${F_PASS:-0} + ${X_PASS:-0} + ${PP_PASS:-0} + ${MEAS_PASS:-0} + ${PRE_PASS:-0}))
+FAIL=$((${P_FAIL:-0} + ${B_FAIL:-0} + ${E_FAIL:-0} + ${H_FAIL:-0} + ${A_FAIL:-0} + ${R_FAIL:-0} + ${V_FAIL:-0} + ${S_FAIL:-0} + ${N_FAIL:-0} + ${F_FAIL:-0} + ${X_FAIL:-0} + ${PP_FAIL:-0} + ${MEAS_FAIL:-0} + ${PRE_FAIL:-0}))
 
 echo "$TOTAL fixtures, $PASS passed, $FAIL failed"
 
-[ "$PROBE_RC" -eq 0 ] && [ "$BENCH_RC" -eq 0 ] && [ "$ETC_RC" -eq 0 ] && [ "$HOSTS_RC" -eq 0 ] && [ "$ALP_RC" -eq 0 ] && [ "$RULES_RC" -eq 0 ] && [ "$PROV_RC" -eq 0 ] && [ "$SHIP_RC" -eq 0 ] && [ "$NOTES_RC" -eq 0 ] && [ "$FIN_RC" -eq 0 ] && [ "$STRIP_RC" -eq 0 ] && [ "$PPROF_RC" -eq 0 ] && [ "$MEAS_RC" -eq 0 ]
+[ "$PROBE_RC" -eq 0 ] && [ "$BENCH_RC" -eq 0 ] && [ "$ETC_RC" -eq 0 ] && [ "$HOSTS_RC" -eq 0 ] && [ "$ALP_RC" -eq 0 ] && [ "$RULES_RC" -eq 0 ] && [ "$PROV_RC" -eq 0 ] && [ "$SHIP_RC" -eq 0 ] && [ "$NOTES_RC" -eq 0 ] && [ "$FIN_RC" -eq 0 ] && [ "$STRIP_RC" -eq 0 ] && [ "$PPROF_RC" -eq 0 ] && [ "$MEAS_RC" -eq 0 ] && [ "$PRE_RC" -eq 0 ]

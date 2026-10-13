@@ -1,0 +1,16 @@
+Run a benchmark
+
+Usage:
+  bench run [flags]
+
+Flags:
+      --addr string                benchmark target ip:port
+      --fail-on-error              fail on error
+  -h, --help                       help for run
+  -t, --load-timeout int           load timeout in seconds (When this value is 0, load does not run and only prepare is run) (default 60)
+      --metrics                    whether to output metrics
+      --only-post-validation       post validation mode
+      --payment-bind-port int      payment server bind port (default 12345)
+      --payment-url string         payment server URL (default "http://localhost:12345")
+  -s, --skip-static-sanity-check   skip static file validation
+      --target string              benchmark target url (default "http://localhost:8080")
