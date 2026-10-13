@@ -345,6 +345,9 @@ and check them with `isukit hosts`. Commands then go where their tier runs: depl
 / pprof to app hosts, nginx logging and alp to web hosts, the slow log and slow to db hosts,
 etc and os to every host. Roles only route isukit; stopping mysql on app hosts, the db
 host's bind-address and grants, and the app's DB_HOST are still done by hand.
+The box `isukit go` set up is already listed as `isukit-app`; naming it by IP updates that
+line (matched through `.isukit/ssh_config`'s HostName) rather than adding a second one, and
+`isukit host rm <target>` drops a line.
 Without `.isukit/hosts`, extra hosts are plain app instances:
 
 ```
@@ -754,6 +757,7 @@ These are the generic ways teams lose everything, independent of the year's prob
 isukit go --new <team>/<repo> <host> -i <key> [--invite u1,u2]
                             # no repo yet: build it from the server (code + config baselines)
 isukit host role <t> <roles> # app / web / db, comma-separated (.isukit/hosts)
+isukit host rm <t>          # drop a host from the roles file
 isukit hosts                # hosts, roles, and the units each must run
 isukit doctor               # diagnose + auto-repair config, connectivity, bench mode
 isukit os                   # server snapshot: uptime / vmstat / iostat / mpstat / free / df
