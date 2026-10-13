@@ -272,11 +272,20 @@ t_etc_pull_leaves_out_disagreeing_files() {
   check -z "$(grep exclude "$CALLS")"
 }
 
-t_etc_adopt_by_role() {
+t_etc_adopt_by_role_seeds_from_local() {
   setup_state isu1 "" "$ROLES"
   load
+  local_repo_root() { printf '%s\n' "$WORK/app"; }
+  mkdir -p "$WORK/app/etc/mysql"; printf '[mysqld]\n' > "$WORK/app/etc/mysql/mysqld.cnf"
+  etc_rsync() { printf '%s rsync %s -> %s %s\n' "$APP" "$1" "$2" "${*:3}" >> "$CALLS"; }
   on_hosts all etc_adopt_one
-  # each host links only the tiers its roles run
+  # the team's files reach each host's server repo first (never over its own)...
+  check "$(hosts_called "rsync $WORK/app/etc/ -> .*:/home/isucon/webapp/etc/ --ignore-existing")" = "isu1 isu2 isu3"
+  local h
+  for h in isu1 isu2 isu3; do
+    check "$(grep -n "^$h " "$CALLS" | grep -m1 -E 'rsync|stdin:' | grep -c rsync)" = 1
+  done
+  # ...then each host links only the tiers its roles run
   check -n "$(grep '^isu1 stdin: .*WANT_NGINX=1 WANT_MYSQL=0 WANT_APP=1 APP_UNIT=isu-go.service' "$CALLS")"
   check -n "$(grep '^isu2 stdin: .*WANT_NGINX=0 WANT_MYSQL=0 WANT_APP=1' "$CALLS")"
   check -n "$(grep '^isu3 stdin: .*WANT_NGINX=0 WANT_MYSQL=1 WANT_APP=0' "$CALLS")"
@@ -720,7 +729,7 @@ case_ bench-clean-when-logs-off       t_bench_clean_when_logs_off
 case_ manual-score-collects-its-run   t_manual_score_collects_run
 case_ logs-space-guard-on-db-hosts    t_logs_space_guard_on_db_hosts
 case_ etc-pull-leaves-out-disagreeing t_etc_pull_leaves_out_disagreeing_files
-case_ etc-adopt-by-role              t_etc_adopt_by_role
+case_ etc-adopt-by-role-seeds-local  t_etc_adopt_by_role_seeds_from_local
 case_ etc-push-reloads-by-role       t_etc_push_reloads_by_role
 case_ etc-push-nginx-outcomes        t_etc_push_nginx_outcomes
 case_ host-app-moves-hosts-line       t_host_app_moves_hosts_line

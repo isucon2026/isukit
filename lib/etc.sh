@@ -101,9 +101,18 @@ cmd_etc_adopt() {
 }
 
 etc_adopt_one() {
-  local repo targets="$*" rc=0
+  local repo root targets="$*" rc=0
   repo=$(etc_repo)
+  root=$(local_repo_root)
   logs_are_on && etc_flag relog
+  # A host joining later still has its stock config, and adopt keeps the server
+  # repo's copy over /etc's. Seed that repo with every file the local etc/ has
+  # and it lacks, so the new host starts from the team's tuned config instead
+  # of moving its stock one in (and then disagreeing with the rest at pull).
+  if [ -d "$root/etc" ] && [ -n "$(ls -A "$root/etc" 2>/dev/null)" ]; then
+    say "etc adopt: local etc/ -> $APP:$repo/etc/ (only files missing there — the repo copy wins over $APP's own)"
+    etc_rsync "$root/etc/" "$APP:$repo/etc/" --ignore-existing || die "rsync to $APP failed"
+  fi
   say "etc adopt on $APP: /etc -> $repo/etc/ (symlinks; replaced files backed up under /etc/isukit-orig/)"
   { printf 'REPO=%q\nTARGETS=%q\n' "$repo" "$targets"; etc_role_vars; remote_script etc-adopt.sh; } \
     | rsh_stdin "$APP" || rc=$?
