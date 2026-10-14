@@ -121,11 +121,28 @@ t_config_override_wins() {
   check "$(printf '%s\n' "$OUT" | tr '\n' ' ')" = '^/x$ ^/y/[0-9]+$ '
 }
 
+# alp's --limit caps distinct URI groups, not rows: passing the row count (30)
+# made alp abort with "Too many URI's" on isucon14 (30+ endpoints). Needs the
+# real alp binary, so it is skipped where alp isn't installed.
+t_many_groups_still_render() {
+  command -v alp >/dev/null || { echo "      (skipped: no alp on PATH)"; return 0; }
+  local log="$WORK/many.log" i
+  for i in $(seq 1 40); do
+    printf 'time:2026-10-31T10:00:00+09:00\tmethod:GET\turi:/api/ep%s/%s\tstatus:200\tsize:10\treqtime:0.010\tapptime:0.010\tvhost:x\n' "$i" "$((i * 100))"
+  done > "$log"
+  # THRESH high so the 40 sibling routes stay 40 groups instead of collapsing
+  OUT=$({ printf 'SUDO=\nLOG=%q\nTHRESH=1000\nLIMIT=30\n' "$log"; cat "$ALP_SH"; } | bash -s 2>&1)
+  check -z "$(printf '%s\n' "$OUT" | grep -F "Too many")"
+  # LIMIT still bounds the rows shown
+  check "$(printf '%s\n' "$OUT" | grep -c '/api/ep')" = 30
+}
+
 case_ isucon13-like-api            t_isucon13_like
 case_ private-isu-like-paths       t_private_isu_like
 case_ ids-collapse-without-fanout  t_ids_collapse_without_fanout
 case_ query-strings-and-metachars  t_query_strings_and_metachars
 case_ config-override-wins         t_config_override_wins
+case_ many-groups-still-render     t_many_groups_still_render
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]

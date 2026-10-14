@@ -21,6 +21,9 @@
 #   HOT        a sibling with HOT x the average hits stays literal (default 10)
 #   SORT       alp --sort key (default sum)
 #   LIMIT      rows to show (default 30)
+#   URI_LIMIT  alp --limit: the most distinct URI groups alp accepts before it
+#              aborts with "Too many URI's" (default 5000). Not a row count —
+#              isucon14 alone has 30+ endpoints, so tying it to LIMIT broke alp
 #   PRINT_MATCHES=1  print the derived regexes, one per line, and exit (tests)
 #   SUDO       default "sudo -n"
 
@@ -120,7 +123,8 @@ if [ "${PRINT_MATCHES:-0}" = 1 ]; then
   exit 0
 fi
 
-set -- ltsv --file="$LOG" --sort="${SORT:-sum}" -r --limit="${LIMIT:-30}" \
+set -- ltsv --file="$LOG" --sort="${SORT:-sum}" -r --limit="${URI_LIMIT:-5000}" \
   -o count,method,uri,min,max,sum,avg,p95,p99
 [ -n "$MATCHES" ] && set -- "$@" -m "$MATCHES"
-$SUDO alp "$@" 2>&1 | head -$(( ${LIMIT:-30} + 20 ))
+# the table opens with 3 lines (border, header, border); keep LIMIT rows after it
+$SUDO alp "$@" 2>&1 | head -$(( ${LIMIT:-30} + 3 ))
