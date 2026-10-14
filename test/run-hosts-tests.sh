@@ -149,6 +149,39 @@ t_host_role_seeds_file() {
   check "$?" != 0
 }
 
+t_host_role_finds_go_alias() {
+  # go --new lists the first box as isukit-app; §5 then names it by user@ip
+  setup_state isukit-app ""
+  sed -i.bak "s|^SSH_OPTS=''|SSH_OPTS='-F .isukit/ssh_config'|" .isukit/config && rm -f .isukit/config.bak
+  printf 'Host isukit-app\n  HostName 13.0.0.1\n  User isucon\n\nHost *\n  User isucon\n  StrictHostKeyChecking accept-new\n' > .isukit/ssh_config
+  cmd_host role isucon@13.0.0.1 web,app >/dev/null 2>&1
+  cmd_host role isucon@13.0.0.2 db >/dev/null 2>&1
+  check "$(awk '!/^#/' isukit.hosts | tr '\n' ';')" = "isukit-app web,app;isucon@13.0.0.2 db;"
+  cmd_host role 13.0.0.1 web,app,db >/dev/null 2>&1               # no user: the alias's
+  check "$(awk '$1=="isukit-app"{print $2}' isukit.hosts)" = "web,app,db"
+  cmd_host role ubuntu@13.0.0.1 app >/dev/null 2>&1                # another user: another entry
+  check "$(awk '$1=="ubuntu@13.0.0.1"{print $2}' isukit.hosts)" = "app"
+  cmd_host add isucon@13.0.0.1 >/dev/null 2>&1
+  check "$(grep -c '13.0.0.1' isukit.hosts)" = 1
+  check "$(grep -c '^isukit-app ' isukit.hosts)" = 1
+}
+
+t_host_rm() {
+  setup_state isu1 "" "$ROLES"
+  cmd_host rm isu2 >/dev/null 2>&1
+  check -f isukit.hosts
+  check "$(awk '!/^#/' isukit.hosts | tr '\n' ';')" = "isu1 web,app;isu3 db;"
+  ( cmd_host rm isu9 ) >/dev/null 2>&1
+  check "$?" != 0
+  # a duplicate left by an older host role goes by its exact name; the alias stays
+  printf 'isukit-app web,app,db\nisucon@13.0.0.1 web,app\n' > isukit.hosts
+  printf 'Host isukit-app\n  HostName 13.0.0.1\n  User isucon\n' > .isukit/ssh_config
+  cmd_host rm isucon@13.0.0.1 >/dev/null 2>&1
+  check "$(tr '\n' ';' < isukit.hosts)" = "isukit-app web,app,db;"
+  cmd_host rm isucon@13.0.0.1 >/dev/null 2>&1                     # now resolves to the alias
+  check -z "$(awk '!/^#/' isukit.hosts)"
+}
+
 t_on_hosts_isolates_and_continues() {
   setup_state isu1 "" "$ROLES"
   load
@@ -717,6 +750,8 @@ case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
 case_ alp-on-web-slow-on-db           t_alp_slow_route
 case_ role-units-per-host             t_role_units
 case_ host-role-seeds-hosts-file      t_host_role_seeds_file
+case_ host-role-finds-go-alias        t_host_role_finds_go_alias
+case_ host-rm                         t_host_rm
 case_ on-hosts-isolates-and-continues t_on_hosts_isolates_and_continues
 case_ deploy-each-app-host-restart-once t_deploy_builds_each_app_host_restarts_once
 case_ etc-push-followups-run-once     t_etc_push_fleet_followups_once

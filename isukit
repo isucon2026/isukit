@@ -103,8 +103,11 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          'app' line in .isukit/hosts once that exists)
     isukit host role <target> <roles>   give a host its roles, comma-separated:
                                          app (deploy/restart/pprof), web (nginx logs,
-                                         alp), db (slow log, slow). writes .isukit/hosts
-    isukit hosts                        list hosts, their roles and the units each
+                                         alp), db (slow log, slow). writes .isukit/hosts;
+                                         a box already listed under another name (go's
+                                         isukit-app, by its ssh_config HostName) is updated
+    isukit host rm <target>             drop a host from the roles file
+    isukit hosts                       list hosts, their roles and the units each
                                          must run
     isukit probe                        interrogate the server, write .isukit/manifest,
                                          then auto-probe + compose BENCH_CMD (see below)

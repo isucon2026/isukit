@@ -156,7 +156,7 @@ isukit ship "index on …"
 本番で一番時間を食い、ミスも出やすいところ。**isukit は送り先を変えるだけで、構成の変更は手作業**（isukit の不足 #2）。
 
 ```
-isukit host role ubuntu@<pub1> web,app
+isukit host role ubuntu@<pub1> web,app   # go --new の isukit-app 行が更新される（IP で指定しても二重登録しない）
 isukit host role ubuntu@<pub2> app
 isukit host role ubuntu@<pub3> db
 isukit etc adopt                    # 2・3台目の設定も repo の etc/ に（台ごとに違うファイルがあれば止まって知らせる）
@@ -164,6 +164,8 @@ isukit env pull                     # 2・3台目の env ファイルも hosts/<
 git add isukit.hosts etc hosts && git commit -m "split: roles" && git push   # 残りの2人は pull
 isukit probe                        # 役割と実態の食い違いを警告する
 ```
+
+間違えて登録した台は `isukit host rm <target>` で `isukit.hosts` から外す。
 
 手で行う変更（それぞれ所要時間を記録する）：
 
