@@ -33,7 +33,7 @@ rsh_stdin() { # record "<host> stdin:" + the VAR= lines the caller prepended
   case "$body" in *"Closes the measurement window"*) tag="run-stop " ;; esac
   case "$body" in *"sent by \`isukit alp\`"*) tag="alp-script " ;; esac
   case "$body" in *"sent by \`isukit final check\`"*) tag="final-check " ;; esac
-  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|APP_UNIT|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE|PATH_)=' | tr '\n' ' ')" >> "$CALLS"
+  printf '%s stdin: %s%s\n' "$1" "$tag" "$(printf '%s\n' "$body" | grep -E '^(MODE|WANT_NGINX|WANT_MYSQL|WANT_APP|APP_UNIT|REPO|RESET_NGINX|RESET_MYSQL|SAMPLE|PATH_)=' | tr '\n' ' ')" >> "$CALLS"
   return 0
 }
 say()  { :; }
@@ -149,6 +149,39 @@ t_host_role_seeds_file() {
   check "$?" != 0
 }
 
+t_host_role_finds_go_alias() {
+  # go --new lists the first box as isukit-app; §5 then names it by user@ip
+  setup_state isukit-app ""
+  sed -i.bak "s|^SSH_OPTS=''|SSH_OPTS='-F .isukit/ssh_config'|" .isukit/config && rm -f .isukit/config.bak
+  printf 'Host isukit-app\n  HostName 13.0.0.1\n  User isucon\n\nHost *\n  User isucon\n  StrictHostKeyChecking accept-new\n' > .isukit/ssh_config
+  cmd_host role isucon@13.0.0.1 web,app >/dev/null 2>&1
+  cmd_host role isucon@13.0.0.2 db >/dev/null 2>&1
+  check "$(awk '!/^#/' isukit.hosts | tr '\n' ';')" = "isukit-app web,app;isucon@13.0.0.2 db;"
+  cmd_host role 13.0.0.1 web,app,db >/dev/null 2>&1               # no user: the alias's
+  check "$(awk '$1=="isukit-app"{print $2}' isukit.hosts)" = "web,app,db"
+  cmd_host role ubuntu@13.0.0.1 app >/dev/null 2>&1                # another user: another entry
+  check "$(awk '$1=="ubuntu@13.0.0.1"{print $2}' isukit.hosts)" = "app"
+  cmd_host add isucon@13.0.0.1 >/dev/null 2>&1
+  check "$(grep -c '13.0.0.1' isukit.hosts)" = 1
+  check "$(grep -c '^isukit-app ' isukit.hosts)" = 1
+}
+
+t_host_rm() {
+  setup_state isu1 "" "$ROLES"
+  cmd_host rm isu2 >/dev/null 2>&1
+  check -f isukit.hosts
+  check "$(awk '!/^#/' isukit.hosts | tr '\n' ';')" = "isu1 web,app;isu3 db;"
+  ( cmd_host rm isu9 ) >/dev/null 2>&1
+  check "$?" != 0
+  # a duplicate left by an older host role goes by its exact name; the alias stays
+  printf 'isukit-app web,app,db\nisucon@13.0.0.1 web,app\n' > isukit.hosts
+  printf 'Host isukit-app\n  HostName 13.0.0.1\n  User isucon\n' > .isukit/ssh_config
+  cmd_host rm isucon@13.0.0.1 >/dev/null 2>&1
+  check "$(tr '\n' ';' < isukit.hosts)" = "isukit-app web,app,db;"
+  cmd_host rm isucon@13.0.0.1 >/dev/null 2>&1                     # now resolves to the alias
+  check -z "$(awk '!/^#/' isukit.hosts)"
+}
+
 t_on_hosts_isolates_and_continues() {
   setup_state isu1 "" "$ROLES"
   load
@@ -172,6 +205,75 @@ t_deploy_builds_each_app_host_restarts_once() {
   ( cmd_deploy ) >/dev/null 2>&1
   check "$?" != 0
   check -z "$(grep 'systemctl restart' "$CALLS")"      # never restart a half-deployed fleet
+}
+
+# isucon14 ships go/go.mod and payment_mock/go.mod; the first go.mod found was
+# payment_mock, and deploy rsynced it over the server's webapp/go.
+t_deploy_local_src_maps_go_dir() {
+  # own directory: other cases leave go.mod files around $WORK
+  mkdir -p "$WORK/deploy-src" && cd "$WORK/deploy-src" || return
+  mkdir -p go payment_mock
+  : > go/go.mod; : > payment_mock/go.mod
+  GO_DIR=/home/isucon/webapp/go SRC_DIR=/home/isucon/webapp
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  # no SRC_DIR mapping: still the module whose path ends like GO_DIR
+  SRC_DIR=/elsewhere
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  # several modules and none matches: refuse rather than guess
+  GO_DIR=/home/isucon/webapp/rust
+  ( deploy_local_src ) >/dev/null 2>&1
+  check "$?" != 0
+  # a single module is taken as is
+  rm -rf payment_mock
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  cd "$WORK" && rm -rf "$WORK/deploy-src"
+}
+
+# a new index in sql/1-schema.sql never reached the server: deploy shipped go/
+# (and etc/ via etc push) only, while POST /api/initialize runs the server's sql/
+t_deploy_tree_ships_sql() {
+  local repo="$WORK/deploy-tree" srv="$WORK/deploy-tree-srv"
+  rm -rf "$repo" "$srv"; mkdir -p "$repo" "$srv/sql" && cd "$repo" || return
+  git init -q . && mkdir -p go sql etc/nginx .github hosts/isu1
+  : > go/go.mod; echo idx > sql/1-schema.sql; : > etc/nginx/nginx.conf
+  : > .github/ci.yml; : > hosts/isu1/env.sh; : > isukit.hosts
+  git add -A && git -c user.name=t -c user.email=t@t commit -q -m t
+  echo junk > untracked.txt
+  echo kept > "$srv/sql/server-only.bin"   # build output left on the server
+  APP=local SRC_DIR="$srv" GO_DIR="$srv/go"
+  deploy_tree "$(local_repo_root)/go" 2>/dev/null
+  check "$(cat "$srv/sql/1-schema.sql" 2>/dev/null)" = idx
+  check -f "$srv/sql/server-only.bin"      # no --delete
+  check ! -e "$srv/untracked.txt"          # tracked files only
+  check ! -e "$srv/etc"                    # etc push's job
+  check ! -e "$srv/.github"
+  check ! -e "$srv/hosts"
+  check ! -e "$srv/isukit.hosts"
+  # a checkout that doesn't mirror SRC_DIR: nothing sent
+  rm -rf "$srv"; mkdir -p "$srv"
+  GO_DIR="$srv/elsewhere/go"
+  deploy_tree "$(local_repo_root)/go" 2>/dev/null
+  check ! -e "$srv/sql"
+  cd "$WORK" && rm -rf "$repo" "$srv"
+}
+
+# isucon14's tail: debug eval lines with a score array, then the Japanese result.
+# The old pattern took 18 (the array's first element) from a 2009 run.
+t_parse_score_isucon14() {
+  local log="$WORK/bench14.log"
+  cat > "$log" <<'EOF'
+time=20:32:48.871 level=DEBUG source=scenario.go:317 msg=eval reqs=22 score="[18 4 0 0 0]" criteria="[1 3 0 0]"
+time=20:32:50.671 level=DEBUG source=scenario.go:317 msg=eval reqs=22 score="[18 4 0 0 0]" criteria="[1 3 0 0]"
+time=20:32:56.272 level=INFO msg=結果 pass=true スコア=2009 種別エラー数=map[]
+time=20:32:56.272 level=INFO msg=負荷走行が終了しました
+EOF
+  check "$(parse_score "$log")" = 2009
+  # the English shapes earlier years print still parse
+  printf 'pass: true\nscore: 12345\n' > "$log";            check "$(parse_score "$log")" = 12345
+  printf '{"pass":true,"score":678}\n' > "$log";           check "$(parse_score "$log")" = 678
+  printf 'SCORE=-5\n' > "$log";                            check "$(parse_score "$log")" = -5
+  printf 'total score: 42\n' > "$log";                     check "$(parse_score "$log")" = 42
+  printf 'no number here\n' > "$log";                      check -z "$(parse_score "$log")"
 }
 
 t_etc_push_fleet_followups_once() {
@@ -270,6 +372,79 @@ t_etc_pull_leaves_out_disagreeing_files() {
   cmd_etc_pull; rc=$?
   check "$rc" = 0
   check -z "$(grep exclude "$CALLS")"
+}
+
+t_etc_adopt_by_role_seeds_from_local() {
+  setup_state isu1 "" "$ROLES"
+  load
+  local_repo_root() { printf '%s\n' "$WORK/app"; }
+  mkdir -p "$WORK/app/etc/mysql"; printf '[mysqld]\n' > "$WORK/app/etc/mysql/mysqld.cnf"
+  etc_rsync() { printf '%s rsync %s -> %s %s\n' "$APP" "$1" "$2" "${*:3}" >> "$CALLS"; }
+  on_hosts all etc_adopt_one
+  # the team's files reach each host's server repo first (never over its own)...
+  check "$(hosts_called "rsync $WORK/app/etc/ -> .*:/home/isucon/webapp/etc/ --ignore-existing")" = "isu1 isu2 isu3"
+  local h
+  for h in isu1 isu2 isu3; do
+    check "$(grep -n "^$h " "$CALLS" | grep -m1 -E 'rsync|stdin:' | grep -c rsync)" = 1
+  done
+  # ...then each host links only the tiers its roles run
+  check -n "$(grep '^isu1 stdin: .*WANT_NGINX=1 WANT_MYSQL=0 WANT_APP=1 APP_UNIT=isu-go.service' "$CALLS")"
+  check -n "$(grep '^isu2 stdin: .*WANT_NGINX=0 WANT_MYSQL=0 WANT_APP=1' "$CALLS")"
+  check -n "$(grep '^isu3 stdin: .*WANT_NGINX=0 WANT_MYSQL=1 WANT_APP=0' "$CALLS")"
+  # no hosts file: the one host runs everything
+  setup_state isu1 ""
+  load
+  on_hosts all etc_adopt_one
+  check -n "$(grep '^isu1 stdin: .*WANT_NGINX=1 WANT_MYSQL=1 WANT_APP=1' "$CALLS")"
+}
+
+t_etc_push_reloads_by_role() {
+  setup_state isu1 "" "$ROLES"
+  load
+  local_repo_root() { printf '%s\n' "$WORK/app"; }
+  mkdir -p "$WORK/app/etc"
+  etc_sums() { # every tier changed locally; the hosts have nothing yet
+    [ "$1" = local ] || return 0
+    printf '1 1 ./nginx/nginx.conf\n1 1 ./mysql/mysqld.cnf\n1 1 ./systemd/system/isu-go.service\n'
+  }
+  etc_rsync() { printf '%s rsync %s\n' "$APP" "$(tr '\n' ' ' < "${3#--files-from=}")" >> "$CALLS"; }
+  etc_status_one() { :; }
+  cmd_etc_push 2>/dev/null; local rc=$?
+  check "$rc" = 0
+  # the whole tree is copied everywhere, so the server repos stay alike...
+  check "$(hosts_called 'rsync mysql/mysqld.cnf nginx/nginx.conf systemd/system/isu-go.service')" = "isu1 isu2 isu3"
+  # ...but nginx is reloaded on the web host only, mysql restarted on the db host only
+  check "$(hosts_called 'nginx -t')" = "isu1"
+  check "$(hosts_called 'systemctl restart \$s')" = "isu3"
+  check "$(hosts_called 'daemon-reload')" = "isu1 isu2"
+  check "$(hosts_called 'systemctl restart isu-go.service')" = "isu1 isu2"
+}
+
+t_etc_push_nginx_outcomes() {
+  setup_state isu1 ""
+  load
+  local_repo_root() { printf '%s\n' "$WORK/app"; }
+  mkdir -p "$WORK/app/etc"
+  etc_sums() { [ "$1" = local ] && printf '1 1 ./nginx/nginx.conf\n'; return 0; }
+  etc_rsync() { :; }
+  etc_status_one() { :; }
+  local x
+  for x in 10 11 12; do
+    : > "$CALLS"
+    NGINX_X=$x
+    rsh() { # nginx answers with $NGINX_X; logging reads as off
+      printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"
+      case "$*" in *"nginx -t"*) return "$NGINX_X" ;; *00-isukit.conf*) return 1 ;; esac
+      return 0
+    }
+    cmd_etc_push 2>/dev/null; local rc=$?
+    case "$x" in
+      10) check "$rc" = 0; check -z "$(grep '^warn:' "$CALLS")" ;;   # stopped nginx: not a failure
+      11) check "$rc" = 1; check -n "$(grep 'warn: nginx -t FAILED' "$CALLS")" ;;
+      12) check "$rc" = 1; check -n "$(grep 'warn: nginx -t passed but the reload FAILED' "$CALLS")"
+          check -z "$(grep 'nginx -t FAILED' "$CALLS")" ;;
+    esac
+  done
 }
 
 t_host_app_moves_hosts_line() {
@@ -717,6 +892,8 @@ case_ logs-split-nginx-web-mysql-db   t_logs_split_by_role
 case_ alp-on-web-slow-on-db           t_alp_slow_route
 case_ role-units-per-host             t_role_units
 case_ host-role-seeds-hosts-file      t_host_role_seeds_file
+case_ host-role-finds-go-alias        t_host_role_finds_go_alias
+case_ host-rm                         t_host_rm
 case_ on-hosts-isolates-and-continues t_on_hosts_isolates_and_continues
 case_ deploy-each-app-host-restart-once t_deploy_builds_each_app_host_restarts_once
 case_ etc-push-followups-run-once     t_etc_push_fleet_followups_once
@@ -725,6 +902,9 @@ case_ bench-clean-when-logs-off       t_bench_clean_when_logs_off
 case_ manual-score-collects-its-run   t_manual_score_collects_run
 case_ logs-space-guard-on-db-hosts    t_logs_space_guard_on_db_hosts
 case_ etc-pull-leaves-out-disagreeing t_etc_pull_leaves_out_disagreeing_files
+case_ etc-adopt-by-role-seeds-local  t_etc_adopt_by_role_seeds_from_local
+case_ etc-push-reloads-by-role       t_etc_push_reloads_by_role
+case_ etc-push-nginx-outcomes        t_etc_push_nginx_outcomes
 case_ host-app-moves-hosts-line       t_host_app_moves_hosts_line
 case_ catchall-follows-app-key        t_catchall_follows_app_key
 case_ bench-records-score-on-failure  t_bench_records_score_when_collection_fails
@@ -750,6 +930,9 @@ case_ notify-bench-message           t_notify_bench_message
 case_ notify-ops-and-silence          t_notify_ops_and_silence
 case_ bench-target-separate-box       t_bench_target_separate_box
 case_ bench-target-same-box           t_bench_target_same_box
+case_ deploy-local-src-maps-go-dir    t_deploy_local_src_maps_go_dir
+case_ deploy-tree-ships-sql           t_deploy_tree_ships_sql
+case_ parse-score-isucon14            t_parse_score_isucon14
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]

@@ -28,6 +28,40 @@ etc_rsync() { # etc_rsync <src> <dst> [rsync opts...] -- one side is $APP:..., t
   fi
 }
 
+# A host links only the files of the tiers its roles run (lib/hosts.sh): nginx
+# on web hosts, mysql on db hosts, the app's units on app hosts. A unit linked
+# on a db host vanishes as soon as `systemctl disable` removes the symlink, and
+# a stopped nginx is no reason to report the config as broken.
+etc_role() { # etc_role <web|db|app> -- true if $APP holds that role (a host without roles: all)
+  local roles
+  roles=$(host_roles "$APP")
+  [ -n "$roles" ] || return 0
+  case ",$roles," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+
+etc_role_vars() { # VAR=value lines that tell remote/etc-*.sh which tiers $APP runs
+  local wn=0 wm=0 wa=0
+  etc_role web && wn=1
+  etc_role db  && wm=1
+  etc_role app && wa=1
+  printf 'WANT_NGINX=%s\nWANT_MYSQL=%s\nWANT_APP=%s\nAPP_UNIT=%q\nEXTRA_UNITS=%q\n' \
+    "$wn" "$wm" "$wa" "${APP_UNIT:-}" "${EXTRA_UNITS:-}"
+}
+
+etc_wanted() { # etc_wanted <path under etc/> -- true if $APP's roles use it (as in remote/etc-adopt.sh)
+  case "$1" in
+    nginx/*) etc_role web ;;
+    mysql/*) etc_role db ;;
+    systemd/system/*)
+      case " ${APP_UNIT:-} ${EXTRA_UNITS:-} " in
+        *" ${1#systemd/system/} "*) etc_role app ;;
+        *) return 0 ;;
+      esac ;;
+    *) return 0 ;;
+  esac
+}
+
 cmd_etc() {
   local sub="${1:-}"; shift || true
   case "$sub" in
@@ -67,11 +101,20 @@ cmd_etc_adopt() {
 }
 
 etc_adopt_one() {
-  local repo targets="$*" rc=0
+  local repo root targets="$*" rc=0
   repo=$(etc_repo)
+  root=$(local_repo_root)
   logs_are_on && etc_flag relog
+  # A host joining later still has its stock config, and adopt keeps the server
+  # repo's copy over /etc's. Seed that repo with every file the local etc/ has
+  # and it lacks, so the new host starts from the team's tuned config instead
+  # of moving its stock one in (and then disagreeing with the rest at pull).
+  if [ -d "$root/etc" ] && [ -n "$(ls -A "$root/etc" 2>/dev/null)" ]; then
+    say "etc adopt: local etc/ -> $APP:$repo/etc/ (only files missing there — the repo copy wins over $APP's own)"
+    etc_rsync "$root/etc/" "$APP:$repo/etc/" --ignore-existing || die "rsync to $APP failed"
+  fi
   say "etc adopt on $APP: /etc -> $repo/etc/ (symlinks; replaced files backed up under /etc/isukit-orig/)"
-  { printf 'REPO=%q\nAPP_UNIT=%q\nTARGETS=%q\n' "$repo" "${APP_UNIT:-}" "$targets"; remote_script etc-adopt.sh; } \
+  { printf 'REPO=%q\nTARGETS=%q\n' "$repo" "$targets"; etc_role_vars; remote_script etc-adopt.sh; } \
     | rsh_stdin "$APP" || rc=$?
   return "$rc"
 }
@@ -81,7 +124,7 @@ cmd_etc_status() { load; on_hosts all etc_status_one; }
 etc_status_one() {
   local repo
   repo=$(etc_repo)
-  { printf 'REPO=%q\n' "$repo"; remote_script etc-status.sh; } | rsh_stdin "$APP"
+  { printf 'REPO=%q\n' "$repo"; etc_role_vars; remote_script etc-status.sh; } | rsh_stdin "$APP"
 }
 
 etc_sums() { # etc_sums <local|remote> <repo-dir> -- see remote/etc-sums.sh
@@ -202,6 +245,11 @@ etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
     return 0
   fi
   logs_are_on && was_on=1
+  # every changed file is copied, so each host's server repo holds the whole
+  # tree (etc pull compares them), but only the tiers this host's roles run are
+  # reloaded: a nginx file on the db host is not linked into its /etc.
+  local mine f
+  mine=$(for f in $changed; do etc_wanted "$f" && printf '%s\n' "$f"; done)
   say "etc push: $root/etc/ -> $APP:$repo/etc/"
   printf '    %s\n' $changed >&2
   # only the changed files: an untouched server copy keeps its logging edits
@@ -211,15 +259,25 @@ etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
   etc_rsync "$root/etc/" "$APP:$repo/etc/" "--files-from=$list" || { rm -f "$list"; die "rsync to $APP failed"; }
   rm -f "$list"
   rsh "$APP" "sudo -n chown -R \"\$(stat -c %U '$repo')\" '$repo/etc'" 2>/dev/null || true
+  [ -n "$mine" ] || say "etc push: none of these are used by $APP's roles ($(host_roles "$APP")) — copied, nothing reloaded"
 
-  local restart_db=0 reload_nginx=0 units=""
-  printf '%s\n' $changed | grep -q '^nginx/' && reload_nginx=1
-  printf '%s\n' $changed | grep -q '^mysql/' && restart_db=1
-  units=$(printf '%s\n' $changed | sed -n 's|^systemd/system/||p' | tr '\n' ' ')
+  local restart_db=0 reload_nginx=0 units="" x
+  printf '%s\n' $mine | grep -q '^nginx/' && reload_nginx=1
+  printf '%s\n' $mine | grep -q '^mysql/' && restart_db=1
+  units=$(printf '%s\n' $mine | sed -n 's|^systemd/system/||p' | tr '\n' ' ')
 
   if [ "$reload_nginx" = 1 ]; then
-    rsh "$APP" "sudo -n nginx -t && sudo -n systemctl reload nginx" \
-      || { warn "nginx -t FAILED — the broken file is live on disk but nginx still runs the old config; fix it and push again"; rc=1; }
+    # a broken file and a failed reload are different problems; a stopped
+    # nginx (this host no longer serves) is neither
+    x=0
+    rsh "$APP" "sudo -n nginx -t || exit 11; systemctl is-active --quiet nginx || exit 10; sudo -n systemctl reload nginx || exit 12" || x=$?
+    case "$x" in
+      0)  say "nginx: config OK, reloaded" ;;
+      10) say "nginx inactive here — not reloaded" ;;
+      11) warn "nginx -t FAILED — the broken file is live on disk but nginx still runs the old config; fix it and push again"; rc=1 ;;
+      12) warn "nginx -t passed but the reload FAILED — check: ssh $APP sudo journalctl -u nginx -n 50"; rc=1 ;;
+      *)  warn "could not check / reload nginx on $APP (exit $x)"; rc=1 ;;
+    esac
   fi
   if [ -n "$units" ]; then
     rsh "$APP" "sudo -n systemctl daemon-reload" && say "systemd: daemon-reload ($units)"
@@ -234,9 +292,14 @@ etc_push_one() { # etc_push_one <from_deploy 0|1> -- push to $APP
     done
   fi
   if [ "$restart_db" = 1 ]; then
-    say "mysql config changed — restarting the DB (brief downtime)"
-    rsh "$APP" "for s in mysql mariadb; do systemctl is-active --quiet \$s && { sudo -n systemctl restart \$s; break; }; done; sudo -n mysql -e 'SELECT 1' >/dev/null" \
-      || { warn "mysql did not come back — check: ssh $APP sudo journalctl -u mysql -n 50"; rc=1; }
+    # only a running DB: restarting a disabled one starts a stray local mysqld
+    x=0
+    rsh "$APP" "for s in mysql mariadb; do systemctl is-active --quiet \$s || continue; sudo -n systemctl restart \$s && sudo -n mysql -e 'SELECT 1' >/dev/null; exit \$?; done; exit 10" || x=$?
+    case "$x" in
+      0)  say "mysql config changed — restarted the DB" ;;
+      10) say "mysql inactive here — not restarted" ;;
+      *)  warn "mysql did not come back — check: ssh $APP sudo journalctl -u mysql -n 50"; rc=1 ;;
+    esac
   fi
   # a pushed nginx file replaced the copy 'logs on' had edited, and a DB restart
   # drops SET GLOBAL — either way logging has to be put back (once, afterwards).

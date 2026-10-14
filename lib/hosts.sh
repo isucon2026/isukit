@@ -39,6 +39,42 @@ host_lines() { # "<target> <roles>" per host
 
 hosts_all()  { host_lines | awk '{ print $1 }'; }
 
+host_addr() { # host_addr <target> -- "<hostname> <user|->" it reaches, through $STATE/ssh_config's aliases
+  local t="$1" user="-" host="$1" r
+  if [ "${t#*@}" != "$t" ]; then user="${t%%@*}"; host="${t#*@}"; fi
+  if [ -f "$STATE/ssh_config" ]; then
+    r=$(awk -v a="$host" '
+      tolower($1) == "host" { f = 0; for (i = 2; i <= NF; i++) if ($i == a) f = 1; next }
+      f && tolower($1) == "hostname" && n == "" { n = $2 }
+      f && tolower($1) == "user" && u == "" { u = $2 }
+      END { print (n == "" ? "-" : n), (u == "" ? "-" : u) }' "$STATE/ssh_config")
+    # an alias (isukit-app): its HostName, and its User unless the target names one
+    [ "${r% *}" != - ] && host="${r% *}"
+    [ "$user" = - ] && user="${r#* }"
+  fi
+  printf '%s %s\n' "$host" "$user"
+}
+
+host_entry() { # host_entry <target> -- the roles-file entry for that box: the same name, else the
+  # same HostName (and user, where both say one) once ssh_config aliases are resolved,
+  # so ubuntu@<ip> finds go's isukit-app line instead of becoming a second one
+  [ -f "$HOSTS_FILE" ] || return 0
+  local h want have
+  awk -v h="$1" '!/^[[:space:]]*(#|$)/ && $1 == h { f = 1 } END { exit !f }' "$HOSTS_FILE" \
+    && { printf '%s\n' "$1"; return 0; }
+  want=$(host_addr "$1")
+  for h in $(awk '!/^[[:space:]]*(#|$)/ { print $1 }' "$HOSTS_FILE"); do
+    have=$(host_addr "$h")
+    [ "${want%% *}" = "${have%% *}" ] || continue
+    case "${want#* } ${have#* }" in
+      "- "*|*" -") ;;
+      *) [ "${want#* }" = "${have#* }" ] || continue ;;
+    esac
+    printf '%s\n' "$h"; return 0
+  done
+  return 0
+}
+
 host_roles() { host_lines | awk -v h="$1" '$1 == h { print $2 }'; }
 
 hosts_with() { # hosts_with <role>[|<role>...] -- hosts holding any of them
@@ -210,8 +246,9 @@ cmd_host() {
       migrate_hosts_file
       if [ -f "$HOSTS_FILE" ]; then
         # roles file in charge: an added host is an app instance unless told otherwise
-        awk -v h="$target" '$1 == h { found = 1 } END { exit !found }' "$HOSTS_FILE" \
-          && { say "$target already in $HOSTS_FILE — no-op"; return 0; }
+        local entry
+        entry=$(host_entry "$target")
+        [ -n "$entry" ] && { say "$target already in $HOSTS_FILE (as $entry) — no-op"; return 0; }
         printf '%s app\n' "$target" >> "$HOSTS_FILE"
         say "$target = app   (change with: isukit host role $target <roles>)"
         return 0
@@ -243,13 +280,36 @@ cmd_host() {
         seed=$(host_lines)
         printf '# <ssh-target> <roles>   roles: %s\n%s\n' "$KNOWN_ROLES" "$seed" > "$HOSTS_FILE"
       fi
+      # the box may already be listed under another name (go's isukit-app): update that line
+      local entry
+      entry=$(host_entry "$target")
+      if [ -n "$entry" ] && [ "$entry" != "$target" ]; then
+        say "$target is $entry in $HOSTS_FILE — updating that entry"
+        target="$entry"
+      fi
       awk -v h="$target" '$1 != h' "$HOSTS_FILE" > "$HOSTS_FILE.tmp"
       printf '%s %s\n' "$target" "$roles" >> "$HOSTS_FILE.tmp"
       mv "$HOSTS_FILE.tmp" "$HOSTS_FILE"
       say "$target = $roles   (commit $HOSTS_FILE so the team gets it)"
       cmd_hosts
       return 0 ;;
-    *) die "usage: isukit host {app|bench|add|role} <ssh-target|local> [ssh opts... | roles]" ;;
+    rm)
+      [ -n "$target" ] || die "usage: isukit host rm <ssh-target>"
+      load
+      migrate_hosts_file
+      if [ ! -f "$HOSTS_FILE" ]; then   # as role: write the implied layout down first
+        local seed
+        seed=$(host_lines)
+        printf '# <ssh-target> <roles>   roles: %s\n%s\n' "$KNOWN_ROLES" "$seed" > "$HOSTS_FILE"
+      fi
+      local entry
+      entry=$(host_entry "$target")
+      [ -n "$entry" ] || die "$target is not in $HOSTS_FILE — see: isukit hosts"
+      awk -v h="$entry" '$1 != h' "$HOSTS_FILE" > "$HOSTS_FILE.tmp" && mv "$HOSTS_FILE.tmp" "$HOSTS_FILE"
+      say "removed $entry from $HOSTS_FILE   (commit $HOSTS_FILE so the team gets it)"
+      cmd_hosts
+      return 0 ;;
+    *) die "usage: isukit host {app|bench|add|role|rm} <ssh-target|local> [ssh opts... | roles]" ;;
   esac
   if [ "$rewrite_ssh_config" = 1 ]; then
     local w val prev="" new_key="" new_port=""

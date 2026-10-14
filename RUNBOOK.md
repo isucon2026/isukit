@@ -241,6 +241,8 @@ isukit host role ubuntu@43.207.152.142 db        # 3台目: MySQL だけ
 isukit hosts                                     # 役割と、各台で動いているべき unit の一覧
 ```
 
+1台目は `isukit go` が `isukit-app` として登録済み。IP で指定しても `.isukit/ssh_config` の HostName から同じ台と分かり、その行の役割を書き換える（二重登録しない）。間違えた行は `isukit host rm <target>` で外す。
+
 役割は `.isukit/hosts` に書かれ、各コマンドはそれを見て動く台を決める：`deploy` / `restart` / `pprof` は app の台、nginx のログと `alp` は web の台、スロークエリログと `slow` は db の台、`etc` と `os` は全台。`finalize` は全台を再起動し、それぞれの役割に必要な unit が自分で上がってくるかを確かめる（再起動順は保証されない）。`isukit go -i <鍵>` で作った ssh 設定は、追加した台にも同じ鍵・ユーザー・ポートを使う。
 
 役割は「isukit がどの台に何をするか」を決めるだけで、構成そのものは変えない。app の台の MySQL を止める（`systemctl disable --now mysql`）、db の台の `bind-address` と接続ユーザー、アプリの DB 接続先（`env.sh` の `DB_HOST` など）は、今のところ手で行う。
@@ -685,6 +687,7 @@ isukit init <repo-url> [dir]   # clone（既存ディレクトリはそのまま
 isukit host app|bench <target> # ssh先を .isukit/config に設定（'local' も可）
 isukit host add <target>       # 追加ホストをアプリの台として追加
 isukit host role <target> <役割> # app / web / db をカンマ区切りで（.isukit/hosts に書く）
+isukit host rm <target>        # 役割ファイルから台を外す
 isukit hosts                   # ホストと役割、各台で動いているべき unit の一覧
 isukit probe                   # サーバーを調査して .isukit/manifest を書く。インフラ変更後は毎回
 isukit benchprobe              # ベンチマーカーを発見して BENCH_CMD を自動生成（probe が自動で呼ぶ）

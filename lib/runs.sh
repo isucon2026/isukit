@@ -165,6 +165,15 @@ cmd_show() { # show [n | when] -- a saved run (everyone's, when shared); 1 = the
   run_summary "$run"
 }
 
+# parse_score <bench.log> -- the last "score" number the benchmarker printed.
+# isucon14 prints its result in Japanese (結果 pass=true スコア=2009) and logs
+# debug lines like score="[18 4 0 0 0]" all through the run: matching only
+# "score" and allowing "[" before the digits recorded 18 for a 2009 run, every
+# run. So: スコア counts as score, and an array's first element never does.
+parse_score() {
+  grep -oiE '"?(total[ _-]?)?(score|スコア)"?[^0-9[-]{0,12}-?[0-9]+' "$1" | tail -1 | grep -oE '\-?[0-9]+$' || true
+}
+
 cmd_bench() {
   load
   lock_guard bench
@@ -206,7 +215,7 @@ cmd_bench() {
   local rc=${PIPESTATUS[0]}
   set -e
   local score
-  score=$(grep -oiE '"?(total[ _-]?)?score"?[^0-9-]{0,12}-?[0-9]+' "$raw" | tail -1 | grep -oE '\-?[0-9]+$' || true)
+  score=$(parse_score "$raw")
   [ -n "$score" ] || score="?"
   run_record "$run" "$ts" "$sha" "$score" "${note:-}" "$branch"
   [ "$measure" = 1 ] && run_collect "$run" 1

@@ -245,13 +245,16 @@ slugify() { # slugify <text> -- lowercase, non-alnum -> '-', squeeze/trim, cap 4
 }
 
 ship_build_check() { # the Go app must build and vet here before it reaches a PR or the servers
-  local mod dir
+  local dir
   command -v go >/dev/null 2>&1 || { warn "no go here — skipping the build check"; return 0; }
-  mod=$(find . -maxdepth 4 -name go.mod -not -path "*/bench*" -not -path "*/vendor/*" -not -path "./.isukit/*" | head -1)
-  [ -n "$mod" ] || return 0
-  dir=$(dirname "$mod")
+  # the module deploy ships (deploy_local_src), not the first go.mod find
+  # returns: on isucon14 that was payment_mock/, and `go build ./...` on its
+  # single main package wrote a macOS binary over the tracked Linux one,
+  # which ship then committed. -o /dev/null: check, never write.
+  [ -n "$(find . -maxdepth 4 -name go.mod -not -path "*/bench*" -not -path "*/vendor/*" -not -path "./.isukit/*" | head -1)" ] || return 0
+  dir=$(deploy_local_src) || return 1
   say "build check: go build + go vet in $dir"
-  ( cd "$dir" && go build ./... ) \
+  ( cd "$dir" && go build -o /dev/null ./... ) \
     || die "the app does not build — fix it before shipping (isukit ship --no-check to ship anyway)"
   # the code as handed out may not pass vet: report, never block
   ( cd "$dir" && go vet ./... ) || warn "go vet reports the above — worth a look, not blocking"

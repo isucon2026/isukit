@@ -9,11 +9,17 @@
 # backup keeps the plain name; later runs add a timestamp, so nothing is lost.
 # After linking, each tier is checked (nginx -t + reload, daemon-reload, mysql
 # restart + the mysql user can read the files + their values are live) and a tier
-# that fails is rolled back to what was there before this run.
+# that fails is rolled back to what was there before this run. Only the tiers
+# this host's roles run are touched: nginx files on web hosts, the [mysqld] cnfs
+# on db hosts, the app's units on app hosts — a unit linked on a db host would
+# vanish the moment `systemctl disable` removes its symlink.
 #
 # Inputs (isukit prepends them as VAR=value lines):
 #   REPO       server dir whose etc/ receives the files (required)
 #   APP_UNIT   the app's systemd unit, adopted too if it lives in /etc/systemd/system
+#   EXTRA_UNITS  more app units: like APP_UNIT, left alone on hosts without WANT_APP
+#   WANT_NGINX / WANT_MYSQL / WANT_APP  1 (default) = this host's roles include
+#              web / db / app; 0 = never adopt that tier's files here
 #   TARGETS    space-separated /etc paths to adopt; empty = discover
 #   ETC_ROOT   default /etc (tests point it at a throwaway tree)
 #   SUDO       default "sudo -n" (tests set it empty)
@@ -26,6 +32,7 @@ DEST="$REPO/etc"
 BAK="$E/isukit-orig"
 STAMP=$(date +%Y%m%d-%H%M%S)
 RC=0
+WANT_NGINX="${WANT_NGINX:-1}"; WANT_MYSQL="${WANT_MYSQL:-1}"; WANT_APP="${WANT_APP:-1}"
 [ -d "$REPO" ] || { echo "etc: repo dir $REPO does not exist on this host" >&2; exit 1; }
 OWNER=$(stat -c %U "$REPO" 2>/dev/null || stat -f %Su "$REPO" 2>/dev/null || echo root)
 JOURNAL=$(mktemp); LIST=$(mktemp)
@@ -44,9 +51,22 @@ resolve_link() { # one hop, made absolute: sites-enabled/x -> /etc/nginx/sites-a
   printf "%s/%s\n" "$(cd "$(dirname "$t")" 2>/dev/null && pwd -P || dirname "$t")" "$(basename "$t")"
 }
 
+wanted() { # wanted <path under etc/> -- true if this host's roles use that file
+  case "$1" in
+    nginx/*) [ "$WANT_NGINX" = 1 ] ;;
+    mysql/*) [ "$WANT_MYSQL" = 1 ] ;;
+    systemd/system/*)
+      case " ${APP_UNIT:-} ${EXTRA_UNITS:-} " in
+        *" ${1#systemd/system/} "*) [ "$WANT_APP" = 1 ] ;;
+        *) true ;;
+      esac ;;
+    *) true ;;
+  esac
+}
+
 discover() {
   local f t
-  if [ -e "$E/nginx/nginx.conf" ] || [ -L "$E/nginx/nginx.conf" ]; then
+  if [ "$WANT_NGINX" = 1 ] && { [ -e "$E/nginx/nginx.conf" ] || [ -L "$E/nginx/nginx.conf" ]; }; then
     echo "$E/nginx/nginx.conf"
     for f in "$E"/nginx/sites-enabled/* "$E"/nginx/conf.d/*.conf; do
       [ -e "$f" ] || [ -L "$f" ] || continue
@@ -60,7 +80,7 @@ discover() {
   fi
   # every .cnf that configures the server itself; client-only files and the
   # distro alternatives symlink (/etc/mysql/my.cnf) are left alone.
-  if [ -d "$E/mysql" ]; then
+  if [ "$WANT_MYSQL" = 1 ] && [ -d "$E/mysql" ]; then
     find "$E/mysql" \( -type f -o -type l \) -name "*.cnf" 2>/dev/null | sort | while read -r f; do
       if [ -L "$f" ]; then
         case "$(readlink "$f")" in "$DEST"/*) echo "$f" ;; esac
@@ -69,7 +89,7 @@ discover() {
       grep -qE "^\[(mysqld|server|mariadb)\]" "$f" && echo "$f"
     done
   fi
-  if [ -n "${APP_UNIT:-}" ]; then
+  if [ "$WANT_APP" = 1 ] && [ -n "${APP_UNIT:-}" ]; then
     f="$E/systemd/system/$APP_UNIT"
     if [ -e "$f" ] || [ -L "$f" ]; then echo "$f"; fi
   fi
@@ -80,6 +100,7 @@ adopt_one() {
   local f="$1" rel dst g mode bak
   case "$f" in "$E"/*) ;; *) echo "skip:    $f is not under $E"; return 0 ;; esac
   rel="${f#"$E"/}"; dst="$DEST/$rel"
+  wanted "$rel" || { echo "skip:    $f (not used by this host's roles)"; return 0; }
   case "$rel" in nginx/*) g=nginx ;; mysql/*) g=mysql ;; systemd/*) g=systemd ;; *) g=other ;; esac
   if [ -L "$f" ]; then
     if [ "$(readlink "$f")" = "$dst" ]; then
@@ -166,11 +187,21 @@ $SUDO chown -R "$OWNER" "$DEST" 2>/dev/null || true
 
 # verify each tier actually starts from the linked files; undo that tier if not.
 if has nginx; then
-  if $SUDO nginx -t >/dev/null 2>&1 && $SUDO systemctl reload nginx; then
+  # nginx -t proves the files; a reload only where nginx runs (a stopped one on
+  # a host that no longer serves is not a broken config)
+  why=""
+  if ! $SUDO nginx -t >/dev/null 2>&1; then
+    why="nginx -t"
+  elif ! systemctl is-active --quiet nginx 2>/dev/null; then
+    echo "nginx: config OK through the links; nginx inactive here — not reloaded"
+  elif $SUDO systemctl reload nginx; then
     echo "nginx: config OK through the links, reloaded"
   else
-    echo "nginx: FAILED with the linked config — rolling back nginx" >&2
-    $SUDO nginx -t 2>&1 | tail -5 >&2
+    why="systemctl reload nginx"
+  fi
+  if [ -n "$why" ]; then
+    echo "nginx: FAILED ($why) with the linked config — rolling back nginx" >&2
+    [ "$why" = "nginx -t" ] && $SUDO nginx -t 2>&1 | tail -5 >&2
     rollback nginx
     $SUDO systemctl reload nginx 2>/dev/null || true
     RC=1

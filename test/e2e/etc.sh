@@ -24,7 +24,7 @@ sed -i 's/max_connections = 1000/max_connections = 2000/' etc/mysql/mysql.conf.d
 touch -r /home/isucon/webapp/etc/mysql/mysql.conf.d/mysqld.cnf etc/mysql/mysql.conf.d/mysqld.cnf
 "$I" etc push >/tmp/out 2>&1
 check "live /etc sees the laptop edit"       grep -q 2000 /etc/mysql/mysql.conf.d/mysqld.cnf
-check "only mysql restarted"                 grep -q 'restarting the DB' /tmp/out
+check "only mysql restarted"                 grep -q 'restarted the DB' /tmp/out
 "$I" etc push >/tmp/out 2>&1
 check "second push is a no-op"               grep -q 'already matches' /tmp/out
 
@@ -45,4 +45,13 @@ check "marker-only file not overwritten"     grep -q '#isukit# access_log' /home
 "$I" logs off >/tmp/out 2>&1
 check "logs off restores the line"           bash -c '! grep -q "#isukit#" /home/isucon/webapp/etc/nginx/nginx.conf'
 check "links survive logs off"               [ -L /etc/nginx/nginx.conf ]
+
+echo "etc push with nginx stopped"
+systemctl disable --now nginx
+printf '# x\n' >> etc/nginx/nginx.conf
+"$I" etc push >/tmp/out 2>&1; rc=$?
+check "push succeeds"                        [ "$rc" = 0 ]
+check "stopped nginx: said, not reloaded"    grep -q 'nginx inactive here — not reloaded' /tmp/out
+check "and not reported as a broken config"  bash -c '! grep -q "FAILED" /tmp/out'
+check "the edit is live on disk"             grep -q '^# x' /etc/nginx/nginx.conf
 finish
