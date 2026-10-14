@@ -31,7 +31,11 @@ if [ "${RESET_NGINX:-0}" = 1 ] && $SUDO test -f /var/log/nginx/isukit.log; then
   $SUDO truncate -s 0 /var/log/nginx/isukit.log && echo "nginx: isukit.log emptied"
 fi
 if [ "${RESET_MYSQL:-0}" = 1 ] && $SUDO test -f /tmp/isukit-slow.log; then
-  $SUDO truncate -s 0 /tmp/isukit-slow.log && echo "mysql: slow log emptied"
+  # -c (no O_CREAT): the file is mysql's, in sticky /tmp, and fs.protected_regular
+  # refuses an O_CREAT open of it even to root — plain truncate failed with
+  # "Permission denied" every run, so the slow log (and every pt-query-digest
+  # over it) silently accumulated across runs
+  $SUDO truncate -c -s 0 /tmp/isukit-slow.log && echo "mysql: slow log emptied"
   timeout 5 $SUDO mysql -e "FLUSH SLOW LOGS" 2>/dev/null || true
 fi
 
