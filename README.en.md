@@ -77,7 +77,16 @@ logs are off.
 mysql user can read the files + their values are live) and rolls
 back only the tier that fails. On Ubuntu it also adds the AppArmor rule mysqld
 needs to read through the link. If the repo already has a file (rebuilding a
-box from the repo), the repo copy wins. Once `/etc` is linked, `deploy` runs
+box from the repo), the repo copy wins; files the local `etc/` has are copied
+to a host's server repo (only where missing) before adopting, so a host added
+later starts from the team's config, not its stock one. Each host links only
+the files of the tiers its roles (`isukit.hosts`; none = all) run — nginx on web
+hosts, `[mysqld]` cnfs on db hosts, the app's units (`APP_UNIT` / `EXTRA_UNITS`)
+on app hosts — and `etc status` expects only those. `etc push` copies files to
+every host's server repo but reloads / restarts a tier only on hosts with that
+role where the service is active (a stopped nginx prints `nginx inactive here —
+not reloaded`, not a failure; `nginx -t` and reload failures are reported
+separately). Once `/etc` is linked, `deploy` runs
 `etc push` first. The server repo is the git root of the probed `SRC_DIR`;
 override with `ETC_REPO` in `.isukit/config`. The host-side scripts live in
 `remote/`. With several hosts `etc pull` pulls from all of them, and a file the
