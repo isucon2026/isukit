@@ -224,6 +224,25 @@ t_deploy_tree_ships_sql() {
   cd "$WORK" && rm -rf "$repo" "$srv"
 }
 
+# isucon14's tail: debug eval lines with a score array, then the Japanese result.
+# The old pattern took 18 (the array's first element) from a 2009 run.
+t_parse_score_isucon14() {
+  local log="$WORK/bench14.log"
+  cat > "$log" <<'EOF'
+time=20:32:48.871 level=DEBUG source=scenario.go:317 msg=eval reqs=22 score="[18 4 0 0 0]" criteria="[1 3 0 0]"
+time=20:32:50.671 level=DEBUG source=scenario.go:317 msg=eval reqs=22 score="[18 4 0 0 0]" criteria="[1 3 0 0]"
+time=20:32:56.272 level=INFO msg=結果 pass=true スコア=2009 種別エラー数=map[]
+time=20:32:56.272 level=INFO msg=負荷走行が終了しました
+EOF
+  check "$(parse_score "$log")" = 2009
+  # the English shapes earlier years print still parse
+  printf 'pass: true\nscore: 12345\n' > "$log";            check "$(parse_score "$log")" = 12345
+  printf '{"pass":true,"score":678}\n' > "$log";           check "$(parse_score "$log")" = 678
+  printf 'SCORE=-5\n' > "$log";                            check "$(parse_score "$log")" = -5
+  printf 'total score: 42\n' > "$log";                     check "$(parse_score "$log")" = 42
+  printf 'no number here\n' > "$log";                      check -z "$(parse_score "$log")"
+}
+
 t_etc_push_fleet_followups_once() {
   setup_state isu1 "" "$ROLES"
   load
@@ -730,6 +749,7 @@ case_ bench-target-separate-box       t_bench_target_separate_box
 case_ bench-target-same-box           t_bench_target_same_box
 case_ deploy-local-src-maps-go-dir    t_deploy_local_src_maps_go_dir
 case_ deploy-tree-ships-sql           t_deploy_tree_ships_sql
+case_ parse-score-isucon14            t_parse_score_isucon14
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"
 [ -z "$FAILED" ]
