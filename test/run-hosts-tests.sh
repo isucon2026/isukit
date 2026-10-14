@@ -174,6 +174,56 @@ t_deploy_builds_each_app_host_restarts_once() {
   check -z "$(grep 'systemctl restart' "$CALLS")"      # never restart a half-deployed fleet
 }
 
+# isucon14 ships go/go.mod and payment_mock/go.mod; the first go.mod found was
+# payment_mock, and deploy rsynced it over the server's webapp/go.
+t_deploy_local_src_maps_go_dir() {
+  # own directory: other cases leave go.mod files around $WORK
+  mkdir -p "$WORK/deploy-src" && cd "$WORK/deploy-src" || return
+  mkdir -p go payment_mock
+  : > go/go.mod; : > payment_mock/go.mod
+  GO_DIR=/home/isucon/webapp/go SRC_DIR=/home/isucon/webapp
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  # no SRC_DIR mapping: still the module whose path ends like GO_DIR
+  SRC_DIR=/elsewhere
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  # several modules and none matches: refuse rather than guess
+  GO_DIR=/home/isucon/webapp/rust
+  ( deploy_local_src ) >/dev/null 2>&1
+  check "$?" != 0
+  # a single module is taken as is
+  rm -rf payment_mock
+  check "$(deploy_local_src)" = "$(pwd)/go"
+  cd "$WORK" && rm -rf "$WORK/deploy-src"
+}
+
+# a new index in sql/1-schema.sql never reached the server: deploy shipped go/
+# (and etc/ via etc push) only, while POST /api/initialize runs the server's sql/
+t_deploy_tree_ships_sql() {
+  local repo="$WORK/deploy-tree" srv="$WORK/deploy-tree-srv"
+  rm -rf "$repo" "$srv"; mkdir -p "$repo" "$srv/sql" && cd "$repo" || return
+  git init -q . && mkdir -p go sql etc/nginx .github hosts/isu1
+  : > go/go.mod; echo idx > sql/1-schema.sql; : > etc/nginx/nginx.conf
+  : > .github/ci.yml; : > hosts/isu1/env.sh; : > isukit.hosts
+  git add -A && git -c user.name=t -c user.email=t@t commit -q -m t
+  echo junk > untracked.txt
+  echo kept > "$srv/sql/server-only.bin"   # build output left on the server
+  APP=local SRC_DIR="$srv" GO_DIR="$srv/go"
+  deploy_tree "$(local_repo_root)/go" 2>/dev/null
+  check "$(cat "$srv/sql/1-schema.sql" 2>/dev/null)" = idx
+  check -f "$srv/sql/server-only.bin"      # no --delete
+  check ! -e "$srv/untracked.txt"          # tracked files only
+  check ! -e "$srv/etc"                    # etc push's job
+  check ! -e "$srv/.github"
+  check ! -e "$srv/hosts"
+  check ! -e "$srv/isukit.hosts"
+  # a checkout that doesn't mirror SRC_DIR: nothing sent
+  rm -rf "$srv"; mkdir -p "$srv"
+  GO_DIR="$srv/elsewhere/go"
+  deploy_tree "$(local_repo_root)/go" 2>/dev/null
+  check ! -e "$srv/sql"
+  cd "$WORK" && rm -rf "$repo" "$srv"
+}
+
 # isucon14's tail: debug eval lines with a score array, then the Japanese result.
 # The old pattern took 18 (the array's first element) from a 2009 run.
 t_parse_score_isucon14() {
@@ -697,6 +747,8 @@ case_ notify-bench-message           t_notify_bench_message
 case_ notify-ops-and-silence          t_notify_ops_and_silence
 case_ bench-target-separate-box       t_bench_target_separate_box
 case_ bench-target-same-box           t_bench_target_same_box
+case_ deploy-local-src-maps-go-dir    t_deploy_local_src_maps_go_dir
+case_ deploy-tree-ships-sql           t_deploy_tree_ships_sql
 case_ parse-score-isucon14            t_parse_score_isucon14
 
 echo "$TOTAL fixtures, $PASSED passed, $((TOTAL-PASSED)) failed"

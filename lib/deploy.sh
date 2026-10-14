@@ -29,12 +29,71 @@ cmd_deploy() {
   printf '🚀 %s deployed %s `%s` to %s app host(s)\n' "$(who_am_i)" "$d_branch" "$d_sha" "$(hosts_with app | wc -l | tr -d ' ')" | notify ops
 }
 
+# deploy_local_src -- this checkout's copy of the server's Go app. The repo
+# mirrors SRC_DIR (go --new copies it to the repo root), so GO_DIR's path under
+# SRC_DIR is the answer. "The first go.mod found" is not: isucon14 also ships
+# payment_mock/go.mod, which find returned first, and deploy rsynced it over
+# webapp/go — replacing the app's main.go and go.mod on the server. Without that
+# mapping, several modules are only accepted when exactly one ends like GO_DIR.
+deploy_local_src() {
+  local root rel="" cands c hit="" n=0
+  root=$(local_repo_root)
+  if [ -n "${GO_DIR:-}" ] && [ -n "${SRC_DIR:-}" ]; then
+    if [ "$GO_DIR" = "$SRC_DIR" ]; then rel=.
+    elif [ "${GO_DIR#"$SRC_DIR"/}" != "$GO_DIR" ]; then rel="${GO_DIR#"$SRC_DIR"/}"
+    fi
+    if [ -n "$rel" ] && [ -f "$root/$rel/go.mod" ]; then
+      printf '%s\n' "$root/$rel"
+      return 0
+    fi
+  fi
+  cands=$(cd "$root" && find . -maxdepth 4 -name go.mod -not -path "*/bench*" -not -path "*/vendor/*" | sed 's|/go\.mod$||' | LC_ALL=C sort)
+  [ -n "$cands" ] || die "no local go.mod found under $root"
+  if [ "$(printf '%s\n' "$cands" | wc -l | tr -d ' ')" = 1 ]; then
+    printf '%s/%s\n' "$root" "${cands#./}"
+    return 0
+  fi
+  for c in $cands; do
+    case "${GO_DIR:-}" in */"${c#./}") hit="$c"; n=$((n + 1)) ;; esac
+  done
+  [ "$n" = 1 ] || die "several Go modules here ($(printf '%s ' $cands)) and none maps to the server's GO_DIR (${GO_DIR:-unset}) unambiguously — deploy by hand"
+  printf '%s/%s\n' "$root" "${hit#./}"
+}
+
+# deploy_tree <local go dir> -- the rest of the app beside the Go module: sql/
+# (POST /api/initialize runs the server's sql/init.sh, so a new index in
+# 1-schema.sql did nothing until copied by hand), public/, other scripts. Only
+# git-tracked files, and no --delete: the >10MB build outputs go --new left on
+# the server stay. etc/ is etc push's job (it reloads what changed); hosts/ is
+# env push's. Skipped when this checkout doesn't mirror SRC_DIR.
+deploy_tree() {
+  local root rel
+  root=$(local_repo_root)
+  [ -n "${SRC_DIR:-}" ] && [ -n "${GO_DIR:-}" ] || return 0
+  if [ "$GO_DIR" = "$SRC_DIR" ]; then rel=.
+  else
+    rel="${GO_DIR#"$SRC_DIR"/}"
+    [ "$rel" != "$GO_DIR" ] || return 0
+  fi
+  if [ "$1" != "$root/$rel" ]; then
+    warn "this checkout doesn't mirror $SRC_DIR — shipping the Go module only (sql/ and the rest are not sent)"
+    return 0
+  fi
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  say "rsync tracked files -> $APP:$SRC_DIR/ (sql/, public/, ...; etc/ goes through etc push)"
+  local files
+  files=$(cd "$root" && git ls-files -z -- . ':!:.github' ':!:etc' ':!:hosts' ':!:isukit.hosts' ':!:isukit.conf' | tr '\0' '\n')
+  if [ "$APP" = "local" ]; then
+    printf '%s\n' "$files" | rsync -a --files-from=- "$root/" "$SRC_DIR/"
+  else
+    printf '%s\n' "$files" | rsync -a --files-from=- -e "ssh ${SSH_OPTS:-}" "$root/" "$APP:$SRC_DIR/"
+  fi || die "rsync of the repo to $APP:$SRC_DIR failed"
+}
+
 deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it there
   local force="$1"
   local local_src
-  local_src=$(find . -maxdepth 4 -name go.mod -not -path "*/bench*" -not -path "*/vendor/*" | head -1)
-  [ -n "$local_src" ] || die "no local go.mod found under $(pwd)"
-  local_src=$(dirname "$local_src")
+  local_src=$(deploy_local_src) || return 1
 
   if [ "${APP_EXEC_RAW#*compose}" != "${APP_EXEC_RAW:-}" ]; then
     # COMPOSE MODE: app unit runs docker compose — rsync source, then up --build.
@@ -73,16 +132,20 @@ deploy_one() { # deploy_one <force 0|1> -- ship the source to $APP and build it 
   fi
   local exec_base
   exec_base=$(basename "$out")
+  [ "$APP" = "local" ] || rules_allow_host "$APP"
+  deploy_tree "$local_src"
   say "rsync $local_src/ -> $APP:$GO_DIR/"
   if [ "$APP" = "local" ]; then
     rsync -a --exclude .git --exclude "$exec_base" "$local_src/" "$GO_DIR/"
   else
-    rules_allow_host "$APP"
     rsync -a --exclude .git --exclude "$exec_base" -e "ssh ${SSH_OPTS:-}" "$local_src/" "$APP:$GO_DIR/"
   fi
   say "building -> $out"
   local tmp="/tmp/isukit-build.$$"
-  rsh "$APP" "cd $GO_DIR && go build -o $tmp . 2>&1 | head -40 && echo BUILD_OK" || die "build failed — see the compiler output above"
+  # pipefail: `go build | head` used to report head's success, so a failed build
+  # went on to `install` a binary that was never written. ssh runs no login
+  # shell, so add the usual Go homes (isucon14: /home/isucon/local/golang/bin)
+  rsh "$APP" "set -o pipefail; export PATH=\"\$PATH:/usr/local/go/bin:\$HOME/local/golang/bin:/home/isucon/local/golang/bin:\$HOME/go/bin\"; cd $GO_DIR && go build -o $tmp . 2>&1 | head -40" || die "build failed on $APP — see the compiler output above"
   rsh "$APP" "sudo -n install -m 0755 -o ${APP_USER:-isucon} $tmp '$out' && rm -f $tmp" || die "install failed — check sudo permissions for ${APP_USER:-isucon} on $APP"
 }
 

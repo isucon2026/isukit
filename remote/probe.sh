@@ -113,7 +113,8 @@ GOMOD=""
 for g in $GOMODS; do [ "${g#*/webapp/}" != "$g" ] && GOMOD="$g" && break; done
 [ -z "$GOMOD" ] && GOMOD=$(printf "%s\n" $GOMODS | head -1)
 S GO_DIR "$(dirname "${GOMOD:-/}" 2>/dev/null)"
-S GO_VER "$(go version 2>/dev/null || echo none)"
+# same Go homes deploy adds: ssh gives no login shell, so PATH alone said "none"
+S GO_VER "$(PATH="$PATH:/usr/local/go/bin:$HOME/local/golang/bin:/home/isucon/local/golang/bin:$HOME/go/bin" go version 2>/dev/null || echo none)"
 
 # --- web server: nginx is usual, Envoy happened (isucon10-final), h2o/caddy possible
 WEB=""; WEB_SRC=""
