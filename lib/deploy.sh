@@ -217,6 +217,18 @@ isukit final strip --apply to revert them, THEN finalize.
 Override with ISUKIT_OVERRIDE='<reason>' if you know what you are doing."
 }
 
+finalize_split_guard() { # finalize must never reboot into a host running what its roles give to another
+  local split
+  split=$(split_findings)
+  [ -n "$split" ] || return 0
+  split_warn "$split"
+  printf '%s\n' "$split" | awk -F'\t' '$2 == "app"' | grep -q . || return 0
+  rules_override finalize-split "finalizing with the app's units on a host without the app role" && return 0
+  die "a host without the app role still runs the app's units (above) — on a split they work the shared DB
+next to the real app and fail the scoring run. Run the fix lines above, THEN finalize.
+Override with ISUKIT_OVERRIDE='<reason>' if you know what you are doing."
+}
+
 cmd_finalize() {
   load
   lock_guard finalize
@@ -226,11 +238,7 @@ cmd_finalize() {
   hosts="$(hosts_all | tr '\n' ' ' | sed 's/^ *//;s/ *$//')"
   local h
   [ "$(printf '%s\n' $hosts | wc -l | tr -d ' ')" -gt 1 ] && warn "multiple hosts ($hosts) — reboot/return order across them is NOT guaranteed, never assume cross-host startup dependencies"
-  local left
-  left=$(db_left_enabled)
-  [ -z "$left" ] || printf '%s\n' "$left" | while read -r h u; do
-    warn "$h has no db role but $u is still ENABLED — it comes back on this reboot: ssh $h sudo systemctl disable --now $u"
-  done
+  finalize_split_guard
   cmd_final_check || warn "the final check found things that still cost score (above) — isukit final apply, bench, then finalize"
   say "1/4 turning measurement logging OFF (it costs real score)"
   cmd_logs off

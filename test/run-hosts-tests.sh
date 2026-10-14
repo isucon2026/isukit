@@ -523,10 +523,10 @@ t_probe_fleet_compares_hosts() {
     cat >/dev/null
     case "$1" in
       isu2) printf 'APP_UNIT=other.service\nSRC_DIR=/home/isucon/webapp\nGO_DIR=\nWEB_SERVER=nginx\nDB_SERVER=mysql\n' ;;
-      isu3) printf 'APP_UNIT=isu-go.service\nSRC_DIR=/home/isucon/webapp\nGO_DIR=\nWEB_SERVER=\nDB_SERVER=mysql\n' ;;
+      isu3) printf 'APP_UNIT=isu-go.service\nSRC_DIR=/home/isucon/webapp\nGO_DIR=\nWEB_SERVER=\nDB_SERVER=mysql\nMYSQL_OK=%s\n' "${ISU3_MYSQL_OK:-1}" ;;
     esac
   }
-  printf 'SRC_DIR=/home/isucon/webapp\nGO_DIR=\n' >> .isukit/manifest
+  printf 'SRC_DIR=/home/isucon/webapp\nGO_DIR=\nMYSQL_OK=0\n' >> .isukit/manifest
   cp .isukit/manifest .isukit/manifest.isu1
   probe_fleet ""
   check -f .isukit/manifest.isu2
@@ -534,14 +534,83 @@ t_probe_fleet_compares_hosts() {
   check -n "$(grep "warn: isu2: APP_UNIT is 'other.service'" "$CALLS")"
   check -n "$(grep 'warn: isu2 has no db role but mysql is running there' "$CALLS")"
   check -z "$(grep 'warn: isu3' "$CALLS")"
+  check -z "$(grep 'cannot reach mysql' "$CALLS")"     # isu1 has no db role: its MYSQL_OK=0 is no news (#33)
+  : > "$CALLS"; ISU3_MYSQL_OK=0 probe_fleet ""
+  check -n "$(grep 'warn: isu3 (db): cannot reach mysql' "$CALLS")"
+  check -z "$(grep 'warn: isu1.*cannot reach mysql' "$CALLS")"
 }
 
-t_db_left_enabled_reported() {
+# Split sanity runs the real remote/split-check.sh against the systemctl stub,
+# one isucon14-shaped fixture per host: the image's units, and what each host
+# has enabled / running (both files: bare unit names, one per line).
+split_fleet() { # split_fleet <isu1-on> <isu2-on> <isu3-on> -- "on" = enabled and running
+  local h on i=1
+  for on in "$@"; do
+    h="isu$i"; i=$((i+1))
+    rm -rf "$WORK/fx/$h"; mkdir -p "$WORK/fx/$h/units"
+    cp "$HERE/fixtures/isucon14/units/"*.service "$WORK/fx/$h/units/"
+    printf '%s\n' $on > "$WORK/fx/$h/enabled"; cp "$WORK/fx/$h/enabled" "$WORK/fx/$h/active"
+  done
+  printf 'APP_UNIT=isuride-go.service\nAPP_SIBLINGS=isuride-matcher.service\nWEB_SERVER=nginx\nDB_SERVER=\n' > .isukit/manifest
+  cp .isukit/manifest .isukit/manifest.isu1
+  printf 'DB_SERVER=mysql\n' > .isukit/manifest.isu3
+  load
+  rsh_stdin() { printf '%s stdin: split-check\n' "$1" >> "$CALLS"; ISUKIT_FIXTURE="$WORK/fx/$1" PATH="$HERE/bin:$PATH" bash -s; }
+}
+
+t_split_findings() {
+  setup_state isu1 "" "$ROLES"
+  # the rehearsal: isu3 (db) still runs the image's app, matcher and nginx;
+  # isu2 left mysql enabled; every app unit still Requires=mysql.service
+  split_fleet "isuride-go isuride-matcher nginx" "isuride-go isuride-matcher mysql" "isuride-go isuride-matcher nginx mysql"
+  local f
+  f=$(split_findings)
+  check -n "$(printf '%s\n' "$f" | grep -F "isu3	app	isu3 has no app role but the app's units are on: isuride-go.service (enabled, running) isuride-matcher.service (enabled, running)")"
+  check -n "$(printf '%s\n' "$f" | grep -F "	ssh isu3 sudo systemctl disable --now isuride-go.service isuride-matcher.service")"
+  check -n "$(printf '%s\n' "$f" | grep -F "isu3	web	" | grep -F "ssh isu3 sudo systemctl disable --now nginx")"
+  check -n "$(printf '%s\n' "$f" | grep -F "isu2	db	" | grep -F "ssh isu2 sudo systemctl disable --now mysql")"
+  check -n "$(printf '%s\n' "$f" | grep -F "isu1	dep	isu1: isuride-go.service has Requires=mysql.service" \
+    | grep -F "ssh isu1 \"sudo sed -i --follow-symlinks '/^Requires=/s/mysql.service//' /etc/systemd/system/isuride-go.service && sudo systemctl daemon-reload\"")"
+  check -z "$(printf '%s\n' "$f" | grep -E '^isu[12]	app')"     # app hosts may run the app
+  check -z "$(printf '%s\n' "$f" | grep -E '^isu1	(web|db)')"    # isu1 is web; mysql is off there
+  check -z "$(printf '%s\n' "$f" | grep -E '^isu3	(db|dep)')"    # the db host keeps mysql and its deps
+}
+
+t_split_finalize_guard() {
+  setup_state isu1 "" "$ROLES"
+  split_fleet "isuride-go isuride-matcher nginx" "isuride-go isuride-matcher" "isuride-matcher nginx mysql"
+  local out rc
+  out=$( ( finalize_split_guard ) 2>&1 ); rc=$?
+  check "$rc" != 0                                   # a stray matcher fails the scoring run: refuse
+  check -n "$(printf '%s' "$out" | grep -F 'still runs the app')"
+  ( ISUKIT_OVERRIDE="checked by hand" finalize_split_guard ) >/dev/null 2>&1; rc=$?
+  check "$rc" = 0
+  check -n "$(grep finalize-split .isukit/overrides.log)"
+  split_fleet "isuride-go isuride-matcher nginx" "isuride-go isuride-matcher" "nginx mysql"
+  ( finalize_split_guard ) >/dev/null 2>&1; rc=$?
+  check "$rc" = 0                                    # nginx on the db host only warns
+  check -n "$(grep 'warn: isu3 has no web role but nginx (enabled, running)' "$CALLS")"
+}
+
+t_split_needs_hosts_file() {
+  setup_state isu1 "isu2"                            # pre-roles layout: nothing is split
+  load
+  check -z "$(split_findings)"
+  check -z "$(grep split-check "$CALLS")"
+}
+
+t_probe_siblings_extra_units() {
   setup_state isu1 "" "$ROLES"
   load
-  rsh() { printf '%s %s\n' "$1" "${*:2}" >> "$CALLS"; case "$1 $*" in "isu2 "*is-enabled*) echo enabled ;; *is-enabled*) echo disabled ;; esac; return 0; }
-  check "$(db_left_enabled)" = "isu2 mysql"
-  check -z "$(grep '^isu3 .*is-enabled' "$CALLS")"   # the db host itself is not asked
+  APP_UNIT=isuride-go.service; APP_SIBLINGS=isuride-matcher.service
+  probe_siblings                                     # plain probe: says how, writes nothing
+  check -n "$(grep -F "warn:     echo \"EXTRA_UNITS='isuride-matcher.service'\" >> .isukit/config" "$CALLS")"
+  check -n "$(grep "^EXTRA_UNITS=''" .isukit/config)"
+  PROBE_FILLS_EXTRA_UNITS=1 probe_siblings           # go: an empty EXTRA_UNITS is filled
+  check -n "$(grep "^EXTRA_UNITS='isuride-matcher.service'" .isukit/config)"
+  : > "$CALLS"; load; APP_SIBLINGS=isuride-matcher.service
+  probe_siblings                                     # already there: silent
+  check ! -s "$CALLS"
 }
 
 t_final_check_per_role() {
@@ -843,7 +912,10 @@ case_ stale-pprof-never-saved         t_stale_pprof_never_saved
 case_ show-out-of-range-errors        t_show_out_of_range
 case_ db-checks-survive-reprobe       t_db_checks_survive_reprobe
 case_ probe-fleet-compares-hosts      t_probe_fleet_compares_hosts
-case_ db-left-enabled-reported        t_db_left_enabled_reported
+case_ split-findings                  t_split_findings
+case_ split-finalize-guard            t_split_finalize_guard
+case_ split-needs-hosts-file          t_split_needs_hosts_file
+case_ probe-siblings-extra-units      t_probe_siblings_extra_units
 case_ final-check-per-role            t_final_check_per_role
 case_ finalize-http-per-role          t_finalize_http_per_role
 case_ legacy-hosts-moves-to-shared    t_legacy_hosts_moves_to_shared

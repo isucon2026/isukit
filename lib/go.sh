@@ -130,7 +130,8 @@ cmd_go() {
     cmd_host bench "${benchh:-$apph}" "$raw_opts"
   fi
 
-  cmd_probe
+  # an empty EXTRA_UNITS is filled with the app's enabled siblings (isuride-matcher)
+  PROBE_FILLS_EXTRA_UNITS=1 cmd_probe
   # before setup / logs on: the config baseline must be the server as handed out
   [ -n "$new_slug" ] && repo_new_baseline "$new_slug" "$invite"
   cmd_setup

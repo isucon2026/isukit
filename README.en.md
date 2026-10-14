@@ -250,7 +250,10 @@ ISUCON's real systemd units and configs.
   <port>` — if you hand-roll a port flag, you need both forms.
 - `EXTRA_UNITS` (config) is a space-separated list of extra units that
   `restart`/`finalize` also restart alongside the detected `APP_UNIT` —
-  matcher/mock/simulator services some years ship as separate units.
+  matcher/mock/simulator services some years ship as separate units. `probe`
+  reports the enabled units next to the app (same `WorkingDirectory=`,
+  `EnvironmentFile=` or name prefix, e.g. isuride-matcher) as `APP_SIBLINGS`;
+  `go` writes them into an empty `EXTRA_UNITS`, `probe` prints the line to add.
 - Multiple instances: `isukit host role <target> <roles>` writes `.isukit/hosts`
   with each host's roles (`app`, `web`, `db`). deploy / restart / pprof go to app
   hosts, nginx logging and alp to web hosts, the slow log and slow to db hosts,

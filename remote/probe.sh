@@ -80,6 +80,31 @@ if [ -n "$APPUNIT" ]; then
   S APP_USER     "$(systemctl show -p User --value "$APPUNIT")"
 fi
 
+# --- the app's siblings: years ship helpers next to the app (isucon14's
+# isuride-matcher.service polls the app every ISUCON_MATCHING_INTERVAL). Enabled
+# local units that share the app's WorkingDirectory=, EnvironmentFile= or name
+# prefix (isuride-*) belong in EXTRA_UNITS, or deploy/restart leave them on the
+# old env — and a host without the app role must not run them at all.
+SIBS=""
+if [ -n "$APPUNIT" ]; then
+  a_wd=$(systemctl show -p WorkingDirectory --value "$APPUNIT" 2>/dev/null)
+  a_env=$(systemctl show -p EnvironmentFiles --value "$APPUNIT" 2>/dev/null | sed "s/ (ignore_errors=[a-z]*)//g")
+  a_pre="${APPUNIT%%[-.]*}"
+  for u in $UNITS; do
+    [ "$u" = "$APPUNIT" ] && continue
+    is_denied "$u" && continue
+    [ "$(systemctl is-enabled "$u" 2>/dev/null)" = "enabled" ] || continue
+    [ "$(systemctl show -p Type --value "$u" 2>/dev/null)" = "oneshot" ] && continue
+    wd=$(systemctl show -p WorkingDirectory --value "$u" 2>/dev/null)
+    envf=$(systemctl show -p EnvironmentFiles --value "$u" 2>/dev/null | sed "s/ (ignore_errors=[a-z]*)//g")
+    if { [ -n "$a_wd" ] && [ "$wd" = "$a_wd" ]; } || { [ -n "$a_env" ] && [ "$envf" = "$a_env" ]; } \
+       || { [ "${#a_pre}" -ge 3 ] && [ "${u%%[-.]*}" = "$a_pre" ]; }; then
+      SIBS="$SIBS $u"
+    fi
+  done
+fi
+S APP_SIBLINGS "${SIBS# }"
+
 # --- process manager. isucon5-final ran every language under supervisord, so the only
 # systemd-visible unit is supervisor.service itself. `systemctl restart supervisor` does
 # restart the app, so keeping it as APP_UNIT is correct -- but it is the manager, not the

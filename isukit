@@ -234,7 +234,10 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
                                          findings stay yours to judge
     isukit finalize                     dies if any labelled measurement commit is
                                          still live in HEAD (isukit final strip --apply
-                                         first) -- then: logs off -> reboot ALL hosts ->
+                                         first), or if a host without the app role still
+                                         runs the app's units (warns on nginx / mysql /
+                                         a Requires=mysql the roles do not need there)
+                                         -- then: logs off -> reboot ALL hosts ->
                                          verify units -> verify HTTP (web hosts via
                                          nginx, app hosts directly; FINAL_CHECK_PATH,
                                          default /) -> score (restart order across
@@ -266,6 +269,7 @@ isukit — repo-agnostic ISUCON bootstrap + measurement loop
   CONFIG (.isukit/config)
     SSH_OPTS       extra ssh/scp flags applied to every remote call
     EXTRA_UNITS    space-separated extra units 'restart'/'finalize' also restart
+                   (go fills an empty one with probe's APP_SIBLINGS, e.g. isuride-matcher)
     EXTRA_HOSTS    space-separated extra app instances (used until .isukit/hosts exists)
     BENCH_MODE     auto (ssh + BENCH_CMD) or manual (portal, paste the score)
     ALP_MATCHES    comma-separated alp -m regexes to use instead of derived ones;
