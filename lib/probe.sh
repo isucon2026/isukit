@@ -94,7 +94,12 @@ db_left_enabled() { # print each non-db host where the fleet's DB unit is still 
 
 cmd_unit() {
   need_state
-  local name="${1:-}"; [ -n "$name" ] || die "usage: isukit unit <systemd-unit-name>"
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    [ -f "$STATE/manifest" ] && . "$STATE/manifest" 2>/dev/null
+    [ -n "${APP_CANDIDATES:-}" ] && say "candidates: $APP_CANDIDATES"
+    name=$(ask "systemd unit name (e.g. isuride-go.service)") || die "usage: isukit unit <systemd-unit-name>"
+  fi
   if grep -q "^APP_UNIT_OVERRIDE=" "$CONF" 2>/dev/null; then
     sed -i.bak "s|^APP_UNIT_OVERRIDE=.*|APP_UNIT_OVERRIDE=$name|" "$CONF"; rm -f "$CONF.bak"
   else

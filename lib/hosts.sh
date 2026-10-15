@@ -136,6 +136,15 @@ cmd_host() {
   resolve_hosts_file
   local role="${1:-}" target="${2:-}" opts=""
   [ "$#" -gt 2 ] && { shift 2; opts="$*"; }
+  case "$role" in
+    app)   [ -n "$target" ] || target=$(ask "app ssh target (e.g. ubuntu@1.2.3.4)") || true ;;
+    bench) [ -n "$target" ] || target=$(ask "bench ssh target (e.g. ubuntu@1.2.3.4)") || true ;;
+    add)   [ -n "$target" ] || target=$(ask "ssh target to add (e.g. ubuntu@1.2.3.4)") || true ;;
+    role)
+      [ -n "$target" ] || target=$(ask "ssh target to assign roles to") || true
+      [ -n "$opts" ]   || opts=$(ask "roles (comma-separated: $KNOWN_ROLES)") || true
+      ;;
+  esac
   # If go's per-host ssh_config is in play (SSH_OPTS carries -F) and the caller isn't
   # replacing it wholesale (no -F in the new opts), redirect app/bench -i/-p into that
   # ssh_config's Host block instead of clobbering the global SSH_OPTS. Skip when target

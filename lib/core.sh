@@ -10,6 +10,20 @@ warn() { printf '\033[33m~~ %s\033[0m\n' "$*" >&2; }
 
 is_blank() { [ -z "$(printf '%s' "$1" | tr -d '[:space:]')" ]; } # empty or whitespace-only
 
+# ask "<prompt text>" [default] -> prints the answer on stdout, returns 1 if no tty
+# /dev/tty (not stdin) because the documented install path pipes stdin
+# (curl | bash -s -- go ...), so [ -t 0 ] is always false there.
+# ISUKIT_NO_PROMPT=1 is the escape hatch for scripts/CI.
+ask() {
+  [ -e /dev/tty ] && [ -r /dev/tty ] || return 1
+  [ "${ISUKIT_NO_PROMPT:-0}" = 1 ] && return 1
+  printf '%s%s: ' "$1" "${2:+ [$2]}" >/dev/tty
+  IFS= read -r _ans </dev/tty || return 1
+  [ -n "$_ans" ] || _ans="${2:-}"
+  [ -n "$_ans" ] || return 1
+  printf '%s\n' "$_ans"
+}
+
 normalize_ws_arg() { # normalize_ws_arg <token> -- Unicode whitespace-lookalikes -> ASCII space; ZWSP/BOM dropped
   printf '%s' "$1" | LC_ALL=C sed \
     -e $'s/\xc2\xa0/ /g' \

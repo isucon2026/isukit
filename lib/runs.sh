@@ -265,19 +265,18 @@ cmd_bench_manual() {
     say "BENCH_MODE=manual — run the benchmark from the ISUCON portal, then either:"
     say "  rerun:  isukit bench --score <N>"
     say "  or paste the score below"
-    if [ -t 0 ]; then
+    if [ -e /dev/tty ] && [ -r /dev/tty ] && [ "${ISUKIT_NO_PROMPT:-0}" != 1 ]; then
       if [ "$measure" = 1 ]; then
         # an interactive run gets the full window: samplers from now, pprof from
         # when the portal says the load has started
         say "measuring this run (logs are on): logs emptied, samplers on every host"
         run_reset 1; sampled=1
-        printf 'enqueue the run in the portal; press Enter once it is RUNNING (starts the CPU profile): ' >&2
-        read -r _ || true
+        printf 'enqueue the run in the portal; press Enter once it is RUNNING (starts the CPU profile): ' >/dev/tty
+        read -r _ </dev/tty || true
         mkdir -p "$run"
         pprof_begin "$run"
       fi
-      printf 'portal score: ' >&2
-      read -r score || true
+      score=$(ask "portal score") || true
     fi
   fi
   [ -n "$score" ] || die "no score given — rerun with: isukit bench --score <N>"
