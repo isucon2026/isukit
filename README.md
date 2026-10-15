@@ -20,6 +20,12 @@ Go が無い環境では、従来どおり bash 版も使える：
     curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
       | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
 
+IP やリポジトリURLがまだ分からない（競技開始前）なら、引数を省略すればその場で対話的に聞かれる：
+
+    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash -s -- go
+
+tty が無い環境（CI等）では `ISUKIT_NO_PROMPT=1` でプロンプトを無効化できる。
+
     ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port]
 
 チームのリポジトリがまだ無い（競技開始直後）なら `--new` で作る。サーバーの webapp をコードのベースライン、`/etc` の設定と env ファイルを設定のベースラインとして、private リポジトリを作って push する（手順は [`RUNBOOK.md`](RUNBOOK.md) §3）：

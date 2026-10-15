@@ -7,11 +7,9 @@
 
 set -euo pipefail
 
-die()  { printf '\033[31m!! %s\033[0m\n' "$*" >&2; exit 1; }
-say()  { printf '\033[36m:: %s\033[0m\n' "$*" >&2; }
-warn() { printf '\033[33m~~ %s\033[0m\n' "$*" >&2; }
-
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+. "$here/../lib/core.sh"
 envfile="$here/prestage.env"
 [ -f "$envfile" ] || die "no $envfile — run launch/prestage.sh first"
 # shellcheck source=/dev/null
@@ -29,6 +27,10 @@ while [ $# -gt 0 ]; do
     *) die "unknown arg: $1 (usage: launch.sh --ami <id> --type <type> --count <n> [--name-prefix p] [--root-gb n] [--yes])" ;;
   esac
 done
+
+[ -n "$ami" ]   || ami=$(ask "AMI id (from the day-of manual, e.g. ami-0abc123def)") || true
+[ -n "$type" ]  || type=$(ask "instance type (e.g. t3.large)") || true
+[ -n "$count" ] || count=$(ask "instance count" "1") || true
 
 [ -n "$ami" ]   || die "missing --ami <ami-id> — the manual publishes this at contest start, don't guess"
 [ -n "$type" ]  || die "missing --type <instance-type> — the manual specifies this, don't guess"
@@ -66,8 +68,9 @@ warn "launching MORE or OTHER instances than the manual specifies is a rules vio
 warn "instance type and security groups can't be changed after launch — this is your last chance to get them right."
 
 if [ "$yes" -ne 1 ]; then
-  printf 'type "yes" to launch: ' >&2
-  read -r confirm
+  [ -e /dev/tty ] && [ -r /dev/tty ] && [ "${ISUKIT_NO_PROMPT:-0}" != 1 ] || die "aborted"
+  printf 'type "yes" to launch: ' >/dev/tty
+  read -r confirm </dev/tty
   [ "$confirm" = "yes" ] || die "aborted"
 fi
 

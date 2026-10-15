@@ -69,6 +69,9 @@ ISUKIT_LIB="$(kit_dir)/lib"
 usage() { cat >&2 <<'EOF'
 isukit — repo-agnostic ISUCON bootstrap + measurement loop
 
+  Missing required args (repo URL, ssh targets, unit name, ...) are prompted
+  for interactively when a tty is available; set ISUKIT_NO_PROMPT=1 to disable.
+
   ONE COMMAND
     isukit go <repo-url> <app-host> [bench-host] [-i keyfile] [-p port] [--ssh-opts 'raw']
                                          clone, probe, install tools, enable logs

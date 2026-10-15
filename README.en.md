@@ -23,6 +23,13 @@ this is also a genuine one-liner from zero to a probed, instrumented host:
     curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
       | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
 
+Don't know your IPs or repo URL yet (pre-contest)? Drop the args and it prompts
+for each one interactively:
+
+    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash -s -- go
+
+Set `ISUKIT_NO_PROMPT=1` to disable prompting (scripts/CI, no tty).
+
     ./isukit go <repo-url> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port]
 
 No team repo yet (T+0)? `--new` builds one: the server's webapp as the code

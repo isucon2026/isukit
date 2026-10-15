@@ -20,6 +20,7 @@ die_unplaced() { # die_unplaced <bad-arg> -- self-diagnosing die: full argv dump
 
 cmd_go() {
   local -a full_argv=(go "$@")
+  local usage_msg="usage: isukit go <repo-url | --new owner/repo> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port] [--ssh-opts 'raw'] [--invite user,user] [--debug-args]"
   # --new <owner/name>: no team repo yet — build it from the server (see repo_new_*)
   local new_slug=""
   if [ "${1:-}" = "--new" ]; then
@@ -29,8 +30,22 @@ cmd_go() {
     set -- "--new:$new_slug" "$@"
   fi
   local url="${1:-}" apph="${2:-}"
-  [ -n "$url" ] && [ -n "$apph" ] || die "usage: isukit go <repo-url | --new owner/repo> <app-ssh-target> [bench-ssh-target] [-i keyfile] [-p port] [--ssh-opts 'raw'] [--invite user,user] [--debug-args]"
-  shift 2 || true
+  local had_url=0 had_apph=0
+  [ -n "$url" ] && had_url=1
+  [ -n "$apph" ] && had_apph=1
+  if [ -z "$url" ]; then
+    url=$(ask "repo URL, or owner/repo to create a new one") || die "$usage_msg"
+    case "$url" in
+      *:*) ;;
+      */*/*) ;;
+      */*) new_slug="$url"; url="" ;;
+    esac
+  fi
+  [ -n "$apph" ] || apph=$(ask "app ssh target (e.g. ubuntu@1.2.3.4)") || die "$usage_msg"
+  # shift as many of the original 1-2 positionals as were actually present —
+  # prompted-in values never occupied a position in "$@" to begin with.
+  local shift_n=$((had_url + had_apph))
+  [ "$shift_n" -gt 0 ] && { shift "$shift_n" || true; }
 
   local a
   for a in "$@"; do
@@ -89,8 +104,21 @@ cmd_go() {
         shift ;;
     esac
   done
+  if [ -z "$benchh" ]; then
+    benchh=$(ask "bench ssh target" "$apph") || benchh=""
+  fi
+
+  if [ -z "$keyfile" ]; then
+    local default_key=""
+    [ -f "$HOME/.ssh/id_rsa" ] && default_key="$HOME/.ssh/id_rsa"
+    keyfile=$(ask "ssh identity file" "$default_key") || keyfile=""
+  fi
   if [ -n "$keyfile" ]; then
     keyfile=$(expand_tilde "$keyfile")
+  fi
+
+  if [ -n "$new_slug" ] && [ -z "$invite" ]; then
+    invite=$(ask "teammate github handles, comma-separated (blank = none)") || invite=""
   fi
 
   if [ -n "$new_slug" ]; then
