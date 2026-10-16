@@ -18,15 +18,18 @@ Without Go, the bash kit still installs as before:
 
 Clones/updates into `${ISUKIT_HOME:-$HOME/.isukit-src}` and symlinks `isukit`
 onto PATH. Args after the script forward to the freshly installed `isukit`, so
-this is also a genuine one-liner from zero to a probed, instrumented host:
+this is also a genuine one-liner from zero to a probed, instrumented host.
+
+Don't know your repo URL or ssh targets yet? That's the contest-day path: drop
+the args and it prompts for the repo URL, the ssh targets and the key as it
+goes.
+
+    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash -s -- go
+
+Already know those values and want to skip the questions? Pass them directly:
 
     curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
       | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
-
-Don't know your IPs or repo URL yet (pre-contest)? Drop the args and it prompts
-for each one interactively:
-
-    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash -s -- go
 
 Set `ISUKIT_NO_PROMPT=1` to disable prompting (scripts/CI, no tty).
 
@@ -102,6 +105,11 @@ left out and reported, so no push can silently overwrite one host with another.
 
 `isukit probe` picks the app's systemd unit with a scored heuristic, not a
 guarantee — see "Why it probes instead of assuming" below. If it picked wrong:
+
+    isukit unit
+
+Prints the probed `APP_CANDIDATES` first, then prompts interactively. Already
+know the right unit and want to skip the question? Name it directly:
 
     isukit unit <systemd-unit-name>   # override + re-probe
 

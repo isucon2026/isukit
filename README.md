@@ -17,12 +17,14 @@ Go が無い環境では、従来どおり bash 版も使える：
 
 `${ISUKIT_HOME:-$HOME/.isukit-src}` に clone / 更新し、`isukit` を PATH の通る場所にシンボリックリンクする。スクリプトの後ろに続けた引数はそのままインストール直後の `isukit` に渡るので、これは「ゼロから、調査・計測可能な状態のホストまで」を1行で終わらせる本物のワンライナーでもある。
 
-    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
-      | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
-
-IP やリポジトリURLがまだ分からない（競技開始前）なら、引数を省略すればその場で対話的に聞かれる：
+競技開始前で IP もリポジトリURLもまだ分からないなら、これが本来の入り口：引数を省略すれば、リポジトリURL・ssh先・鍵をその場で対話的に聞かれる。
 
     curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh | bash -s -- go
+
+IP もリポジトリURLも既に分かっていて、質問をスキップしたいなら、引数を直接渡す：
+
+    curl -fsSL https://raw.githubusercontent.com/isucon2026/isukit/main/install.sh \
+      | bash -s -- go <repo-url> ubuntu@<ip> -i ~/.ssh/key.pem
 
 tty が無い環境（CI等）では `ISUKIT_NO_PROMPT=1` でプロンプトを無効化できる。
 
@@ -61,6 +63,10 @@ tty が無い環境（CI等）では `ISUKIT_NO_PROMPT=1` でプロンプトを�
 `adopt` は `nginx.conf`・有効なサイト設定・`[mysqld]` を含む `.cnf`・アプリの unit ファイルを自動で探し、それぞれ `<サーバーの repo>/etc/`（例：`etc/nginx/sites-available/isucon.conf`）に移して `/etc` からシンボリックリンクを張る。置き換えたファイルは `/etc/isukit-orig/<同じパス>` にバックアップする（`sites-enabled/*` などの include で読み込まれないよう、元の場所には置かない）。そのあと層ごとに確認し（`nginx -t` + reload、`daemon-reload`、mysql 再起動 + mysql ユーザーがリンク先を読めるか + 設定値が実際に反映されているか）、失敗した層だけ元に戻す。Ubuntu では、mysqld がリンク先を読めるように AppArmor の許可も追加する。repo にすでに同じファイルがあれば（repo からサーバーを作り直す場合）、repo 側が優先される。手元の `etc/` にあるファイルは adopt の前にその台のサーバー側 repo へ送る（無いものだけ）ので、後から加わった台も自分の初期設定ではなくチームの設定から始まる。台の役割（`isukit.hosts`、無ければ全役割）に応じて、nginx の設定は web の台、`[mysqld]` の `.cnf` は db の台、アプリの unit（`APP_UNIT` / `EXTRA_UNITS`）は app の台でだけリンクし、`etc status` もそれだけを確かめる。`etc push` はファイルを全台のサーバー側 repo に送るが、reload / restart はその役割を持つ台で、サービスが動いているときだけ行う（止まっている nginx は `nginx inactive here — not reloaded` と出るだけで失敗にしない。`nginx -t` の失敗と reload の失敗は別に報告する）。`/etc` がリンク済みなら、`deploy` が先に `etc push` を行う。サーバー側の repo は、probe で見つけた `SRC_DIR` の git ルート（`.isukit/config` の `ETC_REPO` で上書き可）。サーバー側で動くスクリプトは `remote/` にある。複数台では `etc pull` が全台から取り込み、台ごとに中身が違うファイル（db の台だけ調整した `mysqld.cnf` など）は、どちらかで黙って上書きしないよう取り込まずに知らせる。
 
 `isukit probe` はスコア付きヒューリスティックでアプリのsystemd unitを選ぶ。保証ではない — 理由は下の「なぜリポジトリを読まずにサーバーに聞くのか」を参照。選択が外れていたら：
+
+    isukit unit
+
+`APP_CANDIDATES`（probeが出したスコア付き候補）を表示したうえで対話的に聞かれる。候補が分かっていて質問をスキップしたいなら、直接指定する：
 
     isukit unit <systemd-unit-name>   # 上書き + 再probe
 
